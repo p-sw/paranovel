@@ -1,0 +1,28 @@
+services:
+  paranovel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${PARANOVEL_IMAGE:-paranovel:local}
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      DB_PATH: /data/paranovel.sqlite
+      PROMPTS_DIR: /app/prompts
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      AI_WRITING_MODEL: ${AI_WRITING_MODEL:-google/gemini-3.8-flash}
+      AI_IMPROVEMENT_MODEL: ${AI_IMPROVEMENT_MODEL:-openai/gpt-5.6-luna}
+      OPENROUTER_EMBEDDING_MODEL: ${OPENROUTER_EMBEDDING_MODEL:-openai/text-embedding-3-small}
+      OPENROUTER_EMBEDDING_DIMENSIONS: ${OPENROUTER_EMBEDDING_DIMENSIONS:-1536}
+      AI_MANDATORY_CONTEXT_MAX_CHARS: ${AI_MANDATORY_CONTEXT_MAX_CHARS:-400000}
+    volumes:
+      - paranovel_data:/data
+
+volumes:
+  paranovel_data:

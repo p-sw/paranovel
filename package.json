@@ -1,0 +1,26 @@
+{
+  "name": "paranovel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-assisted Korean web-novel writing harness",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev -w @paranovel/api\" \"npm run dev -w @paranovel/web\"",
+    "build": "npm run build -w @paranovel/contracts && npm run build -w @paranovel/web && npm run build -w @paranovel/api",
+    "start": "npm run start -w @paranovel/api",
+    "test": "npm run test --workspaces --if-present",
+    "test:coverage": "npm run test:coverage --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "db:migrate": "npm run db:migrate -w @paranovel/api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
