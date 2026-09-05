@@ -122,6 +122,28 @@ describe('backend core', () => {
     expect(gateway.complete).toHaveBeenCalledTimes(2);
   });
 
+  it('creates a complete episode plan from project context with no user request', async () => {
+    const project = projects.createInternal({
+      title: '밤의 기록',
+      logline: '기억을 잃는 탐정이 황궁의 비밀을 추적한다.',
+      genreTags: ['판타지'],
+    });
+    const proposal = { title: '첫 단서', direction: '탐정이 황궁에서 사라진 기록을 발견한다.', conflicts: [] };
+    const completeJson = vi.fn().mockResolvedValue({ value: proposal });
+    const service = new EpisodesService(database, projects, memory, { completeJson } as unknown as AiRunnerService);
+
+    expect(await service.propose(project.id, {})).toEqual(proposal);
+    expect(completeJson).toHaveBeenCalledWith(expect.objectContaining({
+      task: 'episode_direction',
+      projectId: project.id,
+      variables: expect.objectContaining({
+        user_request: '',
+        project_context: expect.stringContaining(project.logline),
+      }),
+    }));
+    expect(service.list(project.id)).toEqual([]);
+  });
+
   it('keeps episode numbers monotonic, hard deletes, and protects revisions', async () => {
     const project = projects.createInternal({
       title: '밤의 기록',

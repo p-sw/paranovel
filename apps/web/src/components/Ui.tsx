@@ -23,6 +23,7 @@ export function Button({
     <button
       className={cx('button', `button-${variant}`, `button-${size}`, className)}
       disabled={disabled || busy}
+      aria-busy={busy || undefined}
       {...props}
     >
       {busy ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : null}
@@ -159,7 +160,7 @@ export function ConfirmDialog({
           <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted">
             {description}
           </AlertDialog.Description>
-          <div className="mt-6 flex justify-end gap-2">
+          <div className="action-row mt-6">
             <AlertDialog.Cancel asChild>
               <Button variant="secondary">취소</Button>
             </AlertDialog.Cancel>

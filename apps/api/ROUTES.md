@@ -31,7 +31,7 @@ NDJSON events are `meta`, `stage`, `delta`, `reset`, `warning`, `done`, and `err
 - `GET|POST /projects/:projectId/arcs`, `GET .../arcs/current`, `POST .../arcs/plan`, `PATCH|DELETE .../arcs/:arcId`; the plan route returns a strict AI proposal and PATCH requires `expectedRevision`.
   Activating a new arc archives the previously active arc.
 - `GET|POST /improvements`, `PATCH|DELETE /improvements/:improvementId`; PATCH requires `expectedRevision`.
-- `POST /improvement-candidates` — `{ source: 'EDITOR'|'COMPARISON', projectId?, original, revised }`; candidates are transient.
+- `POST /improvement-candidates` — `{ source: 'EDITOR'|'COMPARISON', projectId?, original, revised }`; extracts improvements in the revised (after) manuscript relative to the original (before). For `COMPARISON`, the original can be an AI draft generated from a brief or a user-provided manuscript. Candidates are transient.
 - `POST /improvements/batch` — `{ projectId?, candidates }`; only this call persists accepted candidates. Optional `Idempotency-Key` (client UUID recommended) makes an identical retry return the original `{ improvements }`; reuse with a different body returns 409. Every candidate is validated before one atomic SQLite transaction.
 - `POST /comparisons/generate` — `{ brief, targetChars? }`, NDJSON. User-written text is forbidden and is compared later through `/improvement-candidates`.
 

@@ -32,7 +32,7 @@ export default function ImprovementsPage() {
     <div className="page-container">
       <header className="page-heading-row">
         <div><p className="eyebrow">계속 나아지는 집필 습관</p><h1 className="section-title">개선점</h1><p className="page-lead">저장된 규칙은 이후 AI 집필에 빠짐없이 반영됩니다.</p></div>
-        <div className="flex flex-wrap justify-end gap-2"><Link to="/compare" className="button button-secondary button-md"><Scale className="size-4" /> 두 원고 비교</Link><Button onClick={() => setEditing('new')}><Plus className="size-4" /> 직접 추가</Button></div>
+        <div className="page-actions"><Link to="/compare" className="button button-secondary button-md"><Scale className="size-4" /> 두 원고 비교</Link><Button onClick={() => setEditing('new')}><Plus className="size-4" /> 직접 추가</Button></div>
       </header>
 
       <Tabs.Root value={tab} onValueChange={(value) => setTab(value as typeof tab)}>
@@ -98,12 +98,12 @@ function ImprovementEditor({ open, onOpenChange, projectId, defaultScope, item }
   });
   const submit = (event: FormEvent) => { event.preventDefault(); if (!title.trim() || !rule.trim()) return setError('제목과 적용할 규칙을 입력해 주세요.'); mutation.mutate(); };
 
-  return <Sheet open={open} onOpenChange={onOpenChange} title={item ? '개선점 편집' : '개선점 추가'} description="짧고 명확한 명령문으로 쓰면 AI가 더 안정적으로 따릅니다." footer={<div className="flex w-full justify-end gap-2"><Button variant="ghost" onClick={() => onOpenChange(false)}>취소</Button><Button busy={mutation.isPending} onClick={() => mutation.mutate()} disabled={!title.trim() || !rule.trim()}>저장</Button></div>}>
+  return <Sheet open={open} onOpenChange={onOpenChange} title={item ? '개선점 편집' : '개선점 추가'} description="짧고 명확한 명령문으로 쓰면 AI가 더 안정적으로 따릅니다." footer={<div className="action-row"><Button variant="ghost" onClick={() => onOpenChange(false)}>취소</Button><Button busy={mutation.isPending} onClick={() => mutation.mutate()} disabled={!title.trim() || !rule.trim()}>저장</Button></div>}>
     <form className="space-y-5" onSubmit={submit}>
       <fieldset><legend className="field-label">적용 범위</legend><div className="mt-2 grid grid-cols-2 gap-2"><button type="button" className={`option-card ${scope === 'PROJECT' ? 'selected' : ''}`} onClick={() => setScope('PROJECT')}>이 프로젝트</button><button type="button" className={`option-card ${scope === 'GLOBAL' ? 'selected' : ''}`} onClick={() => setScope('GLOBAL')}>모든 프로젝트</button></div></fieldset>
       <div><label className="field-label" htmlFor="improvement-title">제목</label><input id="improvement-title" className="input" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="예: 감정을 행동으로 보여주기" /></div>
-      <div><label className="field-label" htmlFor="improvement-rule">항상 적용할 규칙</label><textarea id="improvement-rule" className="input min-h-36 resize-y" value={rule} onChange={(event) => setRule(event.target.value)} placeholder="감정을 직접 설명하기보다 몸짓, 선택, 대사로 먼저 드러낸다." /></div>
-      <div><label className="field-label" htmlFor="improvement-reason">이유</label><textarea id="improvement-reason" className="input min-h-24 resize-y" value={rationale} onChange={(event) => setRationale(event.target.value)} placeholder="왜 이 규칙이 중요한지 적어 주세요." /></div>
+      <div><label className="field-label" htmlFor="improvement-rule">항상 적용할 규칙</label><textarea id="improvement-rule" className="input" value={rule} onChange={(event) => setRule(event.target.value)} placeholder="감정을 직접 설명하기보다 몸짓, 선택, 대사로 먼저 드러낸다." /></div>
+      <div><label className="field-label" htmlFor="improvement-reason">이유</label><textarea id="improvement-reason" className="input" value={rationale} onChange={(event) => setRationale(event.target.value)} placeholder="왜 이 규칙이 중요한지 적어 주세요." /></div>
       <div><label className="field-label" htmlFor="improvement-tags">태그</label><input id="improvement-tags" className="input" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="문체, 대화, 감정 (쉼표로 구분)" /></div><FieldError>{error}</FieldError>
     </form>
   </Sheet>;

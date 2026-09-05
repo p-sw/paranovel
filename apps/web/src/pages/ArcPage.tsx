@@ -159,7 +159,7 @@ export default function ArcPage() {
     <div className="page-container page-narrow">
       <header className="page-heading-row">
         <div><p className="eyebrow">5–20화의 큰 흐름</p><h1 className="section-title">현재 아크</h1><p className="page-lead">매 회차가 향해야 할 목표와 반전을 고정합니다.</p></div>
-        <div className="flex flex-wrap justify-end gap-2">
+        <div className="page-actions">
           <Button variant="secondary" onClick={() => setPlannerOpen(true)}><WandSparkles className="size-4" /> AI로 아크 제안</Button>
           {arc && !editing ? <Button variant="secondary" onClick={() => { loadArcIntoForm(arc); setCreatingNew(false); setEditing(true); }}>아크 편집</Button> : null}
           {arc && !editing ? <Button onClick={beginNewArc}><Plus className="size-4" /> 새 아크</Button> : null}
@@ -200,13 +200,13 @@ export default function ArcPage() {
               <div><label className="field-label" htmlFor="arc-start">시작 회차</label><input id="arc-start" type="number" min={1} className="input" value={form.startEpisode} onChange={(event) => setForm({ ...form, startEpisode: Number(event.target.value) })} /></div>
               <div><label className="field-label" htmlFor="arc-end">끝 회차</label><input id="arc-end" type="number" min={1} className="input" value={form.endEpisode} onChange={(event) => setForm({ ...form, endEpisode: Number(event.target.value) })} /></div>
             </div>
-            <div><label className="field-label" htmlFor="arc-goal">목표</label><textarea id="arc-goal" className="input min-h-28 resize-y" value={form.goal} onChange={(event) => setForm({ ...form, goal: event.target.value })} placeholder="아크가 끝날 때 주인공과 세계가 어떻게 달라져야 하나요?" /></div>
-            <div><label className="field-label" htmlFor="arc-conflict">핵심 갈등</label><textarea id="arc-conflict" className="input min-h-28 resize-y" value={form.conflict} onChange={(event) => setForm({ ...form, conflict: event.target.value })} placeholder="무엇이 목표 달성을 가로막나요?" /></div>
-            <div><label className="field-label" htmlFor="arc-twist-summary">반전 계획 개요</label><textarea id="arc-twist-summary" className="input min-h-28 resize-y" value={form.twistPlan} onChange={(event) => setForm({ ...form, twistPlan: event.target.value })} placeholder="독자가 믿게 될 것과 뒤집힐 진실을 적어 주세요" /></div>
-            <div><label className="field-label" htmlFor="arc-twist">회차별 반전</label><textarea id="arc-twist" className="input min-h-36 resize-y" value={reversalText} onChange={(event) => setReversalText(event.target.value)} placeholder={'예: 8화 — 조력자의 정체가 드러난다\n10화 — 적의 목적이 복수였음이 밝혀진다'} /><p className="field-hint">각 줄을 ‘8화 — 반전 내용’ 형식으로 적어 주세요.</p></div>
+            <div><label className="field-label" htmlFor="arc-goal">목표</label><textarea id="arc-goal" className="input" value={form.goal} onChange={(event) => setForm({ ...form, goal: event.target.value })} placeholder="아크가 끝날 때 주인공과 세계가 어떻게 달라져야 하나요?" /></div>
+            <div><label className="field-label" htmlFor="arc-conflict">핵심 갈등</label><textarea id="arc-conflict" className="input" value={form.conflict} onChange={(event) => setForm({ ...form, conflict: event.target.value })} placeholder="무엇이 목표 달성을 가로막나요?" /></div>
+            <div><label className="field-label" htmlFor="arc-twist-summary">반전 계획 개요</label><textarea id="arc-twist-summary" className="input" value={form.twistPlan} onChange={(event) => setForm({ ...form, twistPlan: event.target.value })} placeholder="독자가 믿게 될 것과 뒤집힐 진실을 적어 주세요" /></div>
+            <div><label className="field-label" htmlFor="arc-twist">회차별 반전</label><textarea id="arc-twist" className="input" value={reversalText} onChange={(event) => setReversalText(event.target.value)} placeholder={'예: 8화 — 조력자의 정체가 드러난다\n10화 — 적의 목적이 복수였음이 밝혀진다'} /><p className="field-hint">각 줄을 ‘8화 — 반전 내용’ 형식으로 적어 주세요.</p></div>
           </div>
           <FieldError>{error}</FieldError>
-          <div className="mt-6 flex justify-end gap-2"><Button type="button" variant="ghost" onClick={() => { if (arc) loadArcIntoForm(arc); setCreatingNew(false); setEditing(false); }}>취소</Button><Button type="submit" busy={mutation.isPending}>{creatingNew ? '새 아크 시작' : '아크 저장'}</Button></div>
+          <div className="action-row mt-6"><Button type="button" variant="ghost" onClick={() => { if (arc) loadArcIntoForm(arc); setCreatingNew(false); setEditing(false); }}>취소</Button><Button type="submit" busy={mutation.isPending}>{creatingNew ? '새 아크 시작' : '아크 저장'}</Button></div>
         </form>
       ) : null}
 
@@ -243,13 +243,13 @@ export default function ArcPage() {
         description="정사, 최근 회차 기억과 미회수 떡밥을 바탕으로 5–20화 계획을 만듭니다. 검토하기 전에는 저장되지 않아요."
         wide
         footer={proposal ? (
-          <div className="flex w-full flex-wrap justify-end gap-2">
+          <div className="action-row">
             <Button variant="secondary" busy={planMutation.isPending} onClick={() => planMutation.mutate()}><Sparkles className="size-4" /> 다시 제안</Button>
             {arc ? <Button variant="secondary" onClick={() => useProposal('current')}>현재 아크 수정안으로</Button> : null}
             <Button onClick={() => useProposal('new')}>{arc ? '새 아크로 불러오기' : '편집 폼에 불러오기'}</Button>
           </div>
         ) : (
-          <div className="flex w-full justify-end gap-2">
+          <div className="action-row">
             <Button variant="ghost" onClick={() => setPlannerOpen(false)}>취소</Button>
             <Button busy={planMutation.isPending} onClick={() => planMutation.mutate()}><WandSparkles className="size-4" /> 제안 만들기</Button>
           </div>
@@ -267,7 +267,7 @@ export default function ArcPage() {
         ) : (
           <div>
             <label className="field-label" htmlFor="arc-plan-request">원하는 흐름 <span className="font-normal text-muted">(선택)</span></label>
-            <textarea id="arc-plan-request" className="input mt-2 min-h-40 resize-y" value={plannerRequest} onChange={(event) => setPlannerRequest(event.target.value)} placeholder="예: 주인공이 동료의 배신을 의심하지만 마지막에는 더 큰 적의 존재가 드러나게 해 줘" />
+            <textarea id="arc-plan-request" className="input mt-2" value={plannerRequest} onChange={(event) => setPlannerRequest(event.target.value)} placeholder="예: 주인공이 동료의 배신을 의심하지만 마지막에는 더 큰 적의 존재가 드러나게 해 줘" />
             <p className="field-hint">비워 두면 현재 기억과 아크 진행 상황만으로 제안합니다.</p>
           </div>
         )}

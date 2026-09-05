@@ -33,8 +33,8 @@ export default function CandidateEditor({
           </p>
         ) : null}
         <label><span className="candidate-field-label">제목</span><input className="input" value={candidate.title} onChange={(event) => onChange({ ...candidate, title: event.target.value })} /></label>
-        <label><span className="candidate-field-label">항상 적용할 규칙</span><textarea className="input min-h-24 resize-y" value={candidate.rule} onChange={(event) => onChange({ ...candidate, rule: event.target.value })} /></label>
-        <label><span className="candidate-field-label">이유</span><textarea className="input min-h-20 resize-y" value={candidate.rationale} onChange={(event) => onChange({ ...candidate, rationale: event.target.value })} /></label>
+        <label><span className="candidate-field-label">항상 적용할 규칙</span><textarea className="input" value={candidate.rule} onChange={(event) => onChange({ ...candidate, rule: event.target.value })} /></label>
+        <label><span className="candidate-field-label">이유</span><textarea className="input" value={candidate.rationale} onChange={(event) => onChange({ ...candidate, rationale: event.target.value })} /></label>
       </div>
     </article>
   );

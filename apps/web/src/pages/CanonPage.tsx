@@ -144,7 +144,7 @@ export default function CanonPage() {
           <h1 className="section-title">정사·설정</h1>
           <p className="page-lead">확정된 사실만 AI 집필에 사용합니다.</p>
         </div>
-        <div className="flex flex-wrap justify-end gap-2">
+        <div className="page-actions">
           <Button variant="secondary" busy={generateMutation.isPending} onClick={() => generateMutation.mutate()}>
             <Sparkles className="size-4" /> 설정 후보 찾기
           </Button>
@@ -181,7 +181,7 @@ export default function CanonPage() {
               <ul>{generatedConflicts.map((conflict, index) => <li key={`${conflict}-${index}`}>{conflict}</li>)}</ul>
             </div>
           ) : null}
-          <div className="mt-5 flex justify-end gap-2"><Button variant="ghost" onClick={() => { setGenerated([]); setGeneratedConflicts([]); setSelectedGenerated([]); setAcceptGeneratedMessage(''); setAcceptGeneratedFailed(false); }}>모두 무시</Button><Button busy={acceptGeneratedMutation.isPending} disabled={!selectedGenerated.length || generated.filter((_, index) => selectedGenerated.includes(index)).some((entry) => !entry.content?.trim())} onClick={() => acceptGeneratedMutation.mutate()}>선택한 설정 승인</Button></div>
+          <div className="action-row mt-5"><Button variant="ghost" onClick={() => { setGenerated([]); setGeneratedConflicts([]); setSelectedGenerated([]); setAcceptGeneratedMessage(''); setAcceptGeneratedFailed(false); }}>모두 무시</Button><Button busy={acceptGeneratedMutation.isPending} disabled={!selectedGenerated.length || generated.filter((_, index) => selectedGenerated.includes(index)).some((entry) => !entry.content?.trim())} onClick={() => acceptGeneratedMutation.mutate()}>선택한 설정 승인</Button></div>
         </section>
       ) : null}
 
@@ -302,13 +302,13 @@ function CanonEditor({
       onOpenChange={onOpenChange}
       title={entry ? '정사 편집' : '정사 추가'}
       description="확실하게 정해진 사실만 기록하세요. 저장 즉시 AI 컨텍스트에 반영됩니다."
-      footer={<div className="flex w-full justify-end gap-2"><Button variant="ghost" onClick={() => onOpenChange(false)}>취소</Button><Button busy={mutation.isPending} onClick={() => mutation.mutate()} disabled={!form.name.trim() || !form.content.trim()}>저장</Button></div>}
+      footer={<div className="action-row"><Button variant="ghost" onClick={() => onOpenChange(false)}>취소</Button><Button busy={mutation.isPending} onClick={() => mutation.mutate()} disabled={!form.name.trim() || !form.content.trim()}>저장</Button></div>}
     >
       <form className="space-y-5" onSubmit={submit}>
         <div><label className="field-label" htmlFor="canon-category">분류</label><select id="canon-category" className="input" value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value as CanonCategory })}>{categoryGroups.slice(1).map((group) => <option value={group.value} key={group.value}>{group.label}</option>)}</select></div>
         <div><label className="field-label" htmlFor="canon-name">이름</label><input id="canon-name" className="input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="예: 세라 벨로아" /></div>
         <div><label className="field-label" htmlFor="canon-aliases">별칭</label><input id="canon-aliases" className="input" value={aliasesText} onChange={(event) => setAliasesText(event.target.value)} placeholder="쉼표로 구분" /></div>
-        <div><label className="field-label" htmlFor="canon-content">확정 내용</label><textarea id="canon-content" className="input min-h-52 resize-y" value={form.content} onChange={(event) => setForm({ ...form, content: event.target.value })} placeholder="외형, 성격, 과거, 관계나 변하지 않는 규칙을 명확하게 적어 주세요." /></div>
+        <div><label className="field-label" htmlFor="canon-content">확정 내용</label><textarea id="canon-content" className="input" value={form.content} onChange={(event) => setForm({ ...form, content: event.target.value })} placeholder="외형, 성격, 과거, 관계나 변하지 않는 규칙을 명확하게 적어 주세요." /></div>
         <FieldError>{error}</FieldError>
       </form>
     </Sheet>

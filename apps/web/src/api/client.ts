@@ -170,10 +170,11 @@ export const api = {
         body: input,
         headers: { 'Idempotency-Key': idempotencyKey },
       }),
-    propose: (projectId: string, hint?: string) =>
+    propose: (projectId: string, hint?: string, signal?: AbortSignal) =>
       json<{ title: string; direction: string; conflicts: string[] }>(`/projects/${projectId}/episodes/propose`, {
         method: 'POST',
         body: hint ? { hint } : {},
+        signal,
       }),
     generate: (
       projectId: string,

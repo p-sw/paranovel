@@ -23,8 +23,11 @@
 
 @layer components {
   .button {
-    @apply inline-flex min-h-11 select-none items-center justify-center gap-2 rounded-xl px-4 font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex min-h-11 max-w-full shrink-0 select-none items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-center font-semibold leading-5 transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+    word-break: keep-all;
+    overflow-wrap: anywhere;
   }
+  .button > svg, .icon-button > svg, .option-card > svg, .scope-tab > svg, .tabs-trigger > svg { flex-shrink: 0; }
   .button-sm { @apply min-h-11 rounded-lg px-3 text-xs; }
   .button-md { @apply text-sm; }
   .button-lg { @apply min-h-12 px-5 text-[15px]; }
@@ -33,7 +36,8 @@
   .button-ghost { @apply bg-transparent text-muted hover:bg-black/5 hover:text-ink; }
   .button-danger { @apply bg-red-700 text-white hover:bg-red-800; }
   .icon-button { @apply inline-flex size-11 shrink-0 items-center justify-center rounded-xl text-muted transition-colors hover:bg-black/5 hover:text-ink disabled:opacity-35; }
-  .input { @apply min-h-11 w-full rounded-xl border border-line bg-surface px-3.5 py-2.5 text-base text-ink shadow-sm outline-none transition placeholder:text-stone-400 focus:border-plum-500 focus:ring-4 focus:ring-plum-100; }
+  .input { @apply min-h-11 min-w-0 max-w-full w-full rounded-xl border border-line bg-surface px-3.5 py-2.5 text-base text-ink shadow-sm outline-none transition placeholder:text-stone-400 focus:border-plum-500 focus:ring-4 focus:ring-plum-100; }
+  textarea.input { @apply block min-h-56 resize-y leading-7; }
   .field-label { @apply block text-sm font-bold text-ink; }
   .field-hint { @apply mt-1.5 flex justify-between gap-3 text-xs leading-5 text-muted; }
   .eyebrow { @apply text-[11px] font-bold uppercase tracking-[.16em] text-plum-600; }
@@ -42,7 +46,11 @@
   .page-lead { @apply mt-2 max-w-2xl text-sm leading-6 text-muted sm:text-base; }
   .page-container { @apply mx-auto w-full max-w-7xl px-4 py-7 sm:px-7 sm:py-10; }
   .page-narrow { @apply max-w-4xl; }
-  .page-heading-row { @apply mb-7 flex items-start justify-between gap-4 sm:mb-9; }
+  .page-heading-row { @apply mb-7 flex flex-col items-stretch justify-between gap-4 sm:mb-9 sm:flex-row sm:items-start; }
+  .page-heading-row > div:first-child { @apply min-w-0 flex-1; }
+  .page-actions { @apply flex w-full flex-wrap gap-2 sm:w-auto sm:justify-end; }
+  .action-row { @apply flex w-full flex-wrap items-center justify-end gap-2; }
+  .page-actions > .button, .action-row > .button { @apply flex-1 sm:flex-none; }
   .card-grid { @apply grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3; }
   .card { @apply rounded-2xl border border-line bg-surface p-5 shadow-sm; }
   .badge { @apply inline-flex min-h-6 items-center gap-1 rounded-full border border-line bg-stone-100 px-2.5 py-0.5 text-[11px] font-bold leading-4 text-muted; }
@@ -80,17 +88,17 @@
   .mobile-tab { @apply flex min-h-16 flex-col items-center justify-center gap-1 text-[11px] font-semibold text-muted; }
   .mobile-tab.active { @apply text-plum-700; }
   .focused-shell .shell-main { @apply pb-0; }
-  .dropdown-content { @apply z-50 min-w-52 rounded-xl border border-line bg-surface p-1.5 shadow-lift; }
-  .dropdown-item { @apply flex min-h-11 cursor-pointer items-center gap-2 rounded-lg px-3 text-sm text-ink outline-none data-[highlighted]:bg-plum-50 data-[highlighted]:text-plum-700; }
+  .dropdown-content { @apply z-50 min-w-52 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-line bg-surface p-1.5 shadow-lift; max-height: var(--radix-dropdown-menu-content-available-height); }
+  .dropdown-item { @apply flex min-h-11 cursor-pointer items-center gap-2 break-words rounded-lg px-3 py-2 text-sm text-ink outline-none data-[highlighted]:bg-plum-50 data-[highlighted]:text-plum-700; overflow-wrap: anywhere; }
 
   .dialog-overlay { @apply fixed inset-0 z-50 bg-black/35 backdrop-blur-[2px] data-[state=closed]:animate-[fadeOut_.15s_ease] data-[state=open]:animate-[fadeIn_.18s_ease]; }
   .sheet-content { @apply fixed inset-x-0 bottom-0 z-50 flex max-h-[94dvh] flex-col rounded-t-3xl border border-line bg-surface shadow-lift outline-none sm:left-1/2 sm:top-1/2 sm:bottom-auto sm:max-h-[88vh] sm:w-[min(92vw,560px)] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-2xl; }
   .sheet-wide { @apply sm:w-[min(92vw,900px)]; }
-  .sheet-header { @apply flex items-start justify-between gap-4 border-b border-line px-5 py-4 sm:px-6; }
+  .sheet-header { @apply flex shrink-0 items-start justify-between gap-4 border-b border-line px-5 py-4 sm:px-6; }
   .sheet-title { @apply font-story text-xl font-bold text-ink; }
   .sheet-description { @apply mt-1 text-sm leading-5 text-muted; }
-  .sheet-body { @apply min-h-0 overflow-y-auto px-5 py-5 sm:px-6 sm:py-6; }
-  .sheet-footer { @apply flex min-h-16 items-center border-t border-line bg-surface px-4 py-3 pb-[max(.75rem,env(safe-area-inset-bottom))] sm:px-6; }
+  .sheet-body { @apply min-h-0 overflow-y-auto overscroll-contain px-5 py-5 sm:px-6 sm:py-6; }
+  .sheet-footer { @apply flex min-h-16 shrink-0 items-center border-t border-line bg-surface px-4 py-3 pb-[max(.75rem,env(safe-area-inset-bottom))] sm:px-6; }
   .alert-content { @apply fixed left-1/2 top-1/2 z-50 w-[min(calc(100%-2rem),440px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-line bg-surface p-6 shadow-lift outline-none; }
 
   .wizard-page { @apply min-h-screen min-h-[100dvh] bg-paper; }
@@ -107,6 +115,8 @@
   .tag-picker { @apply flex flex-wrap gap-2; }
   .tag-choice { @apply inline-flex min-h-11 items-center gap-1.5 rounded-full border border-line bg-surface px-4 text-sm font-semibold text-muted hover:border-plum-500; }
   .tag-choice.selected { @apply border-plum-500 bg-plum-50 text-plum-700; }
+  .selected-tag { @apply inline-flex min-h-11 max-w-full items-center gap-2 rounded-full border border-plum-100 bg-plum-50 py-2 pl-3 pr-2 text-sm font-semibold text-plum-700; overflow-wrap: anywhere; }
+  .selected-tag > svg { @apply shrink-0; }
   .assistant-avatar { @apply flex size-11 items-center justify-center rounded-2xl bg-plum-600 text-white shadow-sm; }
   .question-title { @apply mt-2 font-story text-2xl font-bold leading-snug sm:text-3xl; }
   .option-list { @apply grid gap-2; }
@@ -127,7 +137,7 @@
   .generation-preview { @apply space-y-4; }
   .generation-status { @apply flex items-center gap-2 text-sm font-bold text-plum-700; }
   .story-preview { @apply min-h-56 whitespace-pre-wrap rounded-2xl border border-line bg-paper p-5 font-story text-[16px] leading-8 text-ink; }
-  .story-preview.editable { @apply block w-full resize-y outline-none focus:border-plum-500 focus:ring-4 focus:ring-plum-100; }
+  .story-preview.editable { @apply block w-full resize-y outline-none focus:border-plum-500 focus:ring-4 focus:ring-plum-100; min-height: clamp(18rem, 48dvh, 36rem); }
   .story-preview.tall { @apply min-h-[52vh]; }
   .warning-box { @apply rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950; }
   .warning-box strong { @apply font-bold; }
@@ -139,13 +149,14 @@
   .episode-rail { @apply hidden min-h-0 overflow-y-auto border-r border-line bg-surface xl:block; }
   .episode-rail-title { @apply sticky top-0 z-10 border-b border-line bg-surface px-4 py-4 text-xs font-bold text-muted; }
   .episode-rail nav { @apply p-2; }
-  .episode-rail-item { @apply flex min-h-10 items-center gap-2 rounded-lg px-2.5 text-xs text-muted hover:bg-paper; }
+  .episode-rail-item { @apply flex min-h-11 items-center gap-2 rounded-lg px-2.5 text-xs text-muted hover:bg-paper; }
   .episode-rail-item > span:first-child { @apply w-6 shrink-0 text-right font-bold; }
   .episode-rail-item.active { @apply bg-plum-50 font-semibold text-plum-700; }
   .editor-center { @apply flex h-full min-h-0 min-w-0 flex-col; }
   .editor-toolbar { @apply flex h-12 shrink-0 items-center justify-between border-b border-line bg-surface px-2 sm:px-4; }
   .save-indicator { @apply inline-flex min-h-8 items-center gap-1.5 rounded-full px-2 text-[11px] font-semibold text-muted; }
   .save-indicator.error { @apply text-red-700 hover:bg-red-50; }
+  button.save-indicator { @apply min-h-11; }
   .draft-recovery-banner { @apply mx-3 mt-3 flex shrink-0 flex-col gap-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-amber-950 shadow-sm sm:mx-4 sm:flex-row sm:items-center; }
   .draft-recovery-banner strong { @apply block text-sm; }
   .draft-recovery-banner p { @apply mt-1 text-xs leading-5 text-amber-900; }
@@ -179,7 +190,7 @@
   .compare-pane.revised { @apply border-plum-100 bg-plum-50/60; }
   .compare-label { @apply mb-3 block text-xs font-bold text-muted; }
   .compare-pane p { @apply whitespace-pre-wrap font-story text-base leading-7; }
-  .comparison-textarea { @apply min-h-52 w-full resize-y bg-transparent font-story text-base leading-7 outline-none; }
+  .comparison-textarea { @apply w-full resize-y bg-transparent font-story text-base leading-7 outline-none; min-height: clamp(18rem, 48dvh, 36rem); }
   .candidate-list { @apply space-y-3; }
   .candidate-risk-note { @apply rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900; }
   .candidate-card { @apply flex cursor-pointer items-start gap-3 rounded-xl border border-line bg-surface p-4 transition hover:border-plum-500; }
@@ -193,8 +204,8 @@
   .candidate-check { @apply flex size-11 shrink-0 cursor-pointer items-start justify-center pt-1; }
   .candidate-field-label { @apply mb-1 block text-xs font-bold text-muted; }
   .success-state { @apply flex min-h-48 flex-col items-center justify-center gap-3 rounded-2xl border border-line bg-sage-50 p-6 text-center text-sage-700; }
-  .undo-toast { @apply fixed bottom-20 left-1/2 z-40 flex min-h-12 -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-xl border border-line bg-surface px-4 text-sm shadow-lift lg:bottom-5 lg:left-[calc(50%+7.5rem)]; }
-  .undo-toast button { @apply min-h-8 px-1 font-bold text-plum-700; }
+  .undo-toast { @apply fixed bottom-20 left-1/2 z-40 flex min-h-12 max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-2 rounded-xl border border-line bg-surface px-3 text-sm shadow-lift lg:bottom-5 lg:left-[calc(50%+7.5rem)]; }
+  .undo-toast button { @apply min-h-11 min-w-11 shrink-0 px-2 font-bold text-plum-700; }
 
   .review-banner { @apply mb-5 flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950; }
   .generated-canon-review { @apply mb-6 rounded-2xl border border-amber-200 bg-amber-50/40 p-5 sm:p-6; }
@@ -209,12 +220,12 @@
   .canon-grid { @apply grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3; }
   .canon-card { @apply relative overflow-hidden rounded-2xl border border-line bg-surface shadow-sm; }
   .canon-card.pending { @apply border-amber-200; }
-  .canon-card-main { @apply w-full p-5 pb-14 text-left; }
+  .canon-card-main { @apply w-full p-5 pb-16 text-left; }
   .canon-card h2 { @apply mt-4 font-story text-xl font-bold; }
   .aliases { @apply mt-1 text-xs text-muted; }
   .canon-content { @apply mt-3 line-clamp-5 whitespace-pre-wrap text-sm leading-6 text-muted; }
-  .canon-card-actions { @apply absolute inset-x-0 bottom-0 flex h-12 items-center justify-end gap-2 border-t border-line bg-surface px-3; }
-  .canon-card-actions > button:not(.button) { @apply flex size-9 items-center justify-center rounded-lg text-muted hover:bg-red-50 hover:text-red-700; }
+  .canon-card-actions { @apply absolute inset-x-0 bottom-0 flex min-h-14 items-center justify-end gap-2 border-t border-line bg-surface px-3; }
+  .canon-card-actions > button:not(.button) { @apply flex size-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-red-50 hover:text-red-700; }
 
   .arc-overview { @apply overflow-hidden rounded-3xl border border-line bg-surface shadow-soft; }
   .arc-hero { @apply flex items-start justify-between gap-5 bg-gradient-to-br from-plum-50 to-surface p-5 sm:p-8; }
@@ -233,12 +244,12 @@
   .arc-sections p { @apply mt-1 whitespace-pre-wrap text-sm leading-7; }
   .form-card { @apply rounded-2xl border border-line bg-surface p-5 shadow-sm sm:p-7; }
   .form-card-heading { @apply flex items-start gap-3; }
-  .form-card-heading > svg { @apply mt-1 text-plum-600; }
+  .form-card-heading > svg { @apply mt-1 shrink-0 text-plum-600; }
   .form-card-heading h2 { @apply font-story text-xl font-bold; }
   .form-card-heading p { @apply mt-1 text-sm text-muted; }
 
-  .scope-tabs { @apply inline-flex rounded-xl border border-line bg-surface p-1; }
-  .scope-tab { @apply flex min-h-11 items-center gap-2 rounded-lg px-3.5 text-xs font-bold text-muted data-[state=active]:bg-plum-50 data-[state=active]:text-plum-700; }
+  .scope-tabs { @apply inline-flex max-w-full flex-wrap rounded-xl border border-line bg-surface p-1; }
+  .scope-tab { @apply flex min-h-11 min-w-0 flex-1 items-center justify-center gap-2 rounded-lg px-3.5 text-center text-xs font-bold text-muted data-[state=active]:bg-plum-50 data-[state=active]:text-plum-700 sm:flex-none; word-break: keep-all; }
   .scope-note { @apply my-4 flex items-center gap-2 text-xs text-muted; }
   .improvement-list { @apply grid grid-cols-1 gap-3 lg:grid-cols-2; }
   .improvement-card { @apply relative rounded-2xl border border-line bg-surface shadow-sm; }
@@ -247,7 +258,7 @@
   .rule-text { @apply mt-2 text-sm font-medium leading-6; }
   .rationale { @apply mt-2 text-xs leading-5 text-muted; }
   .micro-tag { @apply text-[11px] font-semibold text-plum-600; }
-  .card-delete { @apply absolute right-2 top-2 flex size-10 items-center justify-center rounded-lg text-muted hover:bg-red-50 hover:text-red-700; }
+  .card-delete { @apply absolute right-2 top-2 flex size-11 items-center justify-center rounded-lg text-muted hover:bg-red-50 hover:text-red-700; }
 
   .compare-page { @apply min-h-[calc(100dvh-4rem)] bg-paper lg:min-h-screen; }
   .compare-header { @apply sticky top-0 z-20 flex min-h-16 items-center gap-3 border-b border-line bg-surface/95 px-3 backdrop-blur lg:px-7; }
@@ -263,28 +274,29 @@
   .compare-explainer li { @apply flex items-center gap-3; }
   .compare-explainer li span { @apply flex size-7 items-center justify-center rounded-full bg-white/15 text-xs font-bold; }
   .story-input { @apply font-story leading-7; }
+  textarea.story-input { min-height: clamp(20rem, 50dvh, 40rem); }
   .standalone-generation { @apply mx-auto max-w-4xl space-y-4; }
   .compare-section-heading { @apply mb-5 flex items-start justify-between gap-4; }
   .compare-section-heading h2 { @apply mt-1 font-story text-2xl font-bold; }
   .compare-section-heading p:not(.eyebrow) { @apply mt-1 text-sm text-muted; }
-  .mobile-compare-tabs { @apply md:hidden; }
-  .mobile-compare-tabs .scope-tabs { @apply mb-3 grid w-full grid-cols-3; }
-  .mobile-compare-tabs .scope-tab { @apply justify-center px-2 text-center; }
+  .comparison-workspace > .scope-tabs { @apply mb-3 grid w-full grid-cols-3 md:hidden; }
+  .comparison-workspace .scope-tab { @apply justify-center px-2 text-center; }
   .mobile-change-panel { @apply flex min-h-[50vh] flex-col items-center justify-center rounded-2xl border border-line bg-surface p-6 text-center; }
   .mobile-change-panel h3 { @apply mt-4 font-story text-xl font-bold; }
   .mobile-change-panel p { @apply mb-5 mt-2 max-w-md text-sm leading-6 text-muted; }
-  .desktop-comparison-grid { @apply hidden grid-cols-2 gap-4 md:grid; }
   .standalone-compare-pane { @apply min-h-[55vh] overflow-hidden rounded-2xl border; }
   .standalone-compare-pane.original { @apply border-line bg-surface; }
   .standalone-compare-pane.revised { @apply border-plum-100 bg-plum-50/50; }
   .standalone-compare-pane header { @apply flex items-center justify-between border-b border-inherit px-4 py-3 text-xs font-bold text-muted; }
-  .standalone-compare-pane p { @apply whitespace-pre-wrap p-5 font-story text-base leading-8; }
+  .standalone-compare-pane p { @apply whitespace-pre-wrap break-words p-5 font-story text-base leading-8; }
+  .standalone-compare-pane .comparison-textarea { @apply block p-5 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-plum-500; }
   .candidate-stage { @apply mx-auto max-w-4xl; }
   .scope-choice-panel { @apply mb-5 rounded-2xl border border-line bg-surface p-4; }
   .completion-card { @apply mx-auto flex min-h-[50vh] max-w-xl flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8 text-center text-sage-700 shadow-soft; }
   .completion-card h2 { @apply mt-5 font-story text-2xl font-bold text-ink; }
   .completion-card p { @apply mt-2 text-sm text-muted; }
-  .danger-zone { @apply mt-8 flex items-center justify-between gap-4 rounded-2xl border border-red-200 bg-red-50 p-5; }
+  .settings-action-card { @apply mt-6 flex flex-col items-stretch justify-between gap-4 sm:flex-row sm:items-center; }
+  .danger-zone { @apply mt-8 flex flex-col items-stretch justify-between gap-4 rounded-2xl border border-red-200 bg-red-50 p-5 sm:flex-row sm:items-center; }
   .danger-zone h2 { @apply font-bold text-red-900; }
   .danger-zone p { @apply mt-1 text-sm text-red-800/70; }
   .blueprint-section { @apply rounded-2xl border border-line bg-paper/60 p-4 sm:p-5; }
@@ -294,6 +306,28 @@
   .blueprint-canon-row textarea { @apply sm:col-span-2; }
   .blueprint-canon-row > .icon-button { @apply absolute right-1 top-1; }
   .editor-context-toggle { display: inline-flex; }
+}
+
+@media (max-width: 639px) {
+  .button { min-height: 48px; font-size: 14px; }
+  textarea.story-input { min-height: clamp(20rem, 50dvh, 40rem); }
+  .action-row > .button, .page-actions > .button { flex-basis: auto; }
+  .sheet-footer .action-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; }
+  .sheet-footer .action-row > .button:last-child:nth-child(odd) { grid-column: 1 / -1; }
+  .filter-tabs { flex-wrap: wrap; overflow-x: visible; }
+  .scope-tabs { display: flex; width: 100%; }
+  .field-hint { flex-wrap: wrap; gap: .25rem .75rem; }
+  .editor-ai-action { min-width: 0; flex: 1; }
+  .editor-toolbar { min-height: 48px; height: auto; gap: 4px; flex-wrap: wrap; }
+  .editor-actionbar { padding-top: .5rem; padding-bottom: max(.5rem, env(safe-area-inset-bottom)); }
+  .candidate-card.editable { display: grid; grid-template-columns: minmax(0, 1fr); gap: .5rem; }
+  .candidate-card.editable > .candidate-check { justify-content: flex-start; align-items: center; padding-top: 0; }
+  .blueprint-canon-row { padding-right: .75rem; padding-top: 3.25rem; }
+}
+
+@media (max-width: 379px) {
+  .landing-header { height: auto; min-height: 64px; flex-wrap: wrap; gap: .5rem; padding-top: .75rem; padding-bottom: .75rem; }
+  .landing-header > div { width: 100%; justify-content: flex-end; }
 }
 
 @media (min-width: 768px) and (max-width: 1199px) {

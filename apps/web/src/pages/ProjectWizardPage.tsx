@@ -5,7 +5,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { api, ApiError, isConflict, messageOf } from '../api/client';
 import { CANON_LABELS, GENRE_SUGGESTIONS, cx } from '../lib';
 import type { CanonCategory, ProjectBlueprint, ProjectSessionResult, SetupQuestion } from '../types';
-import { Badge, Button, FieldError } from '../components/Ui';
+import { Button, FieldError } from '../components/Ui';
 
 const SESSION_KEY = 'paranovel.project-session';
 
@@ -221,7 +221,7 @@ export default function ProjectWizardPage() {
                 <label className="field-label" htmlFor="logline">로그라인 <span aria-hidden="true">*</span></label>
                 <textarea
                   id="logline"
-                  className="input min-h-32 resize-y"
+                  className="input"
                   value={logline}
                   onChange={(event) => setLogline(event.target.value)}
                   placeholder="예: 멸망한 왕국의 마지막 기록관이 시간을 되돌려, 자신이 지웠던 영웅을 찾아 나선다."
@@ -267,7 +267,7 @@ export default function ProjectWizardPage() {
                 {genreTags.length ? (
                   <div className="mt-3 flex flex-wrap gap-2" aria-label="선택한 장르">
                     {genreTags.map((tag) => (
-                      <Badge key={tag} tone="plum" className="gap-1">{tag}<button type="button" onClick={() => toggleGenre(tag)} aria-label={`${tag} 제거`}><X className="size-3" /></button></Badge>
+                      <button key={tag} type="button" className="selected-tag" onClick={() => toggleGenre(tag)} aria-label={`${tag} 제거`}>{tag}<X className="size-4" aria-hidden="true" /></button>
                     ))}
                   </div>
                 ) : null}
@@ -289,7 +289,7 @@ export default function ProjectWizardPage() {
             <form className="mt-7" onSubmit={submitQuestion}>
               {question.inputType === 'long_text' ? (
                 <textarea
-                  className="input min-h-36 resize-y"
+                  className="input"
                   autoFocus
                   aria-label="답변"
                   value={typeof answer === 'string' ? answer : ''}
@@ -359,9 +359,9 @@ export default function ProjectWizardPage() {
                 <h2>작품 정보</h2>
                 <div className="mt-4 space-y-4">
                   <div><label className="field-label" htmlFor="review-title">소설 제목</label><input id="review-title" className="input" value={blueprint.title} onChange={(event) => setBlueprint({ ...blueprint, title: event.target.value })} /></div>
-                  <div><label className="field-label" htmlFor="review-logline">로그라인</label><textarea id="review-logline" className="input min-h-28 resize-y" value={blueprint.logline} onChange={(event) => setBlueprint({ ...blueprint, logline: event.target.value })} /></div>
+                  <div><label className="field-label" htmlFor="review-logline">로그라인</label><textarea id="review-logline" className="input" value={blueprint.logline} onChange={(event) => setBlueprint({ ...blueprint, logline: event.target.value })} /></div>
                   <div><label className="field-label" htmlFor="review-genres">장르 태그</label><input id="review-genres" className="input" value={reviewGenres} onChange={(event) => setReviewGenres(event.target.value)} /><p className="field-hint">쉼표로 구분해 주세요.</p></div>
-                  <div><label className="field-label" htmlFor="review-details">세계의 핵심</label><textarea id="review-details" className="input min-h-36 resize-y" value={blueprint.details} onChange={(event) => setBlueprint({ ...blueprint, details: event.target.value })} /></div>
+                  <div><label className="field-label" htmlFor="review-details">세계의 핵심</label><textarea id="review-details" className="input" value={blueprint.details} onChange={(event) => setBlueprint({ ...blueprint, details: event.target.value })} /></div>
                   <div><label className="field-label" htmlFor="review-target-chars">회차 기본 목표 글자 수</label><input id="review-target-chars" type="number" min={500} max={30000} step={100} className="input" value={blueprint.defaultTargetChars} onChange={(event) => setBlueprint({ ...blueprint, defaultTargetChars: Number(event.target.value) })} /></div>
                 </div>
               </section>
@@ -374,7 +374,7 @@ export default function ProjectWizardPage() {
                       <select aria-label={`${index + 1}번째 설정 분류`} className="input" value={entry.category} onChange={(event) => setBlueprint({ ...blueprint, canon: blueprint.canon.map((item, itemIndex) => itemIndex === index ? { ...item, category: event.target.value as CanonCategory } : item) })}>{Object.entries(CANON_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
                       <input aria-label={`${index + 1}번째 설정 이름`} className="input" value={entry.name} placeholder="설정 이름" onChange={(event) => setBlueprint({ ...blueprint, canon: blueprint.canon.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) })} />
                       <input aria-label={`${index + 1}번째 설정 별칭`} className="input sm:col-span-2" value={entry.aliases.join(', ')} placeholder="별칭 (쉼표로 구분)" onChange={(event) => setBlueprint({ ...blueprint, canon: blueprint.canon.map((item, itemIndex) => itemIndex === index ? { ...item, aliases: event.target.value.split(',').map((alias) => alias.trim()).filter(Boolean) } : item) })} />
-                      <textarea aria-label={`${index + 1}번째 설정 내용`} className="input min-h-24 resize-y" value={entry.content} placeholder="확정 내용" onChange={(event) => setBlueprint({ ...blueprint, canon: blueprint.canon.map((item, itemIndex) => itemIndex === index ? { ...item, content: event.target.value } : item) })} />
+                      <textarea aria-label={`${index + 1}번째 설정 내용`} className="input" value={entry.content} placeholder="확정 내용" onChange={(event) => setBlueprint({ ...blueprint, canon: blueprint.canon.map((item, itemIndex) => itemIndex === index ? { ...item, content: event.target.value } : item) })} />
                       <IconDelete label={`${entry.name || index + 1} 설정 제거`} onClick={() => setBlueprint({ ...blueprint, canon: blueprint.canon.filter((_, itemIndex) => itemIndex !== index) })} />
                     </div>
                   ))}
@@ -387,8 +387,8 @@ export default function ProjectWizardPage() {
                 <div className="mt-4 space-y-4">
                   <div><label className="field-label" htmlFor="review-arc-title">아크 제목</label><input id="review-arc-title" className="input" value={blueprint.arc.title} onChange={(event) => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, title: event.target.value } })} /></div>
                   <div className="grid grid-cols-2 gap-3"><div><label className="field-label" htmlFor="review-arc-start">시작 회차</label><input id="review-arc-start" type="number" min={1} className="input" value={blueprint.arc.startEpisode} onChange={(event) => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, startEpisode: Number(event.target.value) } })} /></div><div><label className="field-label" htmlFor="review-arc-end">끝 회차</label><input id="review-arc-end" type="number" min={1} className="input" value={blueprint.arc.endEpisode} onChange={(event) => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, endEpisode: Number(event.target.value) } })} /></div></div>
-                  <div><label className="field-label" htmlFor="review-arc-goal">목표</label><textarea id="review-arc-goal" className="input min-h-24 resize-y" value={blueprint.arc.goal} onChange={(event) => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, goal: event.target.value } })} /></div>
-                  <div><label className="field-label" htmlFor="review-arc-conflict">갈등</label><textarea id="review-arc-conflict" className="input min-h-24 resize-y" value={blueprint.arc.conflict} onChange={(event) => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, conflict: event.target.value } })} /></div>
+                  <div><label className="field-label" htmlFor="review-arc-goal">목표</label><textarea id="review-arc-goal" className="input" value={blueprint.arc.goal} onChange={(event) => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, goal: event.target.value } })} /></div>
+                  <div><label className="field-label" htmlFor="review-arc-conflict">갈등</label><textarea id="review-arc-conflict" className="input" value={blueprint.arc.conflict} onChange={(event) => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, conflict: event.target.value } })} /></div>
                   <div><label className="field-label">반전 계획</label><div className="mt-2 space-y-2">{blueprint.arc.reversalPlan.map((beat, index) => <div className="grid grid-cols-[5rem_1fr_2.75rem] gap-2" key={index}><input className="input" type="number" min={1} aria-label={`${index + 1}번째 반전 회차`} value={beat.episode} onChange={(event) => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, reversalPlan: blueprint.arc.reversalPlan.map((item, itemIndex) => itemIndex === index ? { ...item, episode: Number(event.target.value) } : item) } })} /><input className="input" aria-label={`${index + 1}번째 반전 내용`} value={beat.description} onChange={(event) => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, reversalPlan: blueprint.arc.reversalPlan.map((item, itemIndex) => itemIndex === index ? { ...item, description: event.target.value } : item) } })} /><IconDelete label={`${index + 1}번째 반전 제거`} onClick={() => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, reversalPlan: blueprint.arc.reversalPlan.filter((_, itemIndex) => itemIndex !== index) } })} /></div>)}</div><Button type="button" className="mt-2" variant="ghost" size="sm" onClick={() => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, reversalPlan: [...blueprint.arc.reversalPlan, { episode: blueprint.arc.startEpisode, description: '' }] } })}><Plus className="size-4" /> 반전 추가</Button></div>
                 </div>
               </section>

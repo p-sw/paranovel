@@ -29,7 +29,7 @@ export default function ProjectsPage() {
           <span>PARANOVEL</span>
         </Link>
         <div className="flex items-center gap-2">
-          <Link to="/compare" className="icon-button sm:button sm:button-secondary sm:button-md" aria-label="두 원고 비교"><Scale className="size-4" /><span className="hidden sm:inline">두 원고 비교</span></Link>
+          <Link to="/compare" className="icon-button sm:button sm:button-secondary sm:button-md sm:h-auto sm:w-auto" aria-label="두 원고 비교"><Scale className="size-4" /><span className="hidden sm:inline">두 원고 비교</span></Link>
           <Button onClick={() => navigate('/projects/new')}><Plus className="size-4" aria-hidden="true" /><span className="hidden xs:inline">새 프로젝트</span><span className="xs:hidden">새로 만들기</span></Button>
         </div>
       </header>

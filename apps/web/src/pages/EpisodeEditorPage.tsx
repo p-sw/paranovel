@@ -537,7 +537,7 @@ function ContextPanel({
           <Badge tone="plum">AI 컨텍스트</Badge>
         </div>
         <textarea
-          className="input mt-3 min-h-40 resize-y"
+          className="input mt-3"
           aria-label="이번 회차 전개 방향"
           value={episode.direction}
           onChange={(event) => onDirectionChange(event.target.value)}
@@ -651,7 +651,7 @@ function SceneFields({ projectId, episode }: { projectId: string; episode: Episo
         <label><span>시간</span><input className="input" value={scene.time ?? ''} onChange={(event) => setScene({ ...scene, time: event.target.value })} placeholder="예: 해 질 무렵" /></label>
         <label><span>시점</span><input className="input" value={scene.pointOfView ?? ''} onChange={(event) => setScene({ ...scene, pointOfView: event.target.value })} placeholder="예: 리안 3인칭 제한" /></label>
         <label><span>등장인물</span><input className="input" value={charactersText} onChange={(event) => setCharactersText(event.target.value)} placeholder="쉼표로 구분" /></label>
-        <label className="scene-goal"><span>장면 목표</span><textarea className="input min-h-20 resize-y" value={scene.goal ?? ''} onChange={(event) => setScene({ ...scene, goal: event.target.value })} placeholder="이 장면이 끝날 때 달라져야 하는 것" /></label>
+        <label className="scene-goal"><span>장면 목표</span><textarea className="input" value={scene.goal ?? ''} onChange={(event) => setScene({ ...scene, goal: event.target.value })} placeholder="이 장면이 끝날 때 달라져야 하는 것" /></label>
       </div>
       <Button className="mt-3 w-full" variant="secondary" size="sm" busy={saveMutation.isPending} onClick={() => saveMutation.mutate()}>장면 정보 저장</Button>
       <FieldError>{error}</FieldError>
@@ -792,7 +792,7 @@ function ContinuationSheet({
       description="정사, 아크, 회차 기억과 개선점을 확인한 뒤 문장을 제안합니다."
       wide
       footer={
-        <div className="flex w-full items-center justify-between gap-2">
+        <div className="action-row sm:justify-between">
           {active ? (
             <Button variant="secondary" onClick={() => abortRef.current?.abort()}><Square className="size-3.5 fill-current" /> 중단</Button>
           ) : (
@@ -802,7 +802,7 @@ function ContinuationSheet({
             <Button onClick={generate}><Sparkles className="size-4" /> {phase === 'error' ? '다시 생성' : '이어쓰기 시작'}</Button>
           ) : null}
           {(phase === 'done' || phase === 'cancelled') && preview ? (
-            <div className="flex gap-2"><Button variant="secondary" onClick={generate}><Sparkles className="size-4" /> 다시 생성</Button><Button onClick={apply}>{phase === 'cancelled' ? '부분 문장 사용' : blocked ? '이슈 확인 · 검토 필요로 삽입' : '커서에 삽입'}</Button></div>
+            <><Button variant="secondary" onClick={generate}><Sparkles className="size-4" /> 다시 생성</Button><Button onClick={apply}>{phase === 'cancelled' ? '부분 문장 사용' : blocked ? '검토 필요로 삽입' : '커서에 삽입'}</Button></>
           ) : null}
         </div>
       }
@@ -954,12 +954,12 @@ function ReplacementSheet({
       wide
       footer={
         applied ? (
-          <div className="flex w-full justify-end gap-2">
+          <div className="action-row">
             <Button variant="secondary" onClick={() => onOpenChange(false)}>이번만 적용</Button>
             {candidates.length ? <Button busy={acceptMutation.isPending} disabled={!selectedCandidates.length} onClick={() => acceptMutation.mutate()}>선택한 개선점 저장</Button> : null}
           </div>
         ) : (
-          <div className="flex w-full justify-end gap-2">
+          <div className="action-row">
             <Button variant="ghost" onClick={() => onOpenChange(false)}>취소</Button>
             <Button
               busy={applying}
