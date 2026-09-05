@@ -44,6 +44,7 @@ const variables: Record<string, unknown> = {
   boundary_context: '{"textBeforeCursor":"앞","textAfterCursor":"뒤"}',
   draft_text: '삽입 후보',
   review_issues: '[]',
+  task_context: '{"user":"조선 후기 한양을 배경으로 집필"}',
 };
 
 describe('expanded prompt contracts', () => {

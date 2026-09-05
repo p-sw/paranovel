@@ -34,6 +34,7 @@ Canon은 사용자가 확정한 사실만 포함합니다. 회차에서 새로 �
 - 백엔드: NestJS (`apps/api`)
 - 데이터베이스: SQLite
 - AI 게이트웨이: OpenRouter
+- 외부 레퍼런스 검색: Tavily Search
 - 기본 집필 모델: `google/gemini-3.8-flash`
 - 개선점 추출 모델: `openai/gpt-5.6-luna`
 - 기본 임베딩 모델: `openai/text-embedding-3-small`, 1536차원
@@ -65,6 +66,7 @@ npm test
 | --- | --- | --- |
 | `OPENROUTER_API_KEY` | 없음 | AI 생성과 임베딩에 사용하는 OpenRouter API 키 |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter 호환 API 기준 URL |
+| `TAVILY_API_KEY` | 없음 | 기획·집필용 웹 레퍼런스 검색 키. 미설정 시 웹 검색만 비활성화 |
 | `AI_WRITING_MODEL` | `google/gemini-3.8-flash` | 프로젝트 기획, 세계관, 집필, 기억 및 정합성 작업 모델 |
 | `AI_IMPROVEMENT_MODEL` | `openai/gpt-5.6-luna` | 전후 원고에서 개선점을 추출하는 모델 |
 | `OPENROUTER_EMBEDDING_MODEL` | `openai/text-embedding-3-small` | 검색 기억 임베딩 모델 |
@@ -106,6 +108,16 @@ volumes:
   - paranovel_data:/data
 ```
 
+## 웹 레퍼런스 검색
+
+`.env`에 `TAVILY_API_KEY`를 설정하고 API 서버를 재시작하면 프로젝트 청사진, 세계관, 아크, 회차 방향, 초안·이어쓰기, 비교용 초안 생성에 Tavily를 사용할 수 있습니다. Docker Compose도 같은 변수를 컨테이너에 전달합니다. 집필 모델은 OpenRouter의 function calling을 지원해야 합니다.
+
+최종 생성 전에 LLM이 `tavily_search` 도구로 레퍼런스 필요성을 판단하고, 서버가 [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search)를 호출한 결과를 LLM에 돌려줍니다. 검색이 불필요하면 곧바로 준비 단계를 마칩니다. 키를 설정한 경우에는 검색하지 않아도 이 판단을 위한 LLM 호출이 한 번 추가됩니다. 검색 결과는 제목·URL·최대 2,000자의 발췌와 함께 최종 작업에 전달하며, 최종 본문은 기존 방식으로 스트리밍합니다. 검색 판단과 최종 출력의 토큰 사용량은 같은 AI 실행 기록에 합산합니다.
+
+사용 조건, JSON 인자와 예시, 출처 확인, Canon 우선순위, 검색 실패 시 처리는 [`reference-tools.md`](./prompts/reference-tools.md)에, 조사 단계의 종료 조건은 [`reference-research.md`](./prompts/reference-research.md)에 있습니다. 검색 인자는 `query`(1~400자), `search_depth`(`basic` 또는 `advanced`), `max_results`(1~5)입니다. 요청당 최대 3회 검색하며, 검색 한 번의 제한 시간은 15초입니다. API 키는 서버에서만 사용하고 검색어만 Tavily에 전달합니다.
+
+키가 없으면 기존 생성 흐름을 사용합니다. 빈 결과, 검색 오류, 한도 도달 시에는 받은 자료로 작업을 계속하되 검색 성공이나 확인하지 못한 출처를 꾸미지 않도록 지시합니다. 프로젝트 인터뷰, 기억·장면·개선점 추출, 연속성 검토와 최소 수정에는 외부 검색을 추가하지 않습니다. 웹 자료는 참고용이며 작품의 확정 Canon이나 회차 기억으로 자동 편입되지 않습니다.
+
 ## Docker 단일 이미지
 
 ```bash
@@ -132,5 +144,5 @@ PLATFORMS=linux/amd64 ./scripts/build-and-push.sh ghcr.io/OWNER/paranovel:1.0.0
 ## 데이터 보호
 
 - `.env`와 SQLite 파일은 이미지 빌드 컨텍스트에서 제외됩니다.
-- API 키를 프런트엔드 코드나 브라우저 저장소에 넣지 마세요. OpenRouter 호출은 NestJS 서버에서만 수행합니다.
+- API 키를 프런트엔드 코드나 브라우저 저장소에 넣지 마세요. OpenRouter와 Tavily 호출은 NestJS 서버에서만 수행합니다.
 - SQLite 파일을 복사해 백업할 때는 쓰기를 중단하거나 SQLite의 안전한 백업 절차를 사용해 WAL 파일과의 불일치를 피하세요.

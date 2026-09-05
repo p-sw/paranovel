@@ -68,7 +68,7 @@ describe('backend core', () => {
         model: 'test',
       })),
     };
-    const runner = new ConcreteAiRunnerService(database, registry, gateway as never);
+    const runner = new ConcreteAiRunnerService(database, registry, gateway as never, { isConfigured: () => false } as never);
     await expect(
       runner.completeJson({
         task: 'episode_direction',
@@ -107,7 +107,7 @@ describe('backend core', () => {
         };
       }),
     };
-    const runner = new ConcreteAiRunnerService(database, registry, gateway as never);
+    const runner = new ConcreteAiRunnerService(database, registry, gateway as never, { isConfigured: () => false } as never);
     const result = await runner.completeJson({
       task: 'episode_direction',
       promptId: 'episode-direction',

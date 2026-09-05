@@ -7,8 +7,19 @@ import {
   type PromptId,
 } from '../prompts/prompt-registry.service';
 import { id, now, sha256, stringifyJson } from '../shared/utils';
-import type { CompletionResult, PromptRunInput } from './ai.types';
+import type {
+  ChatMessage,
+  CompletionRequest,
+  CompletionResult,
+  CompletionUsage,
+  PromptRunInput,
+} from './ai.types';
 import { OpenRouterGateway } from './openrouter.gateway';
+import {
+  TavilySearchService,
+  tavilySearchTool,
+  type ReferenceSearchResult,
+} from './tavily-search.service';
 import type { ZodType } from 'zod';
 
 const MEMORY_VARIABLE_KEYS = [
@@ -22,6 +33,26 @@ const MEMORY_VARIABLE_KEYS = [
   'retrieved_memories',
   'previous_episode_memories',
 ] as const;
+
+const REFERENCE_PROMPT_IDS = new Set([
+  'project-blueprint',
+  'worldbuilding-generate',
+  'arc-plan',
+  'episode-direction',
+  'episode-draft',
+  'episode-continue',
+  'comparison-draft',
+]);
+const MAX_REFERENCE_SEARCHES = 3;
+
+function addUsage(total: CompletionUsage, usage: CompletionUsage): CompletionUsage {
+  return {
+    promptTokens: usage.promptTokens === undefined
+      ? total.promptTokens : (total.promptTokens ?? 0) + usage.promptTokens,
+    completionTokens: usage.completionTokens === undefined
+      ? total.completionTokens : (total.completionTokens ?? 0) + usage.completionTokens,
+  };
+}
 
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
@@ -40,6 +71,7 @@ export class AiRunnerService {
     private readonly database: DatabaseService,
     private readonly prompts: PromptRegistryService,
     private readonly gateway: OpenRouterGateway,
+    private readonly tavily: TavilySearchService,
   ) {}
 
   writingModel(): string {
@@ -60,12 +92,14 @@ export class AiRunnerService {
     let value: T | undefined;
     const { runId } = await this.execute(input, async (request) => {
       let lastError: unknown;
+      let usage: CompletionUsage = {};
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const result = await this.gateway.complete(request);
+        usage = addUsage(usage, result.usage);
         try {
           const parsed: unknown = JSON.parse(result.content);
           value = input.validator.parse(parsed);
-          return result;
+          return { ...result, usage };
         } catch (error) {
           lastError = error;
         }
@@ -91,10 +125,24 @@ export class AiRunnerService {
     onRunStarted?: (runId: string) => void,
   ): Promise<{ runId: string; result: CompletionResult }> {
     const startedAt = Date.now();
+    const referenceSearchEnabled = this.tavily.isConfigured()
+      && REFERENCE_PROMPT_IDS.has(input.promptId)
+      && !input.tools?.length
+      && input.toolChoice !== 'none';
     const rendered = this.prompts.render(input.promptId as PromptId, input.variables, {
       includeCore: input.includeCore,
       includeMemoryContract: input.includeMemoryContract,
+      includeReferenceTools: referenceSearchEnabled,
     });
+    const researchPrompt = referenceSearchEnabled
+      ? this.prompts.render('reference-research', {
+          task_context: { system: rendered.system, user: rendered.user },
+        }, { includeCore: false, includeMemoryContract: false, includeReferenceTools: true })
+      : undefined;
+    const promptRefs = [...rendered.refs];
+    for (const ref of researchPrompt?.refs ?? []) {
+      if (!promptRefs.some((existing) => existing.id === ref.id)) promptRefs.push(ref);
+    }
     const model =
       input.modelRole === 'IMPROVEMENT' ? this.improvementModel() : this.writingModel();
     const runId = id();
@@ -111,8 +159,8 @@ export class AiRunnerService {
       projectId: input.projectId ?? null,
       episodeId: input.episodeId ?? null,
       model,
-      promptRefsJson: stringifyJson(rendered.refs),
-      contextHash: sha256(`${rendered.system}\n${rendered.user}`),
+      promptRefsJson: stringifyJson(promptRefs),
+      contextHash: sha256(`${rendered.system}\n${rendered.user}${researchPrompt ? `\n${researchPrompt.system}\n${researchPrompt.user}` : ''}`),
       memoryRevisionHash: sha256(stableJson(memoryVariables)),
       inputTokens: null,
       outputTokens: null,
@@ -124,12 +172,36 @@ export class AiRunnerService {
     }).run();
     onRunStarted?.(runId);
     try {
-      const result = await invoke({
+      const research = researchPrompt
+        ? await this.researchReferences({
+            model,
+            messages: [
+              { role: 'system', content: researchPrompt.system },
+              { role: 'user', content: researchPrompt.user },
+            ],
+            tools: [tavilySearchTool],
+            toolChoice: 'auto',
+            temperature: 0.2,
+            maxTokens: 1_500,
+            signal: input.signal,
+          })
+        : { references: [], usage: {} };
+      input.signal?.throwIfAborted();
+      const messages: ChatMessage[] = [
+        { role: 'system', content: rendered.system },
+        { role: 'user', content: rendered.user },
+      ];
+      if (research.references.length > 0) {
+        messages.push({
+          role: 'user',
+          content: stringifyJson({ tavily_references: research.references }),
+        });
+      }
+      // Research completes before final generation so tool narration cannot
+      // enter the editor stream or interfere with strict JSON validation.
+      const completion = await invoke({
         model,
-        messages: [
-          { role: 'system', content: rendered.system },
-          { role: 'user', content: rendered.user },
-        ],
+        messages,
         schema: input.schema,
         tools: input.tools,
         toolChoice: input.toolChoice,
@@ -137,6 +209,7 @@ export class AiRunnerService {
         maxTokens: input.maxTokens,
         signal: input.signal,
       });
+      const result = { ...completion, usage: addUsage(research.usage, completion.usage) };
       this.database.orm
         .update(aiRuns)
         .set({
@@ -163,5 +236,42 @@ export class AiRunnerService {
         .run();
       throw error;
     }
+  }
+
+  private async researchReferences(
+    request: CompletionRequest,
+  ): Promise<{ references: ReferenceSearchResult[]; usage: CompletionUsage }> {
+    const messages = [...request.messages];
+    const references: ReferenceSearchResult[] = [];
+    let usage: CompletionUsage = {};
+    let searchCount = 0;
+    for (let round = 0; round < MAX_REFERENCE_SEARCHES; round += 1) {
+      request.signal?.throwIfAborted();
+      const result = await this.gateway.complete({ ...request, messages: [...messages] });
+      usage = addUsage(usage, result.usage);
+      if (result.toolCalls.length === 0) break;
+      messages.push(result.assistantMessage ?? {
+        role: 'assistant',
+        content: result.content || null,
+        tool_calls: result.toolCalls,
+      });
+      for (const call of result.toolCalls) {
+        request.signal?.throwIfAborted();
+        let reference: ReferenceSearchResult;
+        if (searchCount >= MAX_REFERENCE_SEARCHES) {
+          reference = { results: [], error: { code: 'SEARCH_LIMIT_REACHED' } };
+        } else if (call.function.name !== tavilySearchTool.function.name) {
+          searchCount += 1;
+          reference = { results: [], error: { code: 'UNKNOWN_TOOL' } };
+        } else {
+          searchCount += 1;
+          reference = await this.tavily.search(call.function.arguments, request.signal);
+        }
+        references.push(reference);
+        messages.push({ role: 'tool', tool_call_id: call.id, content: stringifyJson(reference) });
+      }
+      if (searchCount >= MAX_REFERENCE_SEARCHES) break;
+    }
+    return { references, usage };
   }
 }

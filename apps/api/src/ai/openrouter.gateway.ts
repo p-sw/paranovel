@@ -42,6 +42,7 @@ export class OpenRouterGateway {
         completionTokens: payload.usage?.completion_tokens,
       },
       model: payload.model ?? request.model,
+      assistantMessage: { ...message, role: 'assistant', content: message.content ?? null },
     };
   }
 

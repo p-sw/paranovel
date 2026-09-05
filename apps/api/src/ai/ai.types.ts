@@ -5,6 +5,8 @@ export interface ChatMessage {
   content: string | null;
   tool_call_id?: string;
   tool_calls?: ToolCall[];
+  reasoning?: string | null;
+  reasoning_details?: unknown[];
 }
 
 export interface ToolDefinition {
@@ -33,6 +35,8 @@ export interface CompletionResult {
   toolCalls: ToolCall[];
   usage: CompletionUsage;
   model: string;
+  // Preserve provider metadata (including reasoning signatures) across tool turns.
+  assistantMessage?: ChatMessage;
 }
 
 export interface CompletionRequest {

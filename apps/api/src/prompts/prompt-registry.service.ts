@@ -11,6 +11,8 @@ import { interpolate, sha256 } from '../shared/utils';
 export const REQUIRED_PROMPT_IDS = [
   'novelist-core',
   'memory-contract',
+  'reference-tools',
+  'reference-research',
   'project-interview',
   'project-blueprint',
   'worldbuilding-generate',
@@ -120,7 +122,7 @@ export class PromptRegistryService implements OnModuleInit {
   render(
     taskPromptId: PromptId,
     variables: Record<string, unknown>,
-    options: { includeCore?: boolean; includeMemoryContract?: boolean } = {},
+    options: { includeCore?: boolean; includeMemoryContract?: boolean; includeReferenceTools?: boolean } = {},
   ): RenderedPrompt {
     const prompts: PromptDefinition[] = [];
     if (options.includeCore !== false && taskPromptId !== 'novelist-core') {
@@ -133,6 +135,9 @@ export class PromptRegistryService implements OnModuleInit {
       )
     ) {
       prompts.push(this.get('memory-contract'));
+    }
+    if (options.includeReferenceTools && taskPromptId !== 'reference-tools') {
+      prompts.push(this.get('reference-tools'));
     }
     const task = this.get(taskPromptId);
     prompts.push(task);
