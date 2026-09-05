@@ -59,11 +59,13 @@ export interface PromptRunInput {
   schema?: { name: string; value: JsonSchema };
   tools?: ToolDefinition[];
   toolChoice?: 'auto' | 'required' | 'none';
-  modelRole?: 'WRITING' | 'IMPROVEMENT';
+  modelRole?: 'WRITING' | 'IMPROVEMENT' | 'CHAT';
+  history?: ChatMessage[];
   temperature?: number;
   maxTokens?: number;
   includeCore?: boolean;
   includeMemoryContract?: boolean;
+  includeReferenceTools?: boolean;
   signal?: AbortSignal;
 }
 

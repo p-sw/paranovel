@@ -32,7 +32,7 @@ beforeEach(() => {
   vi.spyOn(api.episodes, 'propose').mockResolvedValue(proposal);
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 async function openCreator() {
   const user = userEvent.setup();
@@ -42,6 +42,75 @@ async function openCreator() {
 }
 
 describe('new episode flow', () => {
+  it('keeps the same readable textarea and scroll position through writing, checking and completion', async () => {
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
+      start(controller) { stream = controller; },
+    }))));
+    const user = await openCreator();
+    await user.click(screen.getByRole('button', { name: '다음' }));
+    await user.click(await screen.findByRole('button', { name: 'AI 초안 만들기' }));
+    const textarea = screen.getByLabelText('AI 초안 수정') as HTMLTextAreaElement;
+    const draft = '문을 열자 빛이 쏟아졌다.\n\n'.repeat(500);
+    const send = async (event: unknown) => act(async () => {
+      stream.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+    });
+    await send({ type: 'stage', stage: 'WRITING' });
+    await send({ type: 'delta', text: draft });
+    textarea.scrollTop = 640;
+    textarea.dispatchEvent(new Event('scroll'));
+    await send({ type: 'stage', stage: 'CHECKING' });
+
+    expect(screen.getByLabelText('AI 초안 수정')).toBe(textarea);
+    expect(textarea).toHaveValue(draft);
+    expect(textarea.readOnly).toBe(true);
+    expect(textarea).toBeEnabled();
+    expect(textarea.scrollTop).toBe(640);
+    const status = screen.getByText('일관성을 확인하는 중');
+    expect(status.closest('.sheet-body')).toBeNull();
+    expect(status).toBeVisible();
+
+    const repaired = draft.replaceAll('빛이', '비가');
+    await send({ type: 'done', content: repaired, issues: [], blocked: false });
+    expect(screen.getByLabelText('AI 초안 수정')).toBe(textarea);
+    expect(textarea).toHaveValue(repaired);
+    expect(textarea.readOnly).toBe(false);
+    expect(textarea.scrollTop).toBe(640);
+    expect(screen.getByRole('button', { name: '초안 저장' })).toBeEnabled();
+  });
+
+  it.each(['error', 'empty', 'eof', 'cancel'] as const)('preserves the draft when repair ends with %s', async (failure) => {
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
+      start(controller) { stream = controller; },
+    }))));
+    const create = vi.spyOn(api.episodes, 'create').mockResolvedValue({} as never);
+    const user = await openCreator();
+    await user.click(screen.getByRole('button', { name: '다음' }));
+    await user.click(await screen.findByRole('button', { name: 'AI 초안 만들기' }));
+    const send = async (event: unknown) => act(async () => {
+      stream.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+    });
+    await send({ type: 'delta', text: '보존해야 할 원고.' });
+    await send({ type: 'stage', stage: 'CHECKING' });
+    await send({ type: 'stage', stage: 'REPAIRING' });
+    await send({ type: 'reset' });
+    await send({ type: 'delta', text: '아직 완성되지 않은 보정' });
+    expect(screen.getByText('충돌을 바로잡는 중')).toBeVisible();
+    expect(screen.getByLabelText('AI 초안 수정')).toHaveValue('보존해야 할 원고.');
+
+    if (failure === 'error') await send({ type: 'error', code: 'FAILED', message: '보정 오류' });
+    if (failure === 'empty') await send({ type: 'done', content: ' ', issues: [], blocked: false });
+    if (failure === 'eof') await act(async () => stream.close());
+    if (failure === 'cancel') await user.click(screen.getByRole('button', { name: '생성 중단' }));
+
+    expect(await screen.findByRole('button', { name: '검토 필요로 저장' })).toBeEnabled();
+    expect(screen.getByLabelText('AI 초안 수정')).toHaveValue('보존해야 할 원고.');
+    expect((screen.getByLabelText('AI 초안 수정') as HTMLTextAreaElement).readOnly).toBe(false);
+    await user.click(screen.getByRole('button', { name: '검토 필요로 저장' }));
+    expect(create).toHaveBeenCalledWith('story', expect.objectContaining({ content: '보존해야 할 원고.', forceNeedsReview: true }), expect.any(String));
+  });
+
   it('starts with one optional request and generates the title and direction on next, even when empty', async () => {
     const generate = vi.spyOn(api.episodes, 'generate').mockResolvedValue({ content: '완성된 첫 문장.', issues: [], blocked: false });
     const create = vi.spyOn(api.episodes, 'create').mockResolvedValue({} as never);

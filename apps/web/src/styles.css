@@ -84,9 +84,36 @@
   .side-nav-item.active { @apply bg-plum-50 text-plum-700; }
   .mobile-topbar { @apply fixed inset-x-0 top-0 z-30 flex h-16 items-center border-b border-line bg-surface/95 px-2 backdrop-blur lg:hidden; }
   .shell-main { @apply min-h-screen min-h-[100dvh] min-w-0 pb-24 pt-16 lg:ml-60 lg:pb-0 lg:pt-0; }
-  .mobile-tabbar { @apply fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-line bg-surface/95 pb-[env(safe-area-inset-bottom)] shadow-[0_-8px_30px_rgba(50,44,37,.06)] backdrop-blur lg:hidden; }
+  .mobile-tabbar { @apply fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-line bg-surface/95 pb-[env(safe-area-inset-bottom)] shadow-[0_-8px_30px_rgba(50,44,37,.06)] backdrop-blur lg:hidden; }
   .mobile-tab { @apply flex min-h-16 flex-col items-center justify-center gap-1 text-[11px] font-semibold text-muted; }
   .mobile-tab.active { @apply text-plum-700; }
+  .shell-main-chat { height: 100dvh; min-height: 0; padding-bottom: calc(4rem + env(safe-area-inset-bottom)); }
+  .chat-page { @apply mx-auto flex h-full min-h-0 w-full max-w-5xl flex-col px-3 sm:px-6; }
+  .chat-heading { @apply flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-line py-4 sm:py-5; }
+  .chat-heading > p { @apply w-full; }
+  .chat-heading .section-title { @apply text-2xl; }
+  .chat-history-wrap { @apply relative flex min-h-0 flex-1 flex-col; }
+  .chat-history { @apply min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain py-5; overflow-anchor: none; }
+  .chat-welcome { @apply mx-auto flex max-w-lg flex-col items-center gap-4 px-3 py-8 text-center; }
+  .chat-message { @apply min-w-0 max-w-full rounded-2xl px-4 py-3 sm:px-5 sm:py-4; overflow-wrap: anywhere; }
+  .chat-message-user { @apply ml-8 border border-plum-100 bg-plum-50 sm:ml-20; }
+  .chat-message-assistant { @apply border border-line bg-surface; }
+  .chat-speaker { @apply mb-2 text-xs font-bold text-plum-700; }
+  .chat-message-text { @apply whitespace-pre-wrap text-sm leading-7 text-ink sm:text-base; }
+  .chat-processing { @apply flex items-center gap-2 text-sm leading-6 text-muted; }
+  .chat-processing > svg { @apply shrink-0; }
+  .chat-proposal { @apply mt-4 overflow-hidden rounded-xl border border-line bg-paper p-3 sm:p-4; }
+  .chat-change-list { @apply mt-3 divide-y divide-line text-sm; }
+  .chat-change-list > div { @apply py-3; }
+  .chat-change-list dt { @apply mb-2 font-bold text-muted; }
+  .chat-change-list dd p { @apply whitespace-pre-wrap leading-6; overflow-wrap: anywhere; }
+  .chat-change-pair { @apply grid min-w-0 gap-3 sm:grid-cols-2; }
+  .chat-change-pair > div { @apply min-w-0; }
+  .chat-change-label { @apply mb-1 block text-[11px] font-semibold text-muted; }
+  .chat-proposal-effect { @apply mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3; }
+  .chat-latest { @apply absolute bottom-3 left-1/2 -translate-x-1/2 whitespace-nowrap shadow-lift; }
+  .chat-composer { @apply shrink-0 border-t border-line bg-paper pb-3 pt-3; }
+  .chat-composer textarea.input { @apply min-h-20 resize-none text-base; max-height: 25dvh; }
   .focused-shell .shell-main { @apply pb-0; }
   .dropdown-content { @apply z-50 min-w-52 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-line bg-surface p-1.5 shadow-lift; max-height: var(--radix-dropdown-menu-content-available-height); }
   .dropdown-item { @apply flex min-h-11 cursor-pointer items-center gap-2 break-words rounded-lg px-3 py-2 text-sm text-ink outline-none data-[highlighted]:bg-plum-50 data-[highlighted]:text-plum-700; overflow-wrap: anywhere; }
@@ -135,9 +162,11 @@
   .episode-row h2 { @apply truncate font-story text-lg font-bold; }
   .proposal-box { @apply rounded-2xl border border-plum-100 bg-plum-50 p-4; }
   .generation-preview { @apply space-y-4; }
+  .sheet-body-header { @apply shrink-0 px-5 pt-4 sm:px-6; }
   .generation-status { @apply flex items-center gap-2 text-sm font-bold text-plum-700; }
   .story-preview { @apply min-h-56 whitespace-pre-wrap rounded-2xl border border-line bg-paper p-5 font-story text-[16px] leading-8 text-ink; }
   .story-preview.editable { @apply block w-full resize-y outline-none focus:border-plum-500 focus:ring-4 focus:ring-plum-100; min-height: clamp(18rem, 48dvh, 36rem); }
+  .story-preview.draft-preview { height: clamp(12rem, 42dvh, 36rem); min-height: 0; resize: none; overflow-y: auto; overscroll-behavior: contain; }
   .story-preview.tall { @apply min-h-[52vh]; }
   .warning-box { @apply rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950; }
   .warning-box strong { @apply font-bold; }

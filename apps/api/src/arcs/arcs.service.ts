@@ -87,6 +87,12 @@ export class ArcsService {
   }
 
   async create(projectId: string, body: unknown) {
+    const value = this.persistCreate(projectId, body);
+    await this.syncMemory(projectId, value.id);
+    return value;
+  }
+
+  persistCreate(projectId: string, body: unknown) {
     const input = (body ?? {}) as Record<string, unknown>;
     const start = this.integer(input.startEpisodeNumber ?? input.startEpisode, 'startEpisodeNumber');
     const end = this.integer(input.endEpisodeNumber ?? input.endEpisode, 'endEpisodeNumber');
@@ -113,7 +119,6 @@ export class ArcsService {
       if (status === 'ACTIVE') this.demoteCurrent(projectId);
       this.database.orm.insert(arcs).values(row).run();
     })();
-    await this.index(row);
     return this.get(projectId, arcId);
   }
 
@@ -128,6 +133,12 @@ export class ArcsService {
   }
 
   async update(projectId: string, arcId: string, body: unknown) {
+    const value = this.persistUpdate(projectId, arcId, body);
+    await this.syncMemory(projectId, arcId);
+    return value;
+  }
+
+  persistUpdate(projectId: string, arcId: string, body: unknown) {
     const current = this.database.orm
       .select()
       .from(arcs)
@@ -170,7 +181,6 @@ export class ArcsService {
       if (result.changes !== 1) throw new ConflictException('Arc revision changed during update');
     })();
     const updated = this.database.orm.select().from(arcs).where(eq(arcs.id, arcId)).get()!;
-    await this.index(updated);
     return this.toView(updated);
   }
 
@@ -215,6 +225,12 @@ export class ArcsService {
     const number = Number(value);
     if (!Number.isInteger(number) || number < 1) throw new BadRequestException(`${field} must be a positive integer`);
     return number;
+  }
+
+  async syncMemory(projectId: string, arcId: string): Promise<void> {
+    this.get(projectId, arcId);
+    const row = this.database.orm.select().from(arcs).where(eq(arcs.id, arcId)).get()!;
+    await this.index(row);
   }
 
   private async index(row: typeof arcs.$inferSelect): Promise<void> {

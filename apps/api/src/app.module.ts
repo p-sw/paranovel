@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { AiModule } from './ai/ai.module';
 import { ArcsModule } from './arcs/arcs.module';
 import { CanonModule } from './canon/canon.module';
+import { ChatModule } from './chat/chat.module';
 import { ComparisonsModule } from './comparisons/comparisons.module';
 import { DatabaseModule } from './database/database.module';
 import { EpisodesModule } from './episodes/episodes.module';
@@ -33,6 +34,7 @@ const webDistPath = process.env.WEB_DIST_PATH
     ImprovementsModule,
     EpisodesModule,
     ComparisonsModule,
+    ChatModule,
   ],
   controllers: [HealthController],
 })

@@ -6,6 +6,6 @@ import { TavilySearchService } from './tavily-search.service';
 @Global()
 @Module({
   providers: [OpenRouterGateway, TavilySearchService, AiRunnerService],
-  exports: [OpenRouterGateway, AiRunnerService],
+  exports: [OpenRouterGateway, AiRunnerService, TavilySearchService],
 })
 export class AiModule {}

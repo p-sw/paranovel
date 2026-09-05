@@ -4,6 +4,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 const AppShell = lazy(() => import('./components/AppShell'));
 const ArcPage = lazy(() => import('./pages/ArcPage'));
 const CanonPage = lazy(() => import('./pages/CanonPage'));
+const ChatPage = lazy(() => import('./pages/ChatPage'));
 const ComparePage = lazy(() => import('./pages/ComparePage'));
 const EpisodeEditorPage = lazy(() => import('./pages/EpisodeEditorPage'));
 const EpisodesPage = lazy(() => import('./pages/EpisodesPage'));
@@ -25,6 +26,7 @@ export default function App() {
           <Route path="episodes" element={<EpisodesPage />} />
           <Route path="episodes/:episodeId" element={<EpisodeEditorPage />} />
           <Route path="canon" element={<CanonPage />} />
+          <Route path="chat" element={<ChatPage />} />
           <Route path="arc" element={<ArcPage />} />
           <Route path="improvements" element={<ImprovementsPage />} />
           <Route path="settings" element={<ProjectSettingsPage />} />

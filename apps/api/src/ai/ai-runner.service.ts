@@ -13,6 +13,7 @@ import type {
   CompletionResult,
   CompletionUsage,
   PromptRunInput,
+  ToolDefinition,
 } from './ai.types';
 import { OpenRouterGateway } from './openrouter.gateway';
 import {
@@ -82,6 +83,74 @@ export class AiRunnerService {
     return process.env.AI_IMPROVEMENT_MODEL ?? 'openai/gpt-5.6-luna';
   }
 
+  chatModel(): string {
+    return process.env.AI_CHAT_MODEL ?? 'openai/gpt-5.6-luna';
+  }
+
+  async completeChat<T>(
+    input: PromptRunInput & {
+      validator: ZodType<T>;
+      readTools: ToolDefinition[];
+      readTool: (name: string, argumentsJson: string) => Promise<unknown>;
+    },
+    onRunStarted?: (runId: string) => void,
+  ): Promise<{ runId: string; value: T }> {
+    let value: T | undefined;
+    const { runId } = await this.execute({ ...input, modelRole: 'CHAT', includeReferenceTools: input.readTools.some((tool) => tool.function.name === tavilySearchTool.function.name) }, async (request) => {
+      const messages = [...request.messages];
+      let usage: CompletionUsage = {};
+      let calls = 0;
+      let referenceSearches = 0;
+      let remainingCharacters = 60_000;
+      for (let round = 0; round < 4 && calls < 8; round += 1) {
+        input.signal?.throwIfAborted();
+        const response = await this.gateway.complete({
+          ...request, messages: [...messages], schema: undefined,
+          tools: input.readTools, toolChoice: 'auto', maxTokens: 2_000,
+        });
+        usage = addUsage(usage, response.usage);
+        if (!response.toolCalls.length) break;
+        messages.push(response.assistantMessage ?? {
+          role: 'assistant', content: response.content || null, tool_calls: response.toolCalls,
+        });
+        for (const call of response.toolCalls) {
+          input.signal?.throwIfAborted();
+          let result: unknown;
+          if (calls >= 8 || remainingCharacters <= 0) {
+            result = { error: 'READ_LIMIT_REACHED' };
+          } else {
+            calls += 1;
+            if (call.function.name === tavilySearchTool.function.name && referenceSearches >= MAX_REFERENCE_SEARCHES) {
+              result = { error: 'SEARCH_LIMIT_REACHED' };
+            } else {
+              if (call.function.name === tavilySearchTool.function.name) referenceSearches += 1;
+              result = await input.readTool(call.function.name, call.function.arguments);
+            }
+          }
+          let content = stringifyJson(result);
+          if (content.length > remainingCharacters && remainingCharacters > 0) {
+            content = stringifyJson({ truncated: true, excerpt: content.slice(0, Math.max(0, remainingCharacters - 100)) });
+          }
+          remainingCharacters = Math.max(0, remainingCharacters - content.length);
+          messages.push({ role: 'tool', tool_call_id: call.id, content });
+        }
+      }
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const response = await this.gateway.complete({
+          ...request, messages: [...messages], tools: undefined, toolChoice: 'none',
+        });
+        usage = addUsage(usage, response.usage);
+        try {
+          value = input.validator.parse(JSON.parse(response.content));
+          return { ...response, usage };
+        } catch (error) { lastError = error; }
+      }
+      throw new BadGatewayException(`AI returned invalid chat output after one retry: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+    }, onRunStarted);
+    return { runId, value: value as T };
+  }
+
   async completeText(input: PromptRunInput): Promise<{ runId: string; result: CompletionResult }> {
     return this.execute(input, (request) => this.gateway.complete(request));
   }
@@ -132,7 +201,7 @@ export class AiRunnerService {
     const rendered = this.prompts.render(input.promptId as PromptId, input.variables, {
       includeCore: input.includeCore,
       includeMemoryContract: input.includeMemoryContract,
-      includeReferenceTools: referenceSearchEnabled,
+      includeReferenceTools: referenceSearchEnabled || input.includeReferenceTools,
     });
     const researchPrompt = referenceSearchEnabled
       ? this.prompts.render('reference-research', {
@@ -144,7 +213,8 @@ export class AiRunnerService {
       if (!promptRefs.some((existing) => existing.id === ref.id)) promptRefs.push(ref);
     }
     const model =
-      input.modelRole === 'IMPROVEMENT' ? this.improvementModel() : this.writingModel();
+      input.modelRole === 'CHAT' ? this.chatModel()
+        : input.modelRole === 'IMPROVEMENT' ? this.improvementModel() : this.writingModel();
     const runId = id();
     const createdAt = now();
     const memoryVariables = Object.fromEntries(
@@ -160,7 +230,7 @@ export class AiRunnerService {
       episodeId: input.episodeId ?? null,
       model,
       promptRefsJson: stringifyJson(promptRefs),
-      contextHash: sha256(`${rendered.system}\n${rendered.user}${researchPrompt ? `\n${researchPrompt.system}\n${researchPrompt.user}` : ''}`),
+      contextHash: sha256(`${rendered.system}\n${rendered.user}${input.history ? `\n${stringifyJson(input.history)}` : ''}${researchPrompt ? `\n${researchPrompt.system}\n${researchPrompt.user}` : ''}`),
       memoryRevisionHash: sha256(stableJson(memoryVariables)),
       inputTokens: null,
       outputTokens: null,
@@ -190,6 +260,7 @@ export class AiRunnerService {
       const messages: ChatMessage[] = [
         { role: 'system', content: rendered.system },
         { role: 'user', content: rendered.user },
+        ...(input.history ?? []),
       ];
       if (research.references.length > 0) {
         messages.push({

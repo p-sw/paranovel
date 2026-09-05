@@ -169,7 +169,40 @@ export const aiRuns = sqliteTable('ai_runs', {
   completedAt: text('completed_at'),
 });
 
+export const chatMessages = sqliteTable('chat_messages', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  clientMessageId: text('client_message_id').notNull(),
+  role: text('role').notNull(),
+  content: text('content').notNull(),
+  status: text('status').notNull(),
+  error: text('error'),
+  runId: text('run_id'),
+  createdAt: text('created_at').notNull(),
+});
+
+export const chatProposals = sqliteTable('chat_proposals', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  messageId: text('message_id').notNull(),
+  kind: text('kind').notNull(),
+  operation: text('operation').notNull(),
+  title: text('title').notNull(),
+  targetId: text('target_id'),
+  beforeJson: text('before_json').notNull(),
+  afterJson: text('after_json').notNull(),
+  effectsJson: text('effects_json').notNull(),
+  activeArcsJson: text('active_arcs_json'),
+  status: text('status').notNull(),
+  resultJson: text('result_json'),
+  indexTargetsJson: text('index_targets_json').notNull(),
+  createdAt: text('created_at').notNull(),
+  appliedAt: text('applied_at'),
+});
+
 export const schema = {
+  chatMessages,
+  chatProposals,
   projects,
   projectCreationSessions,
   episodes,

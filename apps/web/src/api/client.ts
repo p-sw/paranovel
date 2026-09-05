@@ -1,3 +1,5 @@
+import { aiStreamEventSchema } from '@paranovel/contracts';
+import type { ChatHistory, ChatProposal } from '@paranovel/contracts';
 import type {
   Arc,
   ArcPlanProposal,
@@ -90,12 +92,14 @@ async function ndjson(
   let issues: StreamResult['issues'] = [];
   let blocked = false;
   let baseRevision: number | undefined;
+  let completed = false;
+  let replacing = false;
 
   const consume = (line: string) => {
-    if (!line.trim()) return;
+    if (!line.trim() || completed) return;
     let event: StreamEvent;
     try {
-      event = JSON.parse(line) as StreamEvent;
+      event = aiStreamEventSchema.parse(JSON.parse(line));
     } catch {
       throw new ApiError('AI 응답을 해석하지 못했습니다.', 502, line);
     }
@@ -103,32 +107,57 @@ async function ndjson(
       runId = event.runId;
       baseRevision = event.baseRevision;
     }
-    if (event.type === 'delta') content += event.text;
-    if (event.type === 'reset') content = '';
+    // A reset starts a replacement attempt. Keep the readable draft until
+    // its replacement is committed by a valid terminal event.
+    if (event.type === 'delta' && !replacing) content += event.text;
+    if (event.type === 'reset') replacing = true;
     if (event.type === 'done') {
+      if (!event.content.trim()) {
+        throw new ApiError('AI가 빈 원고를 반환했습니다. 생성된 원고를 확인하고 다시 시도해 주세요.', 502);
+      }
       content = event.content;
       issues = event.issues;
       blocked = event.blocked;
       baseRevision = event.baseRevision ?? baseRevision;
+      completed = true;
     }
     if (event.type === 'error') throw new ApiError(event.message, 502);
     onEvent(event, content);
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() ?? '';
-    for (const line of lines) consume(line);
-    if (done) break;
+  const abort = () => { void reader.cancel(signal?.reason).catch(() => undefined); };
+  signal?.addEventListener('abort', abort, { once: true });
+  try {
+    while (!completed) {
+      signal?.throwIfAborted();
+      const { done, value } = await reader.read();
+      signal?.throwIfAborted();
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) consume(line);
+      if (done) break;
+    }
+    if (buffer.trim()) consume(buffer);
+    if (!completed) {
+      throw new ApiError('AI 응답이 완료되기 전에 연결이 끊겼습니다. 생성된 원고를 확인해 주세요.', 502);
+    }
+    return { content, issues, blocked, runId, baseRevision };
+  } finally {
+    signal?.removeEventListener('abort', abort);
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
-  if (buffer.trim()) consume(buffer);
-
-  return { content, issues, blocked, runId, baseRevision };
 }
 
 export const api = {
+  chat: {
+    history: (projectId: string) => json<ChatHistory>(`/projects/${projectId}/chat/messages`),
+    send: (projectId: string, input: { content: string; clientMessageId: string }) =>
+      json<ChatHistory>(`/projects/${projectId}/chat/messages`, { method: 'POST', body: input }),
+    apply: (projectId: string, proposalId: string) =>
+      json<{ proposal: ChatProposal }>(`/projects/${projectId}/chat/proposals/${proposalId}/apply`, { method: 'POST' }),
+  },
   projects: {
     list: () => json<Project[]>('/projects'),
     get: (projectId: string) => json<Project>(`/projects/${projectId}`),
@@ -147,13 +176,13 @@ export const api = {
     get: (sessionId: string) => json<ProjectSessionResult>(`/project-sessions/${sessionId}`),
     respond: (
       sessionId: string,
-      input: { questionId: string; answer?: string | string[]; skipOptional?: true },
+      input: { questionId: string; answer?: string | string[]; otherAnswer?: string; skipOptional?: true; position?: number; expectedState?: string },
     ) =>
       json<ProjectSessionResult>(`/project-sessions/${sessionId}/respond`, { method: 'POST', body: input }),
-    commit: (sessionId: string, blueprint: ProjectBlueprint) =>
+    commit: (sessionId: string, blueprint: ProjectBlueprint, expectedState?: string) =>
       json<{ project: Project }>(`/project-sessions/${sessionId}/commit`, {
         method: 'POST',
-        body: { blueprint: { ...blueprint, defaultTargetChars: blueprint.defaultTargetChars ?? 5000 } },
+        body: { blueprint: { ...blueprint, defaultTargetChars: blueprint.defaultTargetChars ?? 5000 }, ...(expectedState ? { expectedState } : {}) },
       }),
   },
   episodes: {

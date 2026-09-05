@@ -64,13 +64,19 @@ export class ImprovementsService {
   }
 
   async create(body: unknown) {
+    const value = this.persistCreate(body);
+    await this.syncMemory(value.id);
+    return value;
+  }
+
+  persistCreate(body: unknown) {
     const input = (body ?? {}) as Record<string, unknown>;
     const scope = assertEnum(input.scope, 'scope', SCOPES);
     const projectId = typeof input.projectId === 'string' ? input.projectId : null;
     if ((scope === 'PROJECT') !== Boolean(projectId)) {
       throw new BadRequestException('PROJECT scope requires projectId and GLOBAL scope forbids it');
     }
-    return this.insert({ ...input, scope, projectId, source: input.source ?? 'MANUAL' });
+    return this.persistInsert({ ...input, scope, projectId, source: input.source ?? 'MANUAL' });
   }
 
   async candidates(body: unknown): Promise<{ candidates: ImprovementCandidate[] }> {
@@ -177,6 +183,12 @@ export class ImprovementsService {
   }
 
   async update(improvementId: string, body: unknown) {
+    const value = this.persistUpdate(improvementId, body);
+    await this.syncMemory(improvementId);
+    return value;
+  }
+
+  persistUpdate(improvementId: string, body: unknown) {
     const current = this.require(improvementId);
     const input = (body ?? {}) as Record<string, unknown>;
     if (!Number.isInteger(input.expectedRevision)) {
@@ -226,8 +238,6 @@ export class ImprovementsService {
       throw new ConflictException('Improvement revision changed during update');
     }
     const updated = this.require(improvementId);
-    if (updated.active) await this.index(updated);
-    else this.memory.removeSource('IMPROVEMENT', improvementId);
     return this.toView(updated);
   }
 
@@ -237,10 +247,9 @@ export class ImprovementsService {
     this.database.orm.delete(improvements).where(eq(improvements.id, improvementId)).run();
   }
 
-  private async insert(input: Record<string, unknown>) {
+  private persistInsert(input: Record<string, unknown>) {
     const row = this.prepareRow(input, now());
     this.database.orm.insert(improvements).values(row).run();
-    await this.index(row as typeof improvements.$inferSelect);
     return this.toView(row as typeof improvements.$inferSelect);
   }
 
@@ -288,6 +297,14 @@ export class ImprovementsService {
     const row = this.database.orm.select().from(improvements).where(eq(improvements.id, improvementId)).get();
     if (!row) throw new NotFoundException('Improvement not found');
     return row;
+  }
+
+  get(improvementId: string) { return this.toView(this.require(improvementId)); }
+
+  async syncMemory(improvementId: string): Promise<void> {
+    const row = this.require(improvementId);
+    if (row.active) await this.index(row);
+    else this.memory.removeSource('IMPROVEMENT', improvementId);
   }
 
   private async index(row: typeof improvements.$inferSelect): Promise<void> {

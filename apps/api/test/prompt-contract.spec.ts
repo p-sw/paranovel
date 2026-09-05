@@ -16,6 +16,7 @@ const variables: Record<string, unknown> = {
   recent_episode_memories: '[]',
   open_foreshadowing: '[]',
   retrieved_memories: '[]',
+  record_catalog: '[]',
   start_episode_number: 1,
   arc_request: '',
   generation_request: '',

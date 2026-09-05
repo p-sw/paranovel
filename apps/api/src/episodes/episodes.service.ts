@@ -1,4 +1,5 @@
 import {
+  BadGatewayException,
   BadRequestException,
   ConflictException,
   Injectable,
@@ -601,12 +602,13 @@ export class EpisodesService {
       (text) => emit({ type: 'delta', text }),
       (runId) => emit({ type: 'meta', runId, baseRevision: input.baseRevision }),
     );
+    if (!draft.result.content.trim()) throw new BadGatewayException('AI returned an empty episode draft');
+    signal?.throwIfAborted();
     emit({ type: 'stage', stage: 'CHECKING' });
     let review = await this.reviewContinuity(input, draft.result.content, signal);
     let finalContent = draft.result.content;
     if (review.some((issue) => issue.severity === 'BLOCKING')) {
       emit({ type: 'stage', stage: 'REPAIRING' });
-      emit({ type: 'reset' });
       const repaired = await this.ai.streamText(
         {
           task: 'continuity_repair',
@@ -624,12 +626,17 @@ export class EpisodesService {
           signal,
           maxTokens: 32_000,
         },
-        (text) => emit({ type: 'delta', text }),
+        // Keep the completed draft visible until the entire replacement and
+        // its review succeed. Failed or cancelled repairs never erase it.
+        () => undefined,
       );
+      if (!repaired.result.content.trim()) throw new BadGatewayException('AI returned an empty continuity repair');
+      signal?.throwIfAborted();
       finalContent = repaired.result.content;
       emit({ type: 'stage', stage: 'CHECKING' });
       review = await this.reviewContinuity(input, finalContent, signal);
     }
+    signal?.throwIfAborted();
     emit({
       type: 'done',
       content: finalContent,

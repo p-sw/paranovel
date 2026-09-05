@@ -43,6 +43,24 @@ export const setupQuestionSchema = z.object({
 });
 export type SetupQuestion = z.infer<typeof setupQuestionSchema>;
 
+export const setupAnswerRecordSchema = z.object({
+  question: setupQuestionSchema,
+  answer: z.union([z.string(), z.array(z.string())]).nullable(),
+  skipped: z.boolean(),
+  otherAnswer: z.string().optional(),
+});
+export type SetupAnswerRecord = z.infer<typeof setupAnswerRecordSchema>;
+
+export const setupAnswerRequestSchema = z.object({
+  questionId: z.string().min(1),
+  answer: z.union([z.string(), z.array(z.string())]).optional(),
+  otherAnswer: z.string().trim().min(1).max(10_000).optional(),
+  skipOptional: z.literal(true).optional(),
+  position: z.number().int().nonnegative().optional(),
+  expectedState: z.string().min(1).optional(),
+});
+export type SetupAnswerRequest = z.infer<typeof setupAnswerRequestSchema>;
+
 export const canonDraftSchema = z.object({
   category: canonCategorySchema,
   name: z.string().min(1),
@@ -256,3 +274,41 @@ export const apiErrorSchema = z.object({
   requestId: z.string().optional(),
 });
 export type ApiErrorBody = z.infer<typeof apiErrorSchema>;
+
+
+export const chatProposalSchema = z.object({
+  id: idSchema,
+  projectId: idSchema,
+  messageId: idSchema,
+  kind: z.enum(['PROJECT', 'CANON', 'ARC', 'IMPROVEMENT']),
+  operation: z.enum(['CREATE', 'UPDATE', 'DELETE']),
+  title: z.string(),
+  targetId: idSchema.nullable(),
+  before: z.record(z.string(), z.unknown()).nullable(),
+  after: z.record(z.string(), z.unknown()).nullable(),
+  effects: z.array(z.object({
+    label: z.string(),
+    before: z.record(z.string(), z.unknown()).nullable(),
+    after: z.record(z.string(), z.unknown()).nullable(),
+  })),
+  status: z.enum(['PENDING', 'APPLIED']),
+  createdAt: isoDateSchema,
+  appliedAt: isoDateSchema.nullable(),
+  result: z.record(z.string(), z.unknown()).nullable(),
+});
+export type ChatProposal = z.infer<typeof chatProposalSchema>;
+
+export const chatMessageSchema = z.object({
+  id: idSchema,
+  projectId: idSchema,
+  clientMessageId: idSchema,
+  role: z.enum(['user', 'assistant']),
+  content: z.string(),
+  status: z.enum(['PENDING', 'COMPLETE', 'FAILED']),
+  createdAt: isoDateSchema,
+  proposals: z.array(chatProposalSchema),
+  error: z.string().optional(),
+});
+export type ChatMessage = z.infer<typeof chatMessageSchema>;
+export const chatHistorySchema = z.object({ messages: z.array(chatMessageSchema) });
+export type ChatHistory = z.infer<typeof chatHistorySchema>;

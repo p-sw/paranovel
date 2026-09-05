@@ -8,14 +8,14 @@ import {
   CheckCircle2,
   Ellipsis,
   FilePlus2,
-  LoaderCircle,
   Plus,
   Sparkles,
   Trash2,
 } from 'lucide-react';
 import { Link, useOutletContext, useParams } from 'react-router-dom';
 import { api, messageOf } from '../api/client';
-import { AI_PHASE_LABELS, characterCount, createIdempotencyKey, formatRelativeDate } from '../lib';
+import { characterCount, createIdempotencyKey, formatRelativeDate } from '../lib';
+import DraftPreview, { DraftGenerationStatus } from '../components/DraftPreview';
 import type { AiPhase, ContinuityIssue, Episode } from '../types';
 import type { ProjectOutletContext } from '../components/AppShell';
 import {
@@ -217,7 +217,7 @@ function CreateEpisodeSheet({
             setPhase(event.stage === 'MEMORY' ? 'retrieving' : event.stage === 'WRITING' ? 'writing' : event.stage === 'REPAIRING' ? 'repairing' : 'checking');
           }
           if (event.type === 'delta' || event.type === 'reset') {
-            setPhase('writing');
+            setPhase((current) => current === 'repairing' || current === 'checking' ? current : 'writing');
             setPreview(content);
           }
           if (event.type === 'done') {
@@ -291,6 +291,7 @@ function CreateEpisodeSheet({
       title="새 회차 만들기"
       description={step === 'request' ? '원하는 내용이 있으면 적어 주세요. 비워 두어도 괜찮아요.' : step === 'direction' ? 'AI가 제목과 전개 방향을 만들었어요. 필요하면 고친 뒤 시작하세요.' : '완성된 초안을 확인하고 저장하세요.'}
       footer={footer}
+      bodyHeader={step === 'draft' ? <DraftGenerationStatus phase={phase} /> : undefined}
       wide
     >
       {step === 'request' ? (
@@ -314,15 +315,14 @@ function CreateEpisodeSheet({
         </form>
       ) : step === 'draft' ? (
         <div className="generation-preview">
-          <div className="generation-status" role="status" aria-live="polite">
-            {isGenerating ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
-            <span>{AI_PHASE_LABELS[phase]}</span>
-          </div>
-          {isGenerating ? (
-            <article className="story-preview">{preview || '이야기의 흐름과 설정을 살펴보고 있어요…'}</article>
-          ) : (
-            <textarea className="story-preview editable" aria-label="AI 초안 수정" disabled={createMutation.isPending} value={preview} onChange={(event) => setPreview(event.target.value)} />
-          )}
+          <DraftPreview
+            label="AI 초안 수정"
+            value={preview}
+            onChange={setPreview}
+            readOnly={isGenerating}
+            disabled={createMutation.isPending}
+            placeholder="이야기의 흐름과 설정을 살펴보고 있어요…"
+          />
           {issues.length ? (
             <div className={blocked ? 'warning-box danger' : 'warning-box'} role="alert">
               <strong>{blocked ? '저장 전 반드시 검토하세요' : '이어짐을 확인해 주세요'}</strong>

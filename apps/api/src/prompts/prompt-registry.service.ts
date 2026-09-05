@@ -26,6 +26,7 @@ export const REQUIRED_PROMPT_IDS = [
   'continuity-repair',
   'improvement-extract',
   'comparison-draft',
+  'project-chat',
 ] as const;
 
 export type PromptId = (typeof REQUIRED_PROMPT_IDS)[number];

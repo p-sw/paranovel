@@ -1,13 +1,29 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, ArrowRight, Check, Feather, LoaderCircle, Plus, Sparkles, Trash2, X } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api, ApiError, isConflict, messageOf } from '../api/client';
 import { CANON_LABELS, GENRE_SUGGESTIONS, cx } from '../lib';
-import type { CanonCategory, ProjectBlueprint, ProjectSessionResult, SetupQuestion } from '../types';
+import type { CanonCategory, ProjectBlueprint, ProjectSessionResult, SetupAnswerRecord, SetupQuestion } from '../types';
 import { Button, FieldError } from '../components/Ui';
 
 const SESSION_KEY = 'paranovel.project-session';
+type AnswerDraft = { answer: string | string[]; otherSelected: boolean; otherText: string };
+const emptyDraft = (): AnswerDraft => ({ answer: '', otherSelected: false, otherText: '' });
+const isOtherOption = (value: string) => /^(기타(?:\s*\(직접\s*입력\))?|직접\s*입력|other)$/i.test(value.trim());
+
+function draftFromRecord(record?: SetupAnswerRecord): AnswerDraft {
+  if (!record || record.skipped) return emptyDraft();
+  const choice = ['single', 'multi'].includes(record.question.inputType);
+  const values = Array.isArray(record.answer) ? record.answer : [record.answer ?? ''];
+  const legacyOther = choice && values.some((value) => !record.question.options.includes(value) || isOtherOption(value));
+  const otherText = record.otherAnswer ?? (legacyOther ? values.filter((value) => !isOtherOption(value)).join(', ') : '');
+  return {
+    answer: record.otherAnswer !== undefined || legacyOther ? '' : record.answer ?? '',
+    otherSelected: record.otherAnswer !== undefined || legacyOther,
+    otherText,
+  };
+}
 
 function loadSession(): ProjectSessionResult | null {
   try {
@@ -26,6 +42,10 @@ export default function ProjectWizardPage() {
   const [customGenre, setCustomGenre] = useState('');
   const [sessionResult, setSessionResult] = useState<ProjectSessionResult | null>(() => loadSession());
   const [answer, setAnswer] = useState<string | string[]>('');
+  const [otherSelected, setOtherSelected] = useState(false);
+  const [otherText, setOtherText] = useState('');
+  const [cursor, setCursor] = useState<number | null>(null);
+  const drafts = useRef<Record<number, AnswerDraft>>({});
   const [error, setError] = useState('');
   const [blueprint, setBlueprint] = useState<ProjectBlueprint | null>(
     sessionResult?.step.type === 'ready' ? structuredClone(sessionResult.step.blueprint) : null,
@@ -35,7 +55,9 @@ export default function ProjectWizardPage() {
   );
   const [skipping, setSkipping] = useState(false);
   const [resuming, setResuming] = useState(Boolean(sessionResult));
-  const phase = sessionResult ? (sessionResult.step.type === 'ready' ? 'review' : 'interview') : 'basics';
+  const history = sessionResult?.history ?? [];
+  const position = cursor ?? history.length;
+  const phase = sessionResult ? (sessionResult.step.type === 'ready' && cursor === null ? 'review' : 'interview') : 'basics';
 
   useEffect(() => {
     if (sessionResult?.step.type !== 'ready') return;
@@ -45,7 +67,11 @@ export default function ProjectWizardPage() {
 
   const persistResult = (result: ProjectSessionResult) => {
     setSessionResult(result);
+    drafts.current = {};
+    setCursor(null);
     setAnswer('');
+    setOtherSelected(false);
+    setOtherText('');
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(result));
   };
 
@@ -97,13 +123,14 @@ export default function ProjectWizardPage() {
     onError: (reason) => setError(messageOf(reason)),
   });
   const respondMutation = useMutation({
-    mutationFn: (input: { question: SetupQuestion; value?: string | string[]; skip?: boolean }) =>
+    mutationFn: (input: { question: SetupQuestion; value?: string | string[]; otherAnswer?: string; skip?: boolean }) =>
       api.sessions.respond(sessionResult!.session.id, {
         questionId: input.question.id,
-        ...(input.skip ? { skipOptional: true as const } : { answer: input.value }),
+        ...(sessionResult?.stateToken ? { position, expectedState: sessionResult.stateToken } : {}),
+        ...(input.skip ? { skipOptional: true as const } : input.otherAnswer !== undefined ? { otherAnswer: input.otherAnswer } : { answer: input.value }),
       }),
     onSuccess: persistResult,
-    onError: (reason) => void recoverAfterConflict(reason),
+    onError: (reason) => recoverAfterConflict(reason),
   });
   const commitMutation = useMutation({
     mutationFn: () => {
@@ -115,21 +142,46 @@ export default function ProjectWizardPage() {
         genreTags: reviewGenres.split(',').map((item) => item.trim()).filter(Boolean),
         defaultTargetChars: blueprint.defaultTargetChars ?? 5000,
       };
-      return api.sessions.commit(sessionResult!.session.id, edited);
+      return api.sessions.commit(sessionResult!.session.id, edited, sessionResult?.stateToken);
     },
     onSuccess: ({ project }) => {
       sessionStorage.removeItem(SESSION_KEY);
       queryClient.invalidateQueries({ queryKey: ['projects'] });
       navigate(`/projects/${project.id}/episodes`, { replace: true });
     },
-    onError: (reason) => void recoverAfterConflict(reason),
+    onError: (reason) => recoverAfterConflict(reason),
   });
 
-  const question = sessionResult?.step.type === 'question' ? sessionResult.step.question : null;
+  const question = cursor !== null ? history[cursor]?.question ?? null
+    : sessionResult?.step.type === 'question' ? sessionResult.step.question : null;
+  const busy = respondMutation.isPending || skipping || commitMutation.isPending;
   const validAnswer = useMemo(() => {
     if (!question) return false;
+    if (otherSelected) return Boolean(otherText.trim());
     return Array.isArray(answer) ? answer.length > 0 : Boolean(answer.trim());
-  }, [answer, question]);
+  }, [answer, otherSelected, otherText, question]);
+
+  const showPosition = (nextPosition: number) => {
+    if (question) drafts.current[position] = { answer, otherSelected, otherText };
+    const draft = drafts.current[nextPosition] ?? draftFromRecord(history[nextPosition]);
+    setAnswer(draft.answer);
+    setOtherSelected(draft.otherSelected);
+    setOtherText(draft.otherText);
+    setCursor(nextPosition < history.length ? nextPosition : null);
+    setError('');
+  };
+
+  const answerUnchanged = () => {
+    const previous = history[position];
+    if (!previous) return false;
+    const restored = draftFromRecord(previous);
+    if (restored.otherSelected !== otherSelected) return false;
+    if (otherSelected) return restored.otherText.trim() === otherText.trim();
+    if (Array.isArray(restored.answer) && Array.isArray(answer)) {
+      return restored.answer.length === answer.length && restored.answer.every((value) => answer.includes(value));
+    }
+    return typeof restored.answer === 'string' && typeof answer === 'string' && restored.answer.trim() === answer.trim();
+  };
 
   const toggleGenre = (genre: string) => {
     setGenreTags((current) =>
@@ -153,13 +205,18 @@ export default function ProjectWizardPage() {
 
   const submitQuestion = (event: FormEvent) => {
     event.preventDefault();
-    if (!question || !validAnswer) return;
+    if (!question || busy) return;
     setError('');
-    respondMutation.mutate({ question, value: answer });
+    if (cursor !== null && answerUnchanged()) {
+      showPosition(position + 1);
+      return;
+    }
+    if (!validAnswer) return;
+    respondMutation.mutate({ question, ...(otherSelected ? { otherAnswer: otherText.trim() } : { value: answer }) });
   };
 
   const skipRemainingOptional = async () => {
-    if (!sessionResult || sessionResult.step.type !== 'question' || sessionResult.step.question.required) return;
+    if (!sessionResult || cursor !== null || sessionResult.step.type !== 'question' || sessionResult.step.question.required || busy) return;
     setSkipping(true);
     setError('');
     try {
@@ -167,12 +224,14 @@ export default function ProjectWizardPage() {
       for (let index = 0; index < 20 && current.step.type === 'question' && !current.step.question.required; index += 1) {
         current = await api.sessions.respond(current.session.id, {
           questionId: current.step.question.id,
+          ...(current.stateToken ? { position: current.history?.length ?? 0, expectedState: current.stateToken } : {}),
           skipOptional: true,
         });
+        persistResult(current);
       }
       persistResult(current);
     } catch (reason) {
-      setError(messageOf(reason));
+      await recoverAfterConflict(reason);
     } finally {
       setSkipping(false);
     }
@@ -284,9 +343,11 @@ export default function ProjectWizardPage() {
           <section className="wizard-card" aria-live="polite">
             <div className="assistant-avatar"><Sparkles className="size-5" aria-hidden="true" /></div>
             <p className="eyebrow mt-5">AI 설정 인터뷰</p>
+            <p className="mt-2 text-sm text-muted">{position + 1}번째 질문{cursor !== null ? ' · 이전 답변 확인' : ''}</p>
             <h1 className="question-title">{question.prompt}</h1>
             <p className="mt-2 text-sm text-muted">답은 세계관 초안에 반영되며, 프로젝트를 만들기 전에 한 번 더 확인할 수 있어요.</p>
             <form className="mt-7" onSubmit={submitQuestion}>
+              <fieldset disabled={busy}>
               {question.inputType === 'long_text' ? (
                 <textarea
                   className="input"
@@ -306,9 +367,10 @@ export default function ProjectWizardPage() {
                   placeholder="답을 입력해 주세요"
                 />
               ) : (
-                <div className="option-list" role={question.inputType === 'single' ? 'radiogroup' : 'group'}>
-                  {question.options.map((option) => {
-                    const selected = Array.isArray(answer) ? answer.includes(option) : answer === option;
+                <div>
+                <div className="option-list" role={question.inputType === 'single' ? 'radiogroup' : 'group'} aria-label="답변 선택">
+                  {question.options.filter((option) => !isOtherOption(option)).map((option) => {
+                    const selected = !otherSelected && (Array.isArray(answer) ? answer.includes(option) : answer === option);
                     return (
                       <button
                         type="button"
@@ -317,6 +379,7 @@ export default function ProjectWizardPage() {
                         role={question.inputType === 'single' ? 'radio' : 'checkbox'}
                         aria-checked={selected}
                         onClick={() => {
+                          setOtherSelected(false);
                           if (question.inputType === 'single') setAnswer(option);
                           else {
                             const values = Array.isArray(answer) ? answer : [];
@@ -328,22 +391,48 @@ export default function ProjectWizardPage() {
                       </button>
                     );
                   })}
+                  <button
+                    type="button"
+                    className={cx('option-card', otherSelected && 'selected')}
+                    role={question.inputType === 'single' ? 'radio' : 'checkbox'}
+                    aria-checked={otherSelected}
+                    onClick={() => { setOtherSelected(!otherSelected); setAnswer(''); }}
+                  >
+                    <span>기타 (직접 입력)</span>{otherSelected ? <Check className="size-5 text-plum-600" /> : null}
+                  </button>
+                </div>
+                <label className="field-label mt-4" htmlFor="other-answer">기타 답변</label>
+                <textarea
+                  id="other-answer"
+                  className="input disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={!otherSelected || busy}
+                  value={otherSelected ? otherText : ''}
+                  onChange={(event) => setOtherText(event.target.value)}
+                  placeholder="기타를 선택하면 직접 답변할 수 있어요"
+                  maxLength={10_000}
+                  required={otherSelected}
+                />
                 </div>
               )}
+              </fieldset>
+              {cursor !== null ? <p className="mt-4 text-sm text-muted">답변을 수정하고 다음으로 이동하면 이후 질문과 설정 초안이 새 답변에 맞춰 다시 만들어져요.</p> : null}
               <FieldError>{error}</FieldError>
               <div className="mt-7 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-                {!question.required ? (
+                <Button type="button" variant="ghost" disabled={position === 0 || busy} onClick={() => showPosition(position - 1)}>
+                  <ArrowLeft className="size-4" /> 이전 질문
+                </Button>
+                {!question.required && cursor === null ? (
                   <Button
                     type="button"
                     variant="ghost"
-                    disabled={respondMutation.isPending || skipping}
+                    disabled={busy}
                     onClick={() => void skipRemainingOptional()}
                   >
                     나머지 질문 건너뛰기
                   </Button>
                 ) : null}
-                <Button type="submit" size="lg" busy={respondMutation.isPending} disabled={!validAnswer}>
-                  다음 질문 <ArrowRight className="size-4" />
+                <Button type="submit" size="lg" busy={respondMutation.isPending} disabled={busy || (!validAnswer && !(cursor !== null && answerUnchanged()))}>
+                  {cursor !== null && position + 1 === history.length && sessionResult?.step.type === 'ready' ? '설정 확인' : '다음 질문'} <ArrowRight className="size-4" />
                 </Button>
               </div>
             </form>
@@ -395,6 +484,9 @@ export default function ProjectWizardPage() {
             </div>
             <p className="mt-5 rounded-xl bg-sage-50 p-4 text-sm leading-6 text-sage-700">이 화면에서 확정한 항목만 프로젝트의 초기 정사와 아크로 저장됩니다.</p>
             <FieldError>{error}</FieldError>
+            <Button className="mt-6" variant="ghost" disabled={!history.length || busy} onClick={() => showPosition(history.length - 1)}>
+              <ArrowLeft className="size-4" /> 이전 질문
+            </Button>
             <Button className="mt-6 w-full" size="lg" busy={commitMutation.isPending} disabled={!blueprint.title.trim() || !blueprint.logline.trim() || !reviewGenres.trim() || !blueprint.arc.title.trim() || blueprint.arc.endEpisode - blueprint.arc.startEpisode + 1 < 5 || blueprint.arc.endEpisode - blueprint.arc.startEpisode + 1 > 20 || blueprint.canon.some((entry) => !entry.name.trim() || !entry.content.trim())} onClick={() => commitMutation.mutate()}>
               {commitMutation.isPending ? '프로젝트를 정리하는 중' : '프로젝트 만들기'}
             </Button>

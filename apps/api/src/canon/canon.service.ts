@@ -56,6 +56,12 @@ export class CanonService {
   }
 
   async create(projectId: string, body: unknown) {
+    const value = this.persistCreate(projectId, body);
+    await this.syncMemory(projectId, value.id);
+    return value;
+  }
+
+  persistCreate(projectId: string, body: unknown) {
     const input = (body ?? {}) as Record<string, unknown>;
     const stamp = now();
     const entryId = id();
@@ -78,13 +84,16 @@ export class CanonService {
       updatedAt: stamp,
     };
     this.database.orm.insert(canonEntries).values(row).run();
-    if (row.status === 'ACTIVE' || row.status === 'ACCEPTED') {
-      await this.index({ ...row, sourceEpisodeId: row.sourceEpisodeId ?? null });
-    }
     return this.get(projectId, entryId);
   }
 
   async update(projectId: string, canonId: string, body: unknown) {
+    const value = this.persistUpdate(projectId, canonId, body);
+    await this.syncMemory(projectId, canonId);
+    return value;
+  }
+
+  persistUpdate(projectId: string, canonId: string, body: unknown) {
     const current = this.database.orm
       .select()
       .from(canonEntries)
@@ -115,8 +124,6 @@ export class CanonService {
       .run();
     if (result.changes !== 1) throw new ConflictException('Canon entry revision changed during update');
     const updated = this.database.orm.select().from(canonEntries).where(eq(canonEntries.id, canonId)).get()!;
-    if (updated.status === 'ACTIVE' || updated.status === 'ACCEPTED') await this.index(updated);
-    else this.memory.removeSource('CANON', canonId);
     return this.toView(updated);
   }
 
@@ -153,6 +160,13 @@ export class CanonService {
       maxTokens: 8_000,
     });
     return value;
+  }
+
+  async syncMemory(projectId: string, canonId: string): Promise<void> {
+    this.get(projectId, canonId);
+    const row = this.database.orm.select().from(canonEntries).where(eq(canonEntries.id, canonId)).get()!;
+    if (row.status === 'ACTIVE' || row.status === 'ACCEPTED') await this.index(row);
+    else this.memory.removeSource('CANON', canonId);
   }
 
   private async index(row: typeof canonEntries.$inferSelect): Promise<void> {

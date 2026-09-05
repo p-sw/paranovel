@@ -101,6 +101,7 @@ export function Sheet({
   children,
   footer,
   wide,
+  bodyHeader,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -109,6 +110,7 @@ export function Sheet({
   children: ReactNode;
   footer?: ReactNode;
   wide?: boolean;
+  bodyHeader?: ReactNode;
 }) {
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -126,6 +128,7 @@ export function Sheet({
               </IconButton>
             </Dialog.Close>
           </header>
+          {bodyHeader ? <div className="sheet-body-header">{bodyHeader}</div> : null}
           <div className="sheet-body">{children}</div>
           {footer ? <footer className="sheet-footer">{footer}</footer> : null}
         </Dialog.Content>

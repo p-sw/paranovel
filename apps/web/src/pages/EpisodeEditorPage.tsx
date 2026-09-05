@@ -19,7 +19,6 @@ import {
   FileCheck2,
   History,
   Info,
-  ListChecks,
   LoaderCircle,
   MapPin,
   PanelRightOpen,
@@ -30,7 +29,8 @@ import {
 } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, isConflict, messageOf } from '../api/client';
-import { AI_PHASE_LABELS, characterCount, createIdempotencyKey, cx } from '../lib';
+import { characterCount, createIdempotencyKey, cx } from '../lib';
+import DraftPreview, { DraftGenerationStatus } from '../components/DraftPreview';
 import { rangeStillMatches, replaceUtf16Range } from '../editorText';
 import type {
   AiPhase,
@@ -701,6 +701,7 @@ function ContinuationSheet({
   useEffect(() => {
     if (open) return;
     abortRef.current?.abort();
+    abortRef.current = null;
     setPhase('idle');
     setPreview('');
     setIssues([]);
@@ -709,7 +710,12 @@ function ContinuationSheet({
     requestRef.current = null;
   }, [open]);
 
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   const generate = async () => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setError('');
     setPreview('');
     setIssues([]);
@@ -717,21 +723,21 @@ function ContinuationSheet({
     setPhase('retrieving');
     try {
       await saveNow();
+      controller.signal.throwIfAborted();
       const content = draftRef.current.content;
       const cursor = Math.min(selection?.start ?? content.length, content.length);
       requestRef.current = { content, cursor, revision: revisionRef.current };
-      const controller = new AbortController();
-      abortRef.current = controller;
       const result = await api.episodes.continue(
         projectId,
         episodeId,
         { expectedRevision: revisionRef.current, cursorOffset: cursor },
         (event, accumulated) => {
+          if (controller.signal.aborted || abortRef.current !== controller) return;
           if (event.type === 'stage') {
             setPhase(event.stage === 'MEMORY' ? 'retrieving' : event.stage === 'WRITING' ? 'writing' : event.stage === 'REPAIRING' ? 'repairing' : 'checking');
           }
           if (event.type === 'delta' || event.type === 'reset') {
-            setPhase('writing');
+            setPhase((current) => current === 'repairing' || current === 'checking' ? current : 'writing');
             setPreview(accumulated);
           }
           if (event.type === 'done') {
@@ -743,12 +749,14 @@ function ContinuationSheet({
         },
         controller.signal,
       );
+      if (controller.signal.aborted || abortRef.current !== controller) return;
       setPreview(result.content);
       setIssues(result.issues);
       setBlocked(result.blocked);
       setPhase('done');
     } catch (reason) {
-      if (abortRef.current?.signal.aborted) setPhase('cancelled');
+      if (abortRef.current !== controller) return;
+      if (controller.signal.aborted) setPhase('cancelled');
       else {
         setPhase('error');
         setError(messageOf(reason));
@@ -764,13 +772,14 @@ function ContinuationSheet({
       setError('생성 중 원고가 바뀌었습니다. 최신 커서에서 다시 생성해 주세요.');
       return;
     }
+    const needsReview = blocked || phase === 'cancelled' || phase === 'error';
     setPhase('checking');
     try {
       const nextContent = replaceUtf16Range(request.content, request.cursor, request.cursor, preview);
       const updated = await api.episodes.update(projectId, episodeId, {
         expectedRevision: request.revision,
         content: nextContent,
-        forceNeedsReview: blocked || undefined,
+        forceNeedsReview: needsReview || undefined,
       });
       onApplied(updated, request.cursor + preview.length);
       onOpenChange(false);
@@ -791,6 +800,7 @@ function ContinuationSheet({
       title="커서에서 이어쓰기"
       description="정사, 아크, 회차 기억과 개선점을 확인한 뒤 문장을 제안합니다."
       wide
+      bodyHeader={phase !== 'idle' ? <DraftGenerationStatus phase={phase} /> : undefined}
       footer={
         <div className="action-row sm:justify-between">
           {active ? (
@@ -801,8 +811,8 @@ function ContinuationSheet({
           {phase === 'idle' || phase === 'error' ? (
             <Button onClick={generate}><Sparkles className="size-4" /> {phase === 'error' ? '다시 생성' : '이어쓰기 시작'}</Button>
           ) : null}
-          {(phase === 'done' || phase === 'cancelled') && preview ? (
-            <><Button variant="secondary" onClick={generate}><Sparkles className="size-4" /> 다시 생성</Button><Button onClick={apply}>{phase === 'cancelled' ? '부분 문장 사용' : blocked ? '검토 필요로 삽입' : '커서에 삽입'}</Button></>
+          {(phase === 'done' || phase === 'cancelled' || phase === 'error') && preview ? (
+            <>{phase !== 'error' ? <Button variant="secondary" onClick={generate}><Sparkles className="size-4" /> 다시 생성</Button> : null}<Button onClick={apply}>{blocked || phase === 'error' || phase === 'cancelled' ? '검토 필요로 삽입' : '커서에 삽입'}</Button></>
           ) : null}
         </div>
       }
@@ -817,16 +827,13 @@ function ContinuationSheet({
         </div>
       ) : (
         <div className="generation-preview">
-          <div className="generation-status" role="status" aria-live="polite">
-            {active ? <LoaderCircle className="size-4 animate-spin" /> : phase === 'done' ? <CheckCircle2 className="size-4" /> : <AlertTriangle className="size-4" />}
-            <span>{AI_PHASE_LABELS[phase]}</span>
-          </div>
-          {active ? (
-            <article className="story-preview">{preview || '본문과 관련 기억을 살피고 있습니다…'}</article>
-          ) : (
-            <textarea className="story-preview editable" aria-label="이어쓰기 제안 수정" value={preview} onChange={(event) => setPreview(event.target.value)} />
-          )}
-          {phase === 'checking' ? <p className="checking-note"><ListChecks className="size-4" /> 설정 충돌과 인물 일관성을 마지막으로 확인하고 있어요.</p> : null}
+          <DraftPreview
+            label="이어쓰기 제안 수정"
+            value={preview}
+            onChange={setPreview}
+            readOnly={active}
+            placeholder="본문과 관련 기억을 살피고 있습니다…"
+          />
           {issues.length ? (
             <div className={blocked ? 'warning-box danger' : 'warning-box'} role="alert"><strong>{blocked ? '차단 이슈가 남아 있어요' : '삽입 전에 확인하세요'}</strong><ul>{issues.map((issue, index) => <li key={`${issue.explanation}-${index}`}><b>{issue.severity === 'BLOCKING' ? '차단' : '주의'}:</b> {issue.explanation}</li>)}</ul></div>
           ) : null}

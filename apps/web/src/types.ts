@@ -13,6 +13,7 @@ import type {
   ProjectBlueprint as ContractProjectBlueprint,
   SceneState,
   SetupQuestion,
+  SetupAnswerRecord,
 } from '@paranovel/contracts';
 
 export type {
@@ -25,6 +26,7 @@ export type {
   ImprovementScope,
   Project,
   SetupQuestion,
+  SetupAnswerRecord,
 };
 
 // API views expose review state and compatibility aliases in addition to the
@@ -74,6 +76,8 @@ export interface ProjectSession {
 export interface ProjectSessionResult {
   session: ProjectSession;
   step: ProjectSessionStep;
+  history?: SetupAnswerRecord[];
+  stateToken?: string;
 }
 
 export interface ImprovementSuggestion {

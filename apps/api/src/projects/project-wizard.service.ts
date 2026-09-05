@@ -5,7 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { AiRunnerService } from '../ai/ai-runner.service';
 import {
   projectBlueprintSchema,
@@ -20,6 +20,7 @@ import {
   now,
   parseJson,
   requireString,
+  sha256,
   stringifyJson,
   stringArray,
 } from '../shared/utils';
@@ -58,9 +59,17 @@ export interface Blueprint {
 }
 
 type SessionRow = typeof projectCreationSessions.$inferSelect;
+type AnswerRecord = {
+  question: SetupQuestion;
+  answer: string | string[] | null;
+  skipped: boolean;
+  otherAnswer?: string;
+};
 
 @Injectable()
 export class ProjectWizardService {
+  private readonly pendingTurns = new Map<string, Promise<ReturnType<ProjectWizardService['result']>>>();
+
   constructor(
     private readonly database: DatabaseService,
     private readonly ai: AiRunnerService,
@@ -105,37 +114,74 @@ export class ProjectWizardService {
 
   async respond(sessionId: string, body: unknown) {
     const session = this.requireSession(sessionId);
-    if (session.status !== 'ACTIVE') throw new ConflictException('Interview is not accepting answers');
-    const pending = parseJson<SetupQuestion | null>(session.pendingQuestionJson, null);
-    if (!pending) throw new ConflictException('There is no pending question');
+    if (!['ACTIVE', 'READY'].includes(session.status)) throw new ConflictException('Interview is not accepting answers');
     const input = (body ?? {}) as Record<string, unknown>;
+    this.assertExpectedState(session, input.expectedState);
+    const history = parseJson<AnswerRecord[]>(session.transcriptJson, []);
+    const position = input.position === undefined ? history.length : input.position;
+    if (!Number.isInteger(position) || Number(position) < 0 || Number(position) > history.length) {
+      throw new BadRequestException('Invalid question position');
+    }
+    if (input.position !== undefined && input.expectedState === undefined) {
+      throw new BadRequestException('expectedState is required when a question position is supplied');
+    }
+    const index = Number(position);
+    const previous = history[index];
+    const storedQuestion = previous?.question ?? parseJson<SetupQuestion | null>(session.pendingQuestionJson, null);
+    const pending = storedQuestion ? this.normalizeQuestion(storedQuestion) : null;
+    if (!pending) throw new ConflictException('There is no pending question');
     if (input.questionId !== pending.id) throw new ConflictException('Question is stale');
     const skip = input.skipOptional === true;
     if (skip && pending.required) throw new BadRequestException('Required questions cannot be skipped');
     if (skip && pending.field === 'title') throw new BadRequestException('Title cannot be skipped');
     let answer: string | string[] | null = null;
+    let otherAnswer: string | undefined;
+    if (skip && (input.answer !== undefined || input.otherAnswer !== undefined)) {
+      throw new BadRequestException('Skipped questions cannot include an answer');
+    }
     if (!skip) {
-      if (pending.inputType === 'multi') {
+      const choice = pending.inputType === 'single' || pending.inputType === 'multi';
+      if (input.otherAnswer !== undefined) {
+        if (!choice || input.answer !== undefined) {
+          throw new BadRequestException('Other answers are exclusive to choice questions and cannot include a selection');
+        }
+        otherAnswer = requireString(input.otherAnswer, 'otherAnswer', { max: 10_000 });
+        answer = pending.inputType === 'multi' ? [otherAnswer] : otherAnswer;
+      } else if (pending.inputType === 'multi') {
         answer = stringArray(input.answer, 'answer');
-        if (pending.required && answer.length === 0) throw new BadRequestException('Answer is required');
+        if (answer.length === 0) throw new BadRequestException('Answer is required');
+        if (answer.some((value) => !pending.options.includes(value))) {
+          throw new BadRequestException('Answer must contain only the provided options');
+        }
       } else {
         answer = requireString(input.answer, 'answer', { max: 10_000 });
+        if (choice && !pending.options.includes(answer)) {
+          throw new BadRequestException('Answer must be one of the provided options');
+        }
       }
     }
-    const answers = parseJson<Record<string, unknown>>(session.answersJson, {});
+    const record: AnswerRecord = { question: pending, answer, skipped: skip, ...(otherAnswer === undefined ? {} : { otherAnswer }) };
+    // Viewing history never mutates the session. An unchanged resubmission also
+    // preserves every later answer and the reviewed blueprint.
+    const sameAnswer = Array.isArray(previous?.answer) && Array.isArray(answer)
+      ? previous.answer.length === answer.length && previous.answer.every((value) => answer.includes(value))
+      : previous?.answer === answer;
+    if (previous && previous.skipped === skip && previous.otherAnswer === otherAnswer && sameAnswer) {
+      return this.result(session);
+    }
+    const transcript = history.slice(0, index);
+    const answers: Record<string, unknown> = {};
+    for (const entry of transcript) answers[entry.question.field] = entry.answer;
     answers[pending.field] = answer;
-    const transcript = parseJson<Array<Record<string, unknown>>>(session.transcriptJson, []);
-    transcript.push({ question: pending, answer, skipped: skip });
-    this.database.orm
-      .update(projectCreationSessions)
-      .set({
-        answersJson: stringifyJson(answers),
-        transcriptJson: stringifyJson(transcript),
-        pendingQuestionJson: null,
-        updatedAt: now(),
-      })
-      .where(eq(projectCreationSessions.id, sessionId))
-      .run();
+    transcript.push(record);
+    this.updateSession(session, {
+      answersJson: stringifyJson(answers),
+      transcriptJson: stringifyJson(transcript),
+      pendingQuestionJson: null,
+      blueprintJson: null,
+      status: 'ACTIVE',
+      titleAsked: transcript.some((entry) => entry.question.field === 'title') ? 1 : 0,
+    });
     return this.next(this.requireSession(sessionId));
   }
 
@@ -145,6 +191,7 @@ export class ProjectWizardService {
     if (!pending) throw new ConflictException('There is no pending question');
     const input = (body ?? {}) as Record<string, unknown>;
     return this.respond(sessionId, {
+      ...input,
       questionId: input.questionId ?? pending.id,
       skipOptional: true,
     });
@@ -158,6 +205,7 @@ export class ProjectWizardService {
     if (session.status !== 'READY' || !session.blueprintJson) {
       throw new ConflictException('Project interview is not ready to commit');
     }
+    this.assertExpectedState(session, body && typeof body === 'object' ? (body as Record<string, unknown>).expectedState : undefined);
     let blueprint = parseJson<Blueprint | null>(session.blueprintJson, null);
     const submitted = body && typeof body === 'object'
       ? (body as Record<string, unknown>).blueprint
@@ -244,7 +292,16 @@ export class ProjectWizardService {
     return { project: this.projects.get(projectId) };
   }
 
-  private async next(session: SessionRow) {
+  private next(session: SessionRow) {
+    const key = `${session.id}:${this.stateToken(session)}`;
+    const existing = this.pendingTurns.get(key);
+    if (existing) return existing;
+    const promise = this.generateNext(session).finally(() => this.pendingTurns.delete(key));
+    this.pendingTurns.set(key, promise);
+    return promise;
+  }
+
+  private async generateNext(session: SessionRow) {
     const answers = parseJson<Record<string, unknown>>(session.answersJson, {});
     const transcript = parseJson<Array<Record<string, unknown>>>(session.transcriptJson, []);
     const { result } = await this.ai.completeText({
@@ -284,15 +341,10 @@ export class ProjectWizardService {
         );
       }
       const question = requested;
-      this.database.orm
-        .update(projectCreationSessions)
-        .set({
-          pendingQuestionJson: stringifyJson(question),
-          titleAsked: session.titleAsked || question.field === 'title' ? 1 : 0,
-          updatedAt: now(),
-        })
-        .where(eq(projectCreationSessions.id, session.id))
-        .run();
+      this.updateSession(session, {
+        pendingQuestionJson: stringifyJson(question),
+        titleAsked: session.titleAsked || question.field === 'title' ? 1 : 0,
+      });
       return this.result(this.requireSession(session.id));
     }
     if (call.function.name !== 'complete_project_interview') {
@@ -317,16 +369,11 @@ export class ProjectWizardService {
       includeMemoryContract: false,
       maxTokens: 12_000,
     });
-    this.database.orm
-      .update(projectCreationSessions)
-      .set({
-        blueprintJson: stringifyJson(blueprint),
-        pendingQuestionJson: null,
-        status: 'READY',
-        updatedAt: now(),
-      })
-      .where(eq(projectCreationSessions.id, session.id))
-      .run();
+    this.updateSession(session, {
+      blueprintJson: stringifyJson(blueprint),
+      pendingQuestionJson: null,
+      status: 'READY',
+    });
     return this.result(this.requireSession(session.id));
   }
 
@@ -340,7 +387,7 @@ export class ProjectWizardService {
       prompt: requireString(args.prompt, 'question.prompt', { max: 1_000 }),
       inputType,
       options: Array.isArray(args.options)
-        ? args.options.filter((item): item is string => typeof item === 'string')
+        ? stringArray(args.options.filter((item): item is string => typeof item === 'string'), 'question.options')
         : [],
       required: args.required === true,
     };
@@ -364,10 +411,40 @@ export class ProjectWizardService {
     return session;
   }
 
+  private stateToken(session: SessionRow): string {
+    return sha256(stringifyJson(session));
+  }
+
+  private normalizeQuestion(question: SetupQuestion): SetupQuestion {
+    return { ...question, options: stringArray(question.options ?? [], 'question.options') };
+  }
+
+  private assertExpectedState(session: SessionRow, expected: unknown): void {
+    if (expected !== undefined && expected !== this.stateToken(session)) {
+      throw new ConflictException('Interview has changed. Reload the latest questions before continuing');
+    }
+  }
+
+  private updateSession(session: SessionRow, values: Partial<typeof projectCreationSessions.$inferInsert>): void {
+    // A strictly increasing stamp protects against concurrent turns even when
+    // requests or mocked AI calls complete within the same millisecond.
+    const updatedAt = new Date(Math.max(Date.now(), Date.parse(session.updatedAt) + 1)).toISOString();
+    const updated = this.database.orm.update(projectCreationSessions)
+      .set({ ...values, updatedAt })
+      .where(and(eq(projectCreationSessions.id, session.id), eq(projectCreationSessions.updatedAt, session.updatedAt)))
+      .run();
+    if (!updated.changes) throw new ConflictException('Interview changed while the AI was responding');
+  }
+
   private result(session: SessionRow) {
-    const pending = parseJson<SetupQuestion | null>(session.pendingQuestionJson, null);
+    const storedQuestion = parseJson<SetupQuestion | null>(session.pendingQuestionJson, null);
+    const pending = storedQuestion ? this.normalizeQuestion(storedQuestion) : null;
     const blueprint = parseJson<Blueprint | null>(session.blueprintJson, null);
     return {
+      history: parseJson<AnswerRecord[]>(session.transcriptJson, []).map((entry) => ({
+        ...entry, question: this.normalizeQuestion(entry.question),
+      })),
+      stateToken: this.stateToken(session),
       session: {
         id: session.id,
         status: session.status,

@@ -7,6 +7,7 @@ import {
   Library,
   ListTree,
   Menu,
+  MessageCircle,
   Plus,
   Settings,
   Sparkles,
@@ -19,6 +20,7 @@ import { ErrorState, IconButton, Spinner } from './Ui';
 
 const nav = [
   { slug: 'episodes', label: '회차', shortLabel: '회차', icon: BookOpenText },
+  { slug: 'chat', label: 'AI 채팅', shortLabel: 'AI 채팅', icon: MessageCircle },
   { slug: 'canon', label: '정사·설정', shortLabel: '정사', icon: Library },
   { slug: 'arc', label: '현재 아크', shortLabel: '아크', icon: GitBranch },
   { slug: 'improvements', label: '개선점', shortLabel: '개선점', icon: Sparkles },
@@ -36,6 +38,7 @@ export default function AppShell() {
   const projectsQuery = useQuery({ queryKey: ['projects'], queryFn: api.projects.list });
   const isEditor = /\/episodes\/[^/]+/.test(location.pathname);
   const isComparison = location.pathname.endsWith('/compare');
+  const isChat = location.pathname.endsWith('/chat');
   const focused = isEditor || isComparison;
 
   if (projectQuery.isPending) return <Spinner label="프로젝트를 여는 중" />;
@@ -145,7 +148,7 @@ export default function AppShell() {
         </NavLink>
       </header>
 
-      <main className={cx('shell-main', focused && 'shell-main-focused')}>
+      <main className={cx('shell-main', focused && 'shell-main-focused', isChat && 'shell-main-chat')}>
         <Outlet context={{ project }} />
       </main>
 

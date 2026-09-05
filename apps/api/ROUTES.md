@@ -6,11 +6,19 @@ All routes use the `/api` global prefix. JSON errors contain `statusCode`, `erro
 
 - `GET /projects`, `GET|PATCH|DELETE /projects/:projectId`; PATCH requires `expectedRevision`.
 - `POST /project-sessions` — `{ logline, genreTags }`; title is deliberately rejected here and is always collected by the AI tool.
-- `GET /project-sessions/:sessionId`
-- `POST /project-sessions/:sessionId/respond` — `{ questionId, answer }` or `{ questionId, skipOptional: true }`; required questions cannot be skipped.
+- `GET /project-sessions/:sessionId` — includes ordered `history` and opaque `stateToken` alongside the current step. Reading previous questions does not modify the session.
+- `POST /project-sessions/:sessionId/respond` — `{ questionId, answer }`, `{ questionId, otherAnswer }`, or `{ questionId, skipOptional: true }`; required questions cannot be skipped. Choice answers must match the supplied options; nonempty `otherAnswer` is exclusive to choice questions and cannot accompany `answer`. New clients include zero-based `position` and `expectedState`; changing a previous answer invalidates later answers and the blueprint. An unchanged answer preserves them. Stale state returns 409.
 - `POST /project-sessions/:sessionId/turn` — answer alias using `{ questionId, answer }`.
 - `POST /project-sessions/:sessionId/skip` — skip the pending optional question; body `{ questionId? }`.
-- `POST /project-sessions/:sessionId/commit` — optional `{ blueprint }`; an edited blueprint is strictly validated, including its required title and 5–20 episode arc.
+- `POST /project-sessions/:sessionId/commit` — optional `{ blueprint, expectedState }`; an edited blueprint is strictly validated, including its required title and 5–20 episode arc.
+
+## Project AI chat
+
+- `GET /projects/:projectId/chat/messages` — `{ messages }`, the persisted project conversation with message status (`PENDING`, `COMPLETE`, `FAILED`) and reviewable proposals.
+- `POST /projects/:projectId/chat/messages` — `{ content, clientMessageId }`; returns `{ messages }` after the Luna response and proposals have been validated. Reusing a successful turn ID returns its saved result; a failed turn can be retried with the same ID and content. Reusing the ID with different content returns 409. Failed turns remain in history.
+- `POST /projects/:projectId/chat/proposals/:proposalId/apply` — returns `{ proposal }`. Applies the stored proposal once, validating project ownership, target revision, and any affected active arcs in one transaction. Replaying an applied proposal returns the recorded result. Conflicting changes return 409. Memory indexing follows the commit and failed indexing is retried.
+
+Chat uses `AI_CHAT_MODEL` (default `openai/gpt-5.6-luna`) for project-scoped read tools and proposal generation. Supported proposals are project information updates and Canon/arc/project-improvement creation, updates, and deletion. Global improvements are reference-only. Episodes may be read and analyzed; episode mutation and project deletion are not chat actions. Sending a chat message never applies a proposal automatically.
 
 ## Episodes and scene memory
 
@@ -23,7 +31,7 @@ All routes use the `/api` global prefix. JSON errors contain `statusCode`, `erro
 - `POST /projects/:projectId/episodes/:episodeId/selection-replacements` — `{ expectedRevision, start, end, selectedText, replacement }`; exact UTF-16 selection replacement only. Candidate parsing is a separate request.
 - `GET|PATCH /projects/:projectId/episodes/:episodeId/scene`; PATCH requires `expectedRevision`.
 
-NDJSON events are `meta`, `stage`, `delta`, `reset`, `warning`, `done`, and `error`. Text remains a preview until a non-blocked `done`; the client then saves it through create/PATCH.
+NDJSON events are `meta`, `stage`, `delta`, `reset`, `warning`, `done`, and `error`. Text remains a preview until a non-blocked `done`; the client then saves it through create/PATCH. Continuity repair retains the original preview until the corrected result passes review and arrives in `done`. Clients retain the last readable preview through `reset`, reject empty `done` and EOF without `done`, and ignore data after completion. Incomplete text can only be saved explicitly with review required.
 
 ## Canon, arcs, and improvements
 

@@ -205,6 +205,41 @@ ALTER TABLE ai_runs ADD COLUMN latency_ms INTEGER;
 ALTER TABLE ai_runs ADD COLUMN memory_revision_hash TEXT NOT NULL DEFAULT '';
 `;
 
+const PROJECT_CHAT_MIGRATION = `
+CREATE TABLE chat_messages (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  client_message_id TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('user','assistant')),
+  content TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('PENDING','COMPLETE','FAILED')),
+  error TEXT,
+  run_id TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(project_id, client_message_id, role)
+);
+CREATE INDEX idx_chat_messages_project_created ON chat_messages(project_id, created_at);
+CREATE TABLE chat_proposals (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('PROJECT','CANON','ARC','IMPROVEMENT')),
+  operation TEXT NOT NULL CHECK (operation IN ('CREATE','UPDATE','DELETE')),
+  title TEXT NOT NULL,
+  target_id TEXT,
+  before_json TEXT NOT NULL,
+  after_json TEXT NOT NULL,
+  effects_json TEXT NOT NULL DEFAULT '[]',
+  active_arcs_json TEXT,
+  status TEXT NOT NULL CHECK (status IN ('PENDING','APPLIED')),
+  result_json TEXT,
+  index_targets_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL,
+  applied_at TEXT
+);
+CREATE INDEX idx_chat_proposals_message ON chat_proposals(message_id);
+`;
+
 @Injectable()
 export class DatabaseService implements OnApplicationShutdown {
   readonly connection: Database.Database;
@@ -235,6 +270,7 @@ export class DatabaseService implements OnApplicationShutdown {
       { version: 2, sql: SESSION_PROJECT_MIGRATION },
       { version: 3, sql: IMPROVEMENT_BATCH_MIGRATION },
       { version: 4, sql: AI_RUN_OBSERVABILITY_MIGRATION },
+      { version: 5, sql: PROJECT_CHAT_MIGRATION },
     ];
     this.connection.exec(
       'CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)',
