@@ -4,7 +4,7 @@ import type {
   CanonCategory,
   CanonEntry as ContractCanonEntry,
   ContinuityIssue,
-  Episode,
+  Episode as ContractEpisode,
   EpisodeSummary,
   Improvement,
   ImprovementCandidate,
@@ -19,7 +19,6 @@ import type {
 export type {
   CanonCategory,
   ContinuityIssue,
-  Episode,
   EpisodeSummary,
   Improvement,
   ImprovementCandidate,
@@ -27,6 +26,18 @@ export type {
   Project,
   SetupQuestion,
   SetupAnswerRecord,
+};
+
+export type EpisodeKind = 'MAIN' | 'SIDE_STORY';
+
+// Older API responses do not carry a kind yet, so MAIN remains the compatible
+// default at the HTTP boundary. Standalone side stories intentionally have no
+// number; grouped side stories use a number local to their group.
+export type Episode = Omit<ContractEpisode, 'number'> & {
+  kind?: EpisodeKind;
+  number: number | null;
+  sideStoryGroupId?: string | null;
+  branchFromEpisodeId?: string | null;
 };
 
 // API views expose review state and compatibility aliases in addition to the
@@ -41,6 +52,47 @@ export type Arc = ContractArc & {
   endEpisodeNumber?: number;
   revision?: number;
 };
+
+export interface SideStoryGroup {
+  id: string;
+  projectId: string;
+  title: string;
+  description: string;
+  branchFromEpisodeId: string | null;
+  nextEpisodeNumber: number;
+  revision: number;
+  canon: CanonEntry[];
+  arc: Arc;
+  episodes?: Episode[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface SideStoryCollection {
+  standalone: Episode[];
+  groups: Array<SideStoryGroup & { episodes: Episode[] }>;
+}
+
+export interface EpisodeFlow {
+  kind: EpisodeKind;
+  label: string;
+  group: Pick<SideStoryGroup, 'id' | 'projectId' | 'title' | 'description' | 'branchFromEpisodeId' | 'nextEpisodeNumber' | 'revision' | 'createdAt' | 'updatedAt'> | null;
+  episodes: Episode[];
+}
+
+export interface CreateSideStoryGroupInput {
+  title: string;
+  description?: string;
+  branchFromEpisodeId: string | null;
+  canon: string;
+  arc: {
+    title: string;
+    goal: string;
+    conflict: string;
+    endEpisodeNumber?: number;
+    reversalPlan?: Array<{ episode: number; description: string }>;
+  };
+}
 
 export type CurrentScene = SceneState;
 export type StreamEvent = AiStreamEvent;

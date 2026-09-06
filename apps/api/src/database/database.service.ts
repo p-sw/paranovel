@@ -352,6 +352,115 @@ ALTER TABLE projects ADD COLUMN target_episode_source TEXT
   );
 `;
 
+const SIDE_STORIES_MIGRATION = `
+CREATE TABLE side_story_groups (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  branch_from_episode_id TEXT REFERENCES episodes(id) ON DELETE SET NULL,
+  next_episode_number INTEGER NOT NULL DEFAULT 1,
+  revision INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_side_story_groups_project
+  ON side_story_groups(project_id, created_at);
+
+CREATE TABLE side_story_group_idempotency (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  idempotency_key TEXT NOT NULL,
+  group_id TEXT NOT NULL REFERENCES side_story_groups(id) ON DELETE CASCADE,
+  request_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(project_id, idempotency_key)
+);
+
+CREATE TABLE episodes_with_side_stories (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'MAIN' CHECK (kind IN ('MAIN','SIDE_STORY')),
+  number INTEGER,
+  side_story_group_id TEXT REFERENCES side_story_groups(id) ON DELETE CASCADE,
+  branch_from_episode_id TEXT REFERENCES episodes_with_side_stories(id) ON DELETE SET NULL,
+  title TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  revision INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('INCOMPLETE','DRAFT','CONFIRMED','MEMORY_STALE','NEEDS_REVIEW')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT,
+  CHECK (
+    (kind = 'MAIN' AND number IS NOT NULL AND side_story_group_id IS NULL AND branch_from_episode_id IS NULL)
+    OR
+    (kind = 'SIDE_STORY' AND side_story_group_id IS NULL AND number IS NULL)
+    OR
+    (kind = 'SIDE_STORY' AND side_story_group_id IS NOT NULL AND number IS NOT NULL AND branch_from_episode_id IS NULL)
+  )
+);
+INSERT INTO episodes_with_side_stories (
+  id, project_id, kind, number, side_story_group_id, branch_from_episode_id,
+  title, direction, content, revision, status, created_at, updated_at, deleted_at
+)
+SELECT id, project_id, 'MAIN', number, NULL, NULL,
+       title, direction, content, revision, status, created_at, updated_at, deleted_at
+FROM episodes;
+DROP TABLE episodes;
+ALTER TABLE episodes_with_side_stories RENAME TO episodes;
+CREATE UNIQUE INDEX episodes_main_project_number
+  ON episodes(project_id, number) WHERE kind = 'MAIN';
+CREATE UNIQUE INDEX episodes_side_story_group_number
+  ON episodes(side_story_group_id, number)
+  WHERE kind = 'SIDE_STORY' AND side_story_group_id IS NOT NULL;
+CREATE INDEX idx_episodes_project_kind ON episodes(project_id, kind, number);
+CREATE INDEX idx_episodes_side_story_group ON episodes(side_story_group_id, number);
+
+CREATE TABLE episode_idempotency_scoped (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  scope TEXT NOT NULL DEFAULT 'MAIN' CHECK (scope IN ('MAIN','SIDE_STORY')),
+  idempotency_key TEXT NOT NULL,
+  episode_id TEXT NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+  request_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(project_id, scope, idempotency_key)
+);
+INSERT INTO episode_idempotency_scoped (
+  project_id, scope, idempotency_key, episode_id, request_hash, created_at
+)
+SELECT project_id, 'MAIN', idempotency_key, episode_id, request_hash, created_at
+FROM episode_idempotency;
+DROP TABLE episode_idempotency;
+ALTER TABLE episode_idempotency_scoped RENAME TO episode_idempotency;
+
+ALTER TABLE canon_entries
+  ADD COLUMN side_story_group_id TEXT REFERENCES side_story_groups(id) ON DELETE CASCADE;
+CREATE INDEX idx_canon_side_story_group
+  ON canon_entries(side_story_group_id, category, status);
+
+ALTER TABLE arcs
+  ADD COLUMN side_story_group_id TEXT REFERENCES side_story_groups(id) ON DELETE CASCADE;
+CREATE INDEX idx_arcs_side_story_group
+  ON arcs(side_story_group_id, status, start_episode_number);
+
+ALTER TABLE memory_chunks
+  ADD COLUMN flow_key TEXT NOT NULL DEFAULT 'SHARED';
+ALTER TABLE memory_chunks
+  ADD COLUMN flow_position INTEGER;
+UPDATE memory_chunks
+SET flow_key = CASE
+      WHEN source_type IN ('EPISODE', 'EPISODE_SUMMARY', 'ARC') THEN 'MAIN'
+      ELSE 'SHARED'
+    END,
+    flow_position = CASE
+      WHEN source_type IN ('EPISODE', 'EPISODE_SUMMARY')
+        THEN (SELECT number FROM episodes WHERE episodes.id = memory_chunks.source_id)
+      ELSE NULL
+    END;
+CREATE INDEX idx_memory_project_flow
+  ON memory_chunks(project_id, flow_key, flow_position, source_type);
+`;
+
 @Injectable()
 export class DatabaseService implements OnApplicationShutdown {
   readonly connection: Database.Database;
@@ -391,6 +500,7 @@ export class DatabaseService implements OnApplicationShutdown {
       { version: 11, sql: EDITOR_AI_MIGRATION },
       { version: 12, sql: INCOMPLETE_EPISODE_MIGRATION, rebuildsReferencedTable: true },
       { version: 13, sql: PROJECT_TARGET_EPISODE_MIGRATION },
+      { version: 14, sql: SIDE_STORIES_MIGRATION, rebuildsReferencedTable: true },
     ];
     this.connection.exec(
       'CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)',
@@ -434,7 +544,8 @@ export class DatabaseService implements OnApplicationShutdown {
       const legacySchema =
         existingColumns.length > 0 &&
         (!existingColumns.some((column) => column.name === 'project_key') ||
-          !existingColumns.some((column) => column.name === 'episode_number'));
+          !existingColumns.some((column) => column.name === 'flow_key') ||
+          !existingColumns.some((column) => column.name === 'flow_position'));
       const needsBackfill = existingColumns.length === 0 || legacySchema;
       if (legacySchema) {
         this.connection.exec('DROP TABLE memory_chunks_vec');
@@ -443,7 +554,8 @@ export class DatabaseService implements OnApplicationShutdown {
         CREATE VIRTUAL TABLE IF NOT EXISTS memory_chunks_vec USING vec0(
           chunk_id TEXT PRIMARY KEY,
           project_key TEXT PARTITION KEY,
-          episode_number INTEGER,
+          flow_key TEXT,
+          flow_position INTEGER,
           embedding FLOAT[${this.embeddingDimensions}] distance_metric=cosine
         );
       `);
@@ -451,11 +563,8 @@ export class DatabaseService implements OnApplicationShutdown {
         ? this.connection
         .prepare(
           `SELECT m.id, m.project_id, m.source_type, m.source_id, m.embedding_json,
-                  COALESCE(e.number, 0) AS episode_number
+                  m.flow_key, m.flow_position
            FROM memory_chunks m
-           LEFT JOIN episodes e
-             ON m.source_type IN ('EPISODE', 'EPISODE_SUMMARY')
-            AND e.id = m.source_id
            WHERE m.embedding_json IS NOT NULL`,
         )
         .all() as Array<{
@@ -464,13 +573,14 @@ export class DatabaseService implements OnApplicationShutdown {
         source_type: string;
         source_id: string;
         embedding_json: string;
-        episode_number: number;
+        flow_key: string;
+        flow_position: number | null;
       }>
         : [];
       const insert = this.connection.prepare(
-        `INSERT OR REPLACE INTO memory_chunks_vec(
-           chunk_id, project_key, episode_number, embedding
-         ) VALUES (?, ?, ?, ?)`,
+          `INSERT OR REPLACE INTO memory_chunks_vec(
+           chunk_id, project_key, flow_key, flow_position, embedding
+         ) VALUES (?, ?, ?, ?, ?)`,
       );
       for (const row of stored) {
         try {
@@ -479,7 +589,8 @@ export class DatabaseService implements OnApplicationShutdown {
           insert.run(
             row.id,
             row.project_id ?? '__GLOBAL__',
-            BigInt(row.episode_number),
+            row.flow_key,
+            BigInt(row.flow_position ?? 0),
             Buffer.from(new Float32Array(vector).buffer),
           );
         } catch {

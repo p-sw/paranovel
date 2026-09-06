@@ -4,7 +4,7 @@ import type { AiRunnerService } from '../src/ai/ai-runner.service';
 import { AiRunnerService as ConcreteAiRunnerService } from '../src/ai/ai-runner.service';
 import { episodeDirectionSchema, episodeDirectionValidator } from '../src/ai/ai.schemas';
 import { DatabaseService } from '../src/database/database.service';
-import { episodes, sceneStates } from '../src/database/schema';
+import { canonEntries, episodes, sceneStates } from '../src/database/schema';
 import { EpisodesService } from '../src/episodes/episodes.service';
 import { ImprovementsService } from '../src/improvements/improvements.service';
 import { MemoryService } from '../src/memory/memory.service';
@@ -29,6 +29,25 @@ describe('backend core', () => {
     memory = new MemoryService(database, embeddingGateway as never);
     projects = new ProjectsService(database);
   });
+
+  const insertCanonSource = (projectId: string, sourceId: string, content: string): void => {
+    const stamp = new Date().toISOString();
+    database.orm.insert(canonEntries).values({
+      id: sourceId,
+      projectId,
+      sideStoryGroupId: null,
+      category: 'OTHER',
+      name: sourceId,
+      aliasesJson: '[]',
+      content,
+      metadataJson: '{}',
+      status: 'ACTIVE',
+      revision: 1,
+      sourceEpisodeId: null,
+      createdAt: stamp,
+      updatedAt: stamp,
+    }).run();
+  };
 
   afterEach(() => {
     database.onApplicationShutdown();
@@ -333,6 +352,7 @@ describe('backend core', () => {
       logline: '황궁 암살 사건',
       genreTags: ['미스터리'],
     });
+    insertCanonSource(project.id, 'canon-1', '윤서는 황궁 암살 사건의 유일한 목격자다.');
     await memory.indexSource({
       projectId: project.id,
       sourceType: 'CANON',
@@ -386,6 +406,7 @@ describe('backend core', () => {
       title: '다른 프로젝트', logline: '격리된 기억', genreTags: ['SF'],
     });
     for (let index = 0; index < 25; index += 1) {
+      insertCanonSource(other.id, `other-${index}`, '서로다름');
       await memory.indexSource({
         projectId: other.id,
         sourceType: 'CANON',
@@ -393,6 +414,7 @@ describe('backend core', () => {
         text: '서로다름',
       });
     }
+    insertCanonSource(target.id, 'target-only', '서로다름');
     await memory.indexSource({
       projectId: target.id,
       sourceType: 'CANON',

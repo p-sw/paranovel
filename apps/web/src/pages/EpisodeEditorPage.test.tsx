@@ -28,6 +28,7 @@ beforeEach(() => {
   localStorage.clear();
   vi.spyOn(api.episodes, 'get').mockResolvedValue(episode);
   vi.spyOn(api.episodes, 'list').mockResolvedValue([episode]);
+  vi.spyOn(api.episodes, 'flow').mockResolvedValue({ kind: 'MAIN', label: '회차', group: null, episodes: [episode] });
   vi.spyOn(api.scenes, 'get').mockResolvedValue({
     episodeId: episode.id, characters: [], location: null, time: null, pointOfView: null, goal: null, sourceRevision: 1,
   });
@@ -48,7 +49,7 @@ async function openContinuation() {
   await user.click(await screen.findByRole('button', { name: '커서에서 이어쓰기' }));
   const dialog = within(screen.getByRole('dialog'));
   await user.click(dialog.getByRole('button', { name: '이어쓰기 시작' }));
-  return { user, dialog };
+  return { user, dialog, queryClient };
 }
 
 describe('continuation draft review', () => {
@@ -90,7 +91,8 @@ describe('continuation draft review', () => {
       return new Promise((resolve) => { completeRepair = resolve; });
     });
     const update = vi.spyOn(api.episodes, 'update').mockResolvedValue({ ...episode, content: '자동으로 고친 제안.원래 본문.', revision: 2 });
-    const { user, dialog } = await openContinuation();
+    const { user, dialog, queryClient } = await openContinuation();
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
     const textarea = await dialog.findByLabelText('이어쓰기 제안 수정') as HTMLTextAreaElement;
     await user.clear(textarea);
     await user.type(textarea, '직접 다듬은 제안.');
@@ -125,6 +127,9 @@ describe('continuation draft review', () => {
       content: `${episode.content.slice(0, cursorOffset)}자동으로 고친 제안.${episode.content.slice(cursorOffset)}`,
       forceNeedsReview: undefined,
     });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['side-stories', 'story'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['side-story-groups', 'story'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['side-story-group', 'story'] });
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 

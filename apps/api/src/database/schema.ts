@@ -1,4 +1,5 @@
-import { integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { sql } from 'drizzle-orm';
+import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 export const projects = sqliteTable('projects', {
   id: text('id').primaryKey(),
@@ -31,12 +32,46 @@ export const projectCreationSessions = sqliteTable('project_creation_sessions', 
   updatedAt: text('updated_at').notNull(),
 });
 
+export const sideStoryGroups = sqliteTable(
+  'side_story_groups',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull(),
+    title: text('title').notNull(),
+    description: text('description').notNull().default(''),
+    branchFromEpisodeId: text('branch_from_episode_id'),
+    nextEpisodeNumber: integer('next_episode_number').notNull().default(1),
+    revision: integer('revision').notNull().default(1),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [index('idx_side_story_groups_project').on(table.projectId, table.createdAt)],
+);
+
+export const sideStoryGroupIdempotency = sqliteTable(
+  'side_story_group_idempotency',
+  {
+    projectId: text('project_id').notNull(),
+    idempotencyKey: text('idempotency_key').notNull(),
+    groupId: text('group_id').notNull(),
+    requestHash: text('request_hash').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('side_story_group_idempotency_key')
+      .on(table.projectId, table.idempotencyKey),
+  ],
+);
+
 export const episodes = sqliteTable(
   'episodes',
   {
     id: text('id').primaryKey(),
     projectId: text('project_id').notNull(),
-    number: integer('number').notNull(),
+    kind: text('kind').notNull().default('MAIN'),
+    number: integer('number'),
+    sideStoryGroupId: text('side_story_group_id'),
+    branchFromEpisodeId: text('branch_from_episode_id'),
     title: text('title').notNull(),
     direction: text('direction').notNull(),
     content: text('content').notNull(),
@@ -46,7 +81,16 @@ export const episodes = sqliteTable(
     updatedAt: text('updated_at').notNull(),
     deletedAt: text('deleted_at'),
   },
-  (table) => [uniqueIndex('episodes_project_number').on(table.projectId, table.number)],
+  (table) => [
+    uniqueIndex('episodes_main_project_number')
+      .on(table.projectId, table.number)
+      .where(sql`${table.kind} = 'MAIN'`),
+    uniqueIndex('episodes_side_story_group_number')
+      .on(table.sideStoryGroupId, table.number)
+      .where(sql`${table.kind} = 'SIDE_STORY' AND ${table.sideStoryGroupId} IS NOT NULL`),
+    index('idx_episodes_project_kind').on(table.projectId, table.kind, table.number),
+    index('idx_episodes_side_story_group').on(table.sideStoryGroupId, table.number),
+  ],
 );
 
 export const episodeSummaries = sqliteTable('episode_summaries', {
@@ -61,13 +105,21 @@ export const episodeSummaries = sqliteTable('episode_summaries', {
   updatedAt: text('updated_at').notNull(),
 });
 
-export const episodeIdempotency = sqliteTable('episode_idempotency', {
-  projectId: text('project_id').notNull(),
-  idempotencyKey: text('idempotency_key').notNull(),
-  episodeId: text('episode_id').notNull(),
-  requestHash: text('request_hash').notNull(),
-  createdAt: text('created_at').notNull(),
-});
+export const episodeIdempotency = sqliteTable(
+  'episode_idempotency',
+  {
+    projectId: text('project_id').notNull(),
+    scope: text('scope').notNull().default('MAIN'),
+    idempotencyKey: text('idempotency_key').notNull(),
+    episodeId: text('episode_id').notNull(),
+    requestHash: text('request_hash').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('episode_idempotency_scope_key')
+      .on(table.projectId, table.scope, table.idempotencyKey),
+  ],
+);
 
 export const sceneStates = sqliteTable('scene_states', {
   episodeId: text('episode_id').primaryKey(),
@@ -83,6 +135,7 @@ export const sceneStates = sqliteTable('scene_states', {
 export const arcs = sqliteTable('arcs', {
   id: text('id').primaryKey(),
   projectId: text('project_id').notNull(),
+  sideStoryGroupId: text('side_story_group_id'),
   title: text('title').notNull(),
   startEpisodeNumber: integer('start_episode_number').notNull(),
   endEpisodeNumber: integer('end_episode_number').notNull(),
@@ -100,6 +153,7 @@ export const arcs = sqliteTable('arcs', {
 export const canonEntries = sqliteTable('canon_entries', {
   id: text('id').primaryKey(),
   projectId: text('project_id').notNull(),
+  sideStoryGroupId: text('side_story_group_id'),
   category: text('category').notNull(),
   name: text('name').notNull(),
   aliasesJson: text('aliases_json').notNull(),
@@ -145,6 +199,8 @@ export const memoryChunks = sqliteTable('memory_chunks', {
   projectId: text('project_id'),
   sourceType: text('source_type').notNull(),
   sourceId: text('source_id').notNull(),
+  flowKey: text('flow_key').notNull().default('SHARED'),
+  flowPosition: integer('flow_position'),
   ordinal: integer('ordinal').notNull(),
   content: text('content').notNull(),
   contentHash: text('content_hash').notNull(),
@@ -235,6 +291,8 @@ export const schema = {
   chatProposals,
   projects,
   projectCreationSessions,
+  sideStoryGroups,
+  sideStoryGroupIdempotency,
   episodes,
   episodeIdempotency,
   episodeSummaries,

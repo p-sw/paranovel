@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Outlet, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { EpisodeOrder } from '@paranovel/contracts';
 import { api } from '../api/client';
-import type { CanonEntry, Episode } from '../types';
+import type { CanonEntry, Episode, SideStoryGroup } from '../types';
 import CanonPage from './CanonPage';
 import EpisodesPage from './EpisodesPage';
 
@@ -97,6 +97,7 @@ beforeEach(() => {
     return episode;
   });
   vi.spyOn(api.episodes, 'propose').mockResolvedValue(proposal);
+  vi.spyOn(api.sideStories, 'list').mockResolvedValue({ standalone: [], groups: [] });
   vi.spyOn(api.canon, 'list').mockResolvedValue([]);
 });
 
@@ -480,6 +481,284 @@ describe('new episode flow', () => {
     expect(screen.queryByLabelText('회차 제목')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '다음' })).toBeEnabled();
     expect(api.episodes.propose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('side stories', () => {
+  const standalone: Episode = {
+    ...incompleteEpisode,
+    id: 'standalone-side',
+    kind: 'SIDE_STORY',
+    number: null,
+    sideStoryGroupId: null,
+    branchFromEpisodeId: null,
+    title: '비 오는 휴일',
+    status: 'DRAFT',
+  };
+  const groupedOne: Episode = {
+    ...standalone,
+    id: 'group-side-1',
+    number: 1,
+    sideStoryGroupId: 'group-1',
+    title: '밤의 약속',
+  };
+  const groupedTwo: Episode = { ...groupedOne, id: 'group-side-2', number: 2, title: '새벽의 답' };
+  const group: SideStoryGroup & { episodes: Episode[] } = {
+    id: 'group-1', projectId: 'story', title: '수도 야화', description: '본편 밖의 수도 이야기',
+    branchFromEpisodeId: 'episode-1', nextEpisodeNumber: 3, revision: 1, canon: [],
+    arc: {
+      id: 'side-arc', projectId: 'story', title: '사라진 등불', startEpisode: 1, endEpisode: 4,
+      goal: '등불의 주인을 찾는다.', conflict: '수도 경비대가 추적한다.', reversalPlan: [], status: 'ACTIVE', revision: 1,
+      createdAt: incompleteEpisode.createdAt, updatedAt: incompleteEpisode.updatedAt,
+    },
+    episodes: [groupedOne, groupedTwo], createdAt: incompleteEpisode.createdAt, updatedAt: incompleteEpisode.updatedAt,
+  };
+
+  it('keeps standalone and group numbering separate from the main episode order', async () => {
+    persistedEpisodes = [{ ...incompleteEpisode, status: 'DRAFT' }];
+    vi.mocked(api.sideStories.list).mockResolvedValue({ standalone: [standalone], groups: [group] });
+    renderPage();
+
+    expect(await screen.findByRole('link', { name: /닫힌 문 너머/ })).toBeVisible();
+    expect(screen.getAllByRole('button', { name: '새 외전' })[0]).toBeVisible();
+    expect(within(screen.getByRole('region', { name: '회차 목록' })).getByRole('button', { name: '1화 메뉴' })).toBeVisible();
+    const standaloneList = screen.getByRole('region', { name: '단편 외전 목록' });
+    expect(within(standaloneList).getByText('단편')).toBeVisible();
+    expect(within(standaloneList).queryByText(/단편 외전 [0-9]+화/)).not.toBeInTheDocument();
+    const groupedList = screen.getByRole('region', { name: '수도 야화' });
+    expect(within(groupedList).getByRole('button', { name: '외전 1화 메뉴' })).toBeVisible();
+    expect(within(groupedList).getByRole('button', { name: '외전 2화 메뉴' })).toBeVisible();
+    expect(screen.getByText('그룹 정사')).toBeVisible();
+    expect(screen.getByText('사라진 등불')).toBeVisible();
+  });
+
+  it.each([
+    { mode: 'canon', branchId: null },
+    { mode: 'episode', branchId: 'episode-1' },
+  ] as const)('creates a standalone side story with an explicit $mode boundary', async ({ mode, branchId }) => {
+    persistedEpisodes = [{ ...incompleteEpisode, status: 'DRAFT' }];
+    const created = { ...standalone, id: `created-${mode}`, status: 'INCOMPLETE' as const };
+    const create = vi.spyOn(api.sideStories, 'create').mockResolvedValue(created);
+    const user = userEvent.setup();
+    renderPage();
+    await user.click((await screen.findAllByRole('button', { name: '새 외전' }))[0]);
+    const dialog = within(await screen.findByRole('dialog', { name: '새 외전 만들기' }));
+    if (mode === 'episode') {
+      await user.click(dialog.getByLabelText(/본편 회차에서 이어쓰기/));
+      await user.selectOptions(dialog.getByLabelText('이어 쓸 본편 회차'), 'episode-1');
+    }
+    await user.click(dialog.getByRole('button', { name: '다음' }));
+    await user.click(dialog.getByRole('button', { name: '다음' }));
+    expect(await dialog.findByLabelText('외전 제목')).toHaveValue(proposal.title);
+
+    expect(api.episodes.propose).toHaveBeenCalledWith('story', undefined, expect.any(AbortSignal), {
+      kind: 'SIDE_STORY', sideStoryGroupId: null, branchFromEpisodeId: branchId,
+    });
+    expect(create).toHaveBeenCalledWith('story', {
+      title: proposal.title, direction: proposal.direction, content: '', incomplete: true,
+      groupId: null, branchFromEpisodeId: branchId,
+    }, expect.any(String));
+    expect(api.episodes.create).not.toHaveBeenCalled();
+  });
+
+  it('keeps a persisted standalone scope fixed when returning to the request step', async () => {
+    persistedEpisodes = [{ ...incompleteEpisode, status: 'DRAFT' }];
+    const created = {
+      ...standalone,
+      id: 'persisted-standalone',
+      title: proposal.title,
+      direction: proposal.direction,
+      status: 'INCOMPLETE' as const,
+    };
+    const create = vi.spyOn(api.sideStories, 'create').mockResolvedValue(created);
+    const user = userEvent.setup();
+    renderPage();
+    await user.click((await screen.findAllByRole('button', { name: '새 외전' }))[0]);
+    const dialog = within(await screen.findByRole('dialog', { name: '새 외전 만들기' }));
+    await user.click(dialog.getByRole('button', { name: '다음' }));
+    await user.click(dialog.getByRole('button', { name: '다음' }));
+    expect(await dialog.findByLabelText('외전 제목')).toHaveValue(proposal.title);
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+
+    await user.click(dialog.getByRole('button', { name: '이전' }));
+
+    expect(await dialog.findByLabelText(/외전에 원하는 것/)).toBeVisible();
+    expect(dialog.queryByRole('button', { name: '이전' })).not.toBeInTheDocument();
+    expect(dialog.queryByRole('radio', { name: /단편 외전/ })).not.toBeInTheDocument();
+    await user.click(dialog.getByRole('button', { name: '나중에 계속하기' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '새 외전 만들기' })).not.toBeInTheDocument());
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires a group name, canon, and complete arc before creating a new side-story group', async () => {
+    const createGroup = vi.spyOn(api.sideStoryGroups, 'create');
+    const user = userEvent.setup();
+    renderPage();
+    await user.click((await screen.findAllByRole('button', { name: '새 외전' }))[0]);
+    const dialog = within(await screen.findByRole('dialog', { name: '새 외전 만들기' }));
+    await user.click(dialog.getByRole('radio', { name: /새 그룹/ }));
+
+    const next = dialog.getByRole('button', { name: '다음' });
+    const requiredFields = [
+      [dialog.getByLabelText('그룹 이름'), '겨울 궁전'],
+      [dialog.getByLabelText('그룹 정사'), '궁전 안에서는 시간이 느리게 흐른다.'],
+      [dialog.getByLabelText('아크 제목'), '얼어붙은 봉인'],
+      [dialog.getByLabelText('아크 목표'), '궁전의 봉인을 푼다.'],
+      [dialog.getByLabelText('중심 갈등'), '시간을 지키는 파수꾼이 막아선다.'],
+    ] as const;
+
+    expect(next).toBeDisabled();
+    for (const [field, value] of requiredFields) await user.type(field, value);
+    expect(next).toBeEnabled();
+    expect(dialog.getByLabelText(/그룹 설명/)).toHaveValue('');
+    expect(dialog.getByLabelText(/예상 종료 외전/)).toHaveValue(null);
+
+    for (const [field, value] of requiredFields) {
+      await user.clear(field);
+      expect(next).toBeDisabled();
+      await user.type(field, value);
+      expect(next).toBeEnabled();
+    }
+    expect(createGroup).not.toHaveBeenCalled();
+  });
+
+  it('keeps persisted new-group setup committed and closes without creating an external story', async () => {
+    const createdGroup: SideStoryGroup = {
+      ...group,
+      id: 'persisted-new-group',
+      title: '겨울 궁전',
+      description: '',
+      branchFromEpisodeId: null,
+      nextEpisodeNumber: 1,
+      canon: [],
+      arc: { ...group.arc, id: 'persisted-new-group-arc' },
+      episodes: [],
+    };
+    const createGroup = vi.spyOn(api.sideStoryGroups, 'create').mockResolvedValue(createdGroup);
+    const createSide = vi.spyOn(api.sideStories, 'create');
+    const user = userEvent.setup();
+    renderPage();
+    await user.click((await screen.findAllByRole('button', { name: '새 외전' }))[0]);
+    const dialog = within(await screen.findByRole('dialog', { name: '새 외전 만들기' }));
+    await user.click(dialog.getByRole('radio', { name: /새 그룹/ }));
+    await user.type(dialog.getByLabelText('그룹 이름'), createdGroup.title);
+    await user.type(dialog.getByLabelText('그룹 정사'), '궁전 안에서는 시간이 느리게 흐른다.');
+    await user.type(dialog.getByLabelText('아크 제목'), '얼어붙은 봉인');
+    await user.type(dialog.getByLabelText('아크 목표'), '궁전의 봉인을 푼다.');
+    await user.type(dialog.getByLabelText('중심 갈등'), '시간을 지키는 파수꾼이 막아선다.');
+
+    await user.click(dialog.getByRole('button', { name: '다음' }));
+
+    const persistedNotice = await dialog.findByRole('status');
+    expect(persistedNotice).toHaveTextContent('겨울 궁전 그룹은 이미 저장되었습니다.');
+    expect(persistedNotice).toHaveTextContent('닫아도 외전 그룹 목록에 남습니다.');
+    expect(dialog.queryByRole('button', { name: '이전' })).not.toBeInTheDocument();
+    expect(dialog.queryByRole('radio', { name: /단편 외전/ })).not.toBeInTheDocument();
+    expect(dialog.getByLabelText(/외전에 원하는 것/)).toBeVisible();
+
+    await user.click(dialog.getByRole('button', { name: '나중에 계속하기' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '새 외전 만들기' })).not.toBeInTheDocument());
+    expect(createGroup).toHaveBeenCalledTimes(1);
+    expect(api.episodes.propose).not.toHaveBeenCalled();
+    expect(createSide).not.toHaveBeenCalled();
+  });
+
+  it('retries new-group creation with one idempotency key before planning and saving inside that group', async () => {
+    persistedEpisodes = [{ ...incompleteEpisode, status: 'DRAFT' }];
+    const createdGroup: SideStoryGroup = {
+      ...group,
+      id: 'new-group',
+      title: '겨울 궁전',
+      description: '조연들의 겨울 이야기',
+      branchFromEpisodeId: 'episode-1',
+      nextEpisodeNumber: 1,
+      arc: {
+        ...group.arc,
+        id: 'new-group-arc',
+        title: '얼어붙은 봉인',
+        goal: '궁전의 봉인을 푼다.',
+        conflict: '시간을 지키는 파수꾼이 막아선다.',
+        endEpisode: 6,
+      },
+      episodes: [],
+    };
+    const createGroup = vi.spyOn(api.sideStoryGroups, 'create')
+      .mockRejectedValueOnce(new Error('그룹 생성 응답을 확인하지 못했어요.'))
+      .mockResolvedValueOnce(createdGroup);
+    const createdSide = {
+      ...standalone,
+      id: 'new-group-side',
+      number: 1,
+      sideStoryGroupId: createdGroup.id,
+      title: proposal.title,
+      direction: proposal.direction,
+      status: 'INCOMPLETE' as const,
+    };
+    const createSide = vi.spyOn(api.sideStories, 'create').mockResolvedValue(createdSide);
+    const user = userEvent.setup();
+    renderPage();
+    await user.click((await screen.findAllByRole('button', { name: '새 외전' }))[0]);
+    const dialog = within(await screen.findByRole('dialog', { name: '새 외전 만들기' }));
+    await user.click(dialog.getByRole('radio', { name: /새 그룹/ }));
+    await user.type(dialog.getByLabelText('그룹 이름'), createdGroup.title);
+    await user.type(dialog.getByLabelText(/그룹 설명/), createdGroup.description);
+    await user.type(dialog.getByLabelText('그룹 정사'), '궁전 안에서는 시간이 느리게 흐른다.');
+    await user.type(dialog.getByLabelText('아크 제목'), createdGroup.arc.title);
+    await user.type(dialog.getByLabelText('아크 목표'), createdGroup.arc.goal);
+    await user.type(dialog.getByLabelText('중심 갈등'), createdGroup.arc.conflict);
+    await user.type(dialog.getByLabelText(/예상 종료 외전/), '6');
+    await user.click(dialog.getByRole('radio', { name: /본편 회차에서 이어쓰기/ }));
+    expect(dialog.getByRole('button', { name: '다음' })).toBeDisabled();
+    await user.selectOptions(dialog.getByLabelText('이어 쓸 본편 회차'), 'episode-1');
+
+    await user.click(dialog.getByRole('button', { name: '다음' }));
+    expect(await dialog.findByText('그룹 생성 응답을 확인하지 못했어요.')).toBeVisible();
+    expect(dialog.getByLabelText('그룹 이름')).toHaveValue(createdGroup.title);
+    expect(dialog.getByRole('status')).toHaveTextContent('첫 그룹 생성 요청과 같은 내용으로 다시 시도합니다.');
+    expect(dialog.getByLabelText('그룹 이름')).toBeDisabled();
+    expect(dialog.getByLabelText(/그룹 설명/)).toBeDisabled();
+    expect(dialog.getByLabelText('이어 쓸 본편 회차')).toBeDisabled();
+    expect(createGroup).toHaveBeenCalledTimes(1);
+
+    await user.click(dialog.getByRole('button', { name: '다음' }));
+    expect(await dialog.findByLabelText(/외전에 원하는 것/)).toBeVisible();
+    expect(createGroup).toHaveBeenCalledTimes(2);
+    const expectedGroupInput = {
+      title: createdGroup.title,
+      description: createdGroup.description,
+      branchFromEpisodeId: 'episode-1',
+      canon: '궁전 안에서는 시간이 느리게 흐른다.',
+      arc: {
+        title: createdGroup.arc.title,
+        goal: createdGroup.arc.goal,
+        conflict: createdGroup.arc.conflict,
+        endEpisodeNumber: 6,
+        reversalPlan: [],
+      },
+    };
+    expect(createGroup).toHaveBeenNthCalledWith(1, 'story', expectedGroupInput, expect.any(String));
+    expect(createGroup).toHaveBeenNthCalledWith(2, 'story', expectedGroupInput, createGroup.mock.calls[0][2]);
+    expect(createGroup.mock.calls[0][2]).toEqual(expect.any(String));
+
+    await user.type(dialog.getByLabelText(/외전에 원하는 것/), '조연들만 남은 겨울밤');
+    await user.click(dialog.getByRole('button', { name: '다음' }));
+    expect(await dialog.findByLabelText('외전 제목')).toHaveValue(proposal.title);
+    expect(api.episodes.propose).toHaveBeenCalledWith(
+      'story',
+      '조연들만 남은 겨울밤',
+      expect.any(AbortSignal),
+      { kind: 'SIDE_STORY', sideStoryGroupId: createdGroup.id, branchFromEpisodeId: null },
+    );
+    await waitFor(() => expect(createSide).toHaveBeenCalledWith('story', {
+      title: proposal.title,
+      direction: proposal.direction,
+      content: '',
+      incomplete: true,
+      groupId: createdGroup.id,
+      branchFromEpisodeId: null,
+    }, expect.any(String)));
+    expect(api.episodes.create).not.toHaveBeenCalled();
   });
 });
 

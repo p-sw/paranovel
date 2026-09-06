@@ -26,6 +26,17 @@ export function stringifyJson(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
 
+export function stableStringifyJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringifyJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableStringifyJson(item)}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
 export function requireString(
   value: unknown,
   field: string,

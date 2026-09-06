@@ -5,18 +5,30 @@ import type {
   ArcPlanProposal,
   CanonEntry,
   CanonCategory,
+  CreateSideStoryGroupInput,
   ContinuityIssue,
   CurrentScene,
   Episode,
+  EpisodeFlow,
   Improvement,
   ImprovementCandidate,
   ImprovementSuggestion,
   Project,
   ProjectBlueprint,
   ProjectSessionResult,
+  SideStoryCollection,
+  SideStoryGroup,
   StreamEvent,
   StreamResult,
 } from '../types';
+
+export type EpisodePlanContext =
+  | { episodeId: string; expectedRevision?: number }
+  | {
+      kind: 'SIDE_STORY';
+      sideStoryGroupId: string | null;
+      branchFromEpisodeId: string | null;
+    };
 
 export class ApiError extends Error {
   status: number;
@@ -223,6 +235,8 @@ export const api = {
     list: (projectId: string) => json<Episode[]>(`/projects/${projectId}/episodes`),
     get: (projectId: string, episodeId: string) =>
       json<Episode>(`/projects/${projectId}/episodes/${episodeId}`),
+    flow: (projectId: string, episodeId: string) =>
+      json<EpisodeFlow>(`/projects/${projectId}/episodes/${episodeId}/flow`),
     create: (
       projectId: string,
       input: { title: string; direction: string; content?: string; incomplete?: boolean; forceNeedsReview?: boolean },
@@ -233,7 +247,7 @@ export const api = {
         body: input,
         headers: { 'Idempotency-Key': idempotencyKey },
       }),
-    propose: (projectId: string, hint?: string, signal?: AbortSignal, context?: { episodeId: string; expectedRevision?: number }) =>
+    propose: (projectId: string, hint?: string, signal?: AbortSignal, context?: EpisodePlanContext) =>
       json<{ title: string; direction: string; conflicts: string[] }>(`/projects/${projectId}/episodes/propose`, {
         method: 'POST',
         body: { ...(hint ? { hint } : {}), ...context },
@@ -241,7 +255,16 @@ export const api = {
       }),
     refine: (
       projectId: string,
-      input: { title: string; direction: string; instruction: string; episodeId?: string; expectedRevision?: number },
+      input: {
+        title: string;
+        direction?: string;
+        instruction: string;
+        episodeId?: string;
+        expectedRevision?: number;
+        kind?: 'SIDE_STORY';
+        sideStoryGroupId?: string | null;
+        branchFromEpisodeId?: string | null;
+      },
       signal?: AbortSignal,
     ) =>
       json<{ title: string; direction: string; conflicts: string[] }>(`/projects/${projectId}/episodes/refine`, {
@@ -312,6 +335,45 @@ export const api = {
         `/projects/${projectId}/episodes/${episodeId}/selection-replacements`,
         { method: 'POST', body: input },
       ),
+  },
+  sideStories: {
+    list: (projectId: string) =>
+      json<SideStoryCollection>(`/projects/${projectId}/side-stories`),
+    create: (
+      projectId: string,
+      input: {
+        title: string;
+        direction?: string;
+        content?: string;
+        incomplete?: boolean;
+        forceNeedsReview?: boolean;
+        groupId: string | null;
+        branchFromEpisodeId: string | null;
+      },
+      idempotencyKey: string,
+    ) => json<Episode>(`/projects/${projectId}/side-stories`, {
+      method: 'POST',
+      body: input,
+      headers: { 'Idempotency-Key': idempotencyKey },
+    }),
+  },
+  sideStoryGroups: {
+    list: (projectId: string) =>
+      json<SideStoryGroup[]>(`/projects/${projectId}/side-story-groups`),
+    get: (projectId: string, groupId: string) =>
+      json<SideStoryGroup>(`/projects/${projectId}/side-story-groups/${encodeURIComponent(groupId)}`),
+    create: (projectId: string, input: CreateSideStoryGroupInput, idempotencyKey: string) =>
+      json<SideStoryGroup>(`/projects/${projectId}/side-story-groups`, {
+        method: 'POST',
+        body: input,
+        headers: { 'Idempotency-Key': idempotencyKey },
+      }),
+    update: (
+      projectId: string,
+      groupId: string,
+      input: { expectedRevision: number; title?: string; description?: string },
+    ) =>
+      json<SideStoryGroup>(`/projects/${projectId}/side-story-groups/${encodeURIComponent(groupId)}`, { method: 'PATCH', body: input }),
   },
   scenes: {
     get: (projectId: string, episodeId: string) =>

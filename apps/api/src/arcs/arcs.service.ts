@@ -36,7 +36,7 @@ export class ArcsService {
     return this.database.orm
       .select()
       .from(arcs)
-      .where(eq(arcs.projectId, projectId))
+      .where(and(eq(arcs.projectId, projectId), isNull(arcs.sideStoryGroupId)))
       .orderBy(asc(arcs.startEpisodeNumber), asc(arcs.createdAt))
       .all()
       .map((row) => this.toView(row));
@@ -49,6 +49,7 @@ export class ArcsService {
       .where(
         and(
           eq(arcs.projectId, projectId),
+          isNull(arcs.sideStoryGroupId),
           eq(arcs.status, 'ACTIVE'),
         ),
       )
@@ -162,6 +163,7 @@ export class ArcsService {
     const row: typeof arcs.$inferInsert = {
       id: arcId,
       projectId,
+      sideStoryGroupId: null,
       title: requireString(input.title, 'title', { max: 200 }),
       startEpisodeNumber: start,
       endEpisodeNumber: end,
@@ -192,7 +194,11 @@ export class ArcsService {
     const row = this.database.orm
       .select()
       .from(arcs)
-      .where(and(eq(arcs.id, arcId), eq(arcs.projectId, projectId)))
+      .where(and(
+        eq(arcs.id, arcId),
+        eq(arcs.projectId, projectId),
+        isNull(arcs.sideStoryGroupId),
+      ))
       .get();
     if (!row) throw new NotFoundException('Arc not found');
     return this.toView(row);
@@ -209,7 +215,11 @@ export class ArcsService {
     const current = this.database.orm
       .select()
       .from(arcs)
-      .where(and(eq(arcs.id, arcId), eq(arcs.projectId, projectId)))
+      .where(and(
+        eq(arcs.id, arcId),
+        eq(arcs.projectId, projectId),
+        isNull(arcs.sideStoryGroupId),
+      ))
       .get();
     if (!current) throw new NotFoundException('Arc not found');
     const input = (body ?? {}) as Record<string, unknown>;
@@ -282,11 +292,20 @@ export class ArcsService {
       const result = this.database.orm
         .update(arcs)
         .set(changes)
-        .where(and(eq(arcs.id, arcId), eq(arcs.revision, current.revision)))
+        .where(and(
+          eq(arcs.id, arcId),
+          eq(arcs.projectId, projectId),
+          isNull(arcs.sideStoryGroupId),
+          eq(arcs.revision, current.revision),
+        ))
         .run();
       if (result.changes !== 1) throw new ConflictException('Arc revision changed during update');
     }).immediate();
-    const updated = this.database.orm.select().from(arcs).where(eq(arcs.id, arcId)).get()!;
+    const updated = this.database.orm.select().from(arcs).where(and(
+      eq(arcs.id, arcId),
+      eq(arcs.projectId, projectId),
+      isNull(arcs.sideStoryGroupId),
+    )).get()!;
     return this.toView(updated);
   }
 
@@ -298,12 +317,17 @@ export class ArcsService {
     const result = this.database.orm.delete(arcs).where(and(
       eq(arcs.id, arcId),
       eq(arcs.projectId, projectId),
+      isNull(arcs.sideStoryGroupId),
       eq(arcs.status, 'PLANNED'),
       eq(arcs.revision, Number(input.expectedRevision)),
     )).run();
     if (result.changes !== 1) {
       const existing = this.database.orm.select({ id: arcs.id, status: arcs.status, revision: arcs.revision }).from(arcs)
-        .where(and(eq(arcs.id, arcId), eq(arcs.projectId, projectId))).get();
+        .where(and(
+          eq(arcs.id, arcId),
+          eq(arcs.projectId, projectId),
+          isNull(arcs.sideStoryGroupId),
+        )).get();
       if (!existing) throw new NotFoundException('Arc not found');
       if (existing.status !== 'PLANNED') throw new ConflictException('Only future planned arcs can be deleted');
       throw new ConflictException('Arc revision is stale');
@@ -318,6 +342,7 @@ export class ArcsService {
       .where(
         and(
           eq(arcs.projectId, projectId),
+          isNull(arcs.sideStoryGroupId),
           eq(arcs.status, 'ACTIVE'),
         ),
       )
@@ -332,7 +357,12 @@ export class ArcsService {
             updatedAt: now(),
             revision: row.revision + 1,
           })
-          .where(and(eq(arcs.id, row.id), eq(arcs.revision, row.revision)))
+          .where(and(
+            eq(arcs.id, row.id),
+            eq(arcs.projectId, projectId),
+            isNull(arcs.sideStoryGroupId),
+            eq(arcs.revision, row.revision),
+          ))
           .run();
         if (result.changes !== 1) throw new ConflictException('Current arc revision changed during activation');
       }
@@ -343,7 +373,11 @@ export class ArcsService {
     const earliest = this.database.orm
       .select({ id: arcs.id, startEpisodeNumber: arcs.startEpisodeNumber })
       .from(arcs)
-      .where(and(eq(arcs.projectId, projectId), eq(arcs.status, 'PLANNED')))
+      .where(and(
+        eq(arcs.projectId, projectId),
+        isNull(arcs.sideStoryGroupId),
+        eq(arcs.status, 'PLANNED'),
+      ))
       .orderBy(asc(arcs.startEpisodeNumber), asc(arcs.createdAt))
       .get();
     if (!earliest || earliest.id !== arcId) {
@@ -352,7 +386,7 @@ export class ArcsService {
     const timeline = this.database.orm
       .select({ status: arcs.status, endEpisodeNumber: arcs.endEpisodeNumber })
       .from(arcs)
-      .where(eq(arcs.projectId, projectId))
+      .where(and(eq(arcs.projectId, projectId), isNull(arcs.sideStoryGroupId)))
       .all();
     const current = timeline.find((arc) => arc.status === 'ACTIVE');
     const completedEnd = timeline
@@ -411,6 +445,7 @@ export class ArcsService {
       .from(episodes)
       .where(and(
         eq(episodes.projectId, projectId),
+        eq(episodes.kind, 'MAIN'),
         isNull(episodes.deletedAt),
         sql`length(trim(${episodes.content})) > 0`,
       ))
@@ -448,7 +483,7 @@ export class ArcsService {
         status: arcs.status,
       })
       .from(arcs)
-      .where(eq(arcs.projectId, projectId))
+      .where(and(eq(arcs.projectId, projectId), isNull(arcs.sideStoryGroupId)))
       .all()
       .filter((arc) => arc.id !== arcId && arc.status !== 'ARCHIVED')
       .filter((arc) => {
@@ -522,13 +557,18 @@ export class ArcsService {
       this.memory.removeSource('ARC', arcId);
       return;
     }
-    const row = this.database.orm.select().from(arcs).where(eq(arcs.id, arcId)).get()!;
+    const row = this.database.orm.select().from(arcs).where(and(
+      eq(arcs.id, arcId),
+      eq(arcs.projectId, projectId),
+      isNull(arcs.sideStoryGroupId),
+    )).get()!;
     await this.index(row);
   }
 
   private async index(row: typeof arcs.$inferSelect): Promise<void> {
     await this.memory.indexSource({
       projectId: row.projectId,
+      sideStoryGroupId: row.sideStoryGroupId,
       sourceType: 'ARC',
       sourceId: row.id,
       text: formatArcMemory(row),

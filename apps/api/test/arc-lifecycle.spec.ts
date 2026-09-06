@@ -94,6 +94,49 @@ describe('arc lifecycle protection', () => {
     expect(arcs.list(projectId).map((arc) => arc.id)).toEqual([current.id, late.id]);
   });
 
+  it('keeps side-story arcs and episodes outside the main arc lifecycle', async () => {
+    const current = await arcs.create(projectId, { ...currentFields, status: 'ACTIVE' });
+    const stamp = new Date().toISOString();
+    database.connection.prepare(`
+      INSERT INTO side_story_groups (
+        id, project_id, title, description, next_episode_number, revision, created_at, updated_at
+      ) VALUES ('side-group', ?, '외전', '', 100, 1, ?, ?)
+    `).run(projectId, stamp, stamp);
+    const insertSideArc = database.connection.prepare(`
+      INSERT INTO arcs (
+        id, project_id, side_story_group_id, title, start_episode_number, end_episode_number,
+        goal, conflict, twist_plan, reversal_plan_json, status, revision, created_at, updated_at
+      ) VALUES (?, ?, 'side-group', ?, ?, ?, '외전 목표', '외전 갈등', '', '[]', ?, 1, ?, ?)
+    `);
+    insertSideArc.run('side-active', projectId, '외전 현재', 1, 5, 'ACTIVE', stamp, stamp);
+    insertSideArc.run('side-planned', projectId, '외전 미래', 6, 10, 'PLANNED', stamp, stamp);
+    database.connection.prepare(`
+      INSERT INTO episodes (
+        id, project_id, kind, number, side_story_group_id, title, direction, content,
+        revision, status, created_at, updated_at
+      ) VALUES ('side-episode', ?, 'SIDE_STORY', 99, 'side-group', '외전 99화', '외전 결말',
+        '외전만 완결됐다.', 1, 'DRAFT', ?, ?)
+    `).run(projectId, stamp, stamp);
+
+    const future = await arcs.create(projectId, futureFields);
+    expect(arcs.list(projectId).map((arc) => arc.id)).toEqual([current.id, future.id]);
+    await expect(arcs.update(projectId, future.id, {
+      expectedRevision: future.revision,
+      status: 'ACTIVE',
+    })).rejects.toBeInstanceOf(ConflictException);
+
+    await arcs.update(projectId, future.id, {
+      expectedRevision: future.revision,
+      status: 'ACTIVE',
+      confirmProtected: true,
+    });
+    expect(arcs.get(projectId, current.id).status).toBe('ARCHIVED');
+    expect(database.connection.prepare('SELECT status FROM arcs WHERE id = ?').get('side-active'))
+      .toEqual({ status: 'ACTIVE' });
+    expect(database.connection.prepare('SELECT status FROM arcs WHERE id = ?').get('side-planned'))
+      .toEqual({ status: 'PLANNED' });
+  });
+
   it('allows only deliberate lifecycle transitions and keeps past arcs read-only', async () => {
     await expect(arcs.create(projectId, {
       ...futureFields,

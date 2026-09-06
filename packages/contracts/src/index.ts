@@ -216,7 +216,10 @@ export type EpisodeSummary = z.infer<typeof episodeSummarySchema>;
 export const episodeSchema = z.object({
   id: idSchema,
   projectId: idSchema,
-  number: z.number().int().positive(),
+  kind: z.enum(['MAIN', 'SIDE_STORY']).optional(),
+  number: z.number().int().positive().nullable(),
+  sideStoryGroupId: idSchema.nullable().optional(),
+  branchFromEpisodeId: idSchema.nullable().optional(),
   title: z.string().min(1),
   direction: z.string(),
   content: z.string(),
@@ -244,6 +247,9 @@ export type UpdateEpisodeOrderInput = z.infer<typeof updateEpisodeOrderSchema>;
 export const canonEntrySchema = canonDraftSchema.extend({
   id: idSchema,
   projectId: idSchema,
+  sideStoryGroupId: idSchema.nullable().optional(),
+  status: z.enum(['ACTIVE', 'PENDING', 'ACCEPTED', 'REJECTED']).optional(),
+  sourceEpisodeId: idSchema.nullable().optional(),
   revision: z.number().int().nonnegative(),
   createdAt: isoDateSchema,
   updatedAt: isoDateSchema,
@@ -261,6 +267,7 @@ export type CanonCandidate = z.infer<typeof canonCandidateSchema>;
 export const arcSchema = arcDraftSchema.extend({
   id: idSchema,
   projectId: idSchema,
+  sideStoryGroupId: idSchema.nullable().optional(),
   status: z.enum(['PLANNED', 'ACTIVE', 'COMPLETE', 'ARCHIVED']),
   revision: z.number().int().positive(),
   createdAt: isoDateSchema,
@@ -281,6 +288,108 @@ export const arcSchema = arcDraftSchema.extend({
   });
 });
 export type Arc = z.infer<typeof arcSchema>;
+
+export const sideStoryGroupSchema = z.object({
+  id: idSchema,
+  projectId: idSchema,
+  title: z.string().min(1),
+  description: z.string(),
+  branchFromEpisodeId: idSchema.nullable(),
+  nextEpisodeNumber: z.number().int().positive(),
+  revision: z.number().int().positive(),
+  canon: z.array(canonEntrySchema),
+  arc: arcSchema,
+  episodes: z.array(episodeSchema).optional(),
+  createdAt: isoDateSchema,
+  updatedAt: isoDateSchema,
+});
+export type SideStoryGroup = z.infer<typeof sideStoryGroupSchema>;
+
+export const sideStoryCollectionSchema = z.object({
+  standalone: z.array(episodeSchema),
+  groups: z.array(sideStoryGroupSchema.extend({ episodes: z.array(episodeSchema) })),
+});
+export type SideStoryCollection = z.infer<typeof sideStoryCollectionSchema>;
+
+export const sideStoryGroupSummarySchema = sideStoryGroupSchema.pick({
+  id: true,
+  projectId: true,
+  title: true,
+  description: true,
+  branchFromEpisodeId: true,
+  nextEpisodeNumber: true,
+  revision: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type SideStoryGroupSummary = z.infer<typeof sideStoryGroupSummarySchema>;
+
+export const episodeFlowSchema = z.object({
+  kind: z.enum(['MAIN', 'SIDE_STORY']),
+  label: z.string().min(1),
+  group: sideStoryGroupSummarySchema.nullable(),
+  episodes: z.array(episodeSchema),
+});
+export type EpisodeFlow = z.infer<typeof episodeFlowSchema>;
+
+export const createSideStorySchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  direction: z.string().max(20_000).optional(),
+  content: z.string().max(1_000_000).optional(),
+  incomplete: z.boolean().optional(),
+  forceNeedsReview: z.boolean().optional(),
+  groupId: idSchema.nullable(),
+  branchFromEpisodeId: idSchema.nullable(),
+}).strict()
+  .refine((value) => !(value.groupId && value.branchFromEpisodeId), {
+    message: '그룹 외전은 그룹의 분기 회차를 상속합니다.',
+  })
+  .refine((value) => !value.incomplete || !value.content?.trim(), {
+    message: '본문이 있는 외전은 미완성으로 표시할 수 없습니다.',
+  });
+export type CreateSideStoryInput = z.infer<typeof createSideStorySchema>;
+
+const sideStoryArcBeatSchema = z.object({
+  id: z.string().trim().min(1).max(200).optional(),
+  episode: z.number().int().positive(),
+  description: z.string().trim().min(1).max(10_000),
+}).strict();
+
+export const createSideStoryGroupSchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  description: z.string().max(20_000).optional(),
+  branchFromEpisodeId: idSchema.nullable(),
+  canon: z.string().trim().min(1).max(50_000),
+  arc: z.object({
+    title: z.string().trim().min(1).max(200),
+    goal: z.string().trim().min(1).max(10_000),
+    conflict: z.string().trim().min(1).max(10_000),
+    endEpisodeNumber: z.number().int().positive().max(20).optional(),
+    reversalPlan: z.array(sideStoryArcBeatSchema).optional(),
+  }).strict().superRefine((arc, context) => {
+    const endEpisodeNumber = arc.endEpisodeNumber ?? 5;
+    arc.reversalPlan?.forEach((beat, index) => {
+      if (beat.episode > endEpisodeNumber) {
+        context.addIssue({
+          code: 'custom',
+          path: ['reversalPlan', index, 'episode'],
+          message: '반전 회차는 외전 그룹 아크 범위 안이어야 합니다.',
+        });
+      }
+    });
+  }),
+}).strict();
+export type CreateSideStoryGroupInput = z.infer<typeof createSideStoryGroupSchema>;
+
+export const updateSideStoryGroupSchema = z.object({
+  expectedRevision: z.number().int().positive(),
+  title: z.string().trim().min(1).max(200).optional(),
+  description: z.string().max(20_000).optional(),
+}).strict().refine(
+  (value) => value.title !== undefined || value.description !== undefined,
+  { message: 'At least one editable field is required' },
+);
+export type UpdateSideStoryGroupInput = z.infer<typeof updateSideStoryGroupSchema>;
 
 export const sceneStateSchema = z.object({
   episodeId: idSchema,
@@ -355,7 +464,8 @@ export const updateEpisodeSchema = z
     incomplete: z.boolean().optional(),
     forceNeedsReview: z.boolean().optional(),
   })
-  .refine((value) => value.title !== undefined || value.direction !== undefined || value.content !== undefined || value.incomplete !== undefined, {
+  .refine((value) => value.title !== undefined || value.direction !== undefined || value.content !== undefined ||
+    value.incomplete !== undefined || value.forceNeedsReview === true, {
     message: '수정할 필드가 필요합니다.',
   })
   .refine((value) => !value.incomplete || !value.content?.trim(), {
