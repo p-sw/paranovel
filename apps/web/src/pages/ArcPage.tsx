@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, Flag, GitBranch, History, Plus, Sparkles, Target, WandSparkles } from 'lucide-react';
+import { AlertTriangle, ChevronDown, Flag, GitBranch, History, Plus, Sparkles, Target, WandSparkles } from 'lucide-react';
 import { useOutletContext, useParams } from 'react-router-dom';
 import { api, messageOf } from '../api/client';
 import type { Arc, ArcPlanProposal } from '../types';
@@ -208,7 +208,7 @@ export default function ArcPage() {
       {previousArcs.length ? (
         <section className="mt-8" aria-labelledby="arc-history-title">
           <div className="mb-3 flex items-center justify-between gap-3">
-            <div><p className="eyebrow">삭제되지 않는 계획 기록</p><h2 id="arc-history-title" className="mt-1 font-story text-xl font-bold">이전 아크</h2></div>
+            <div><p className="eyebrow">삭제되지 않는 계획 기록</p><h2 id="arc-history-title" className="mt-1 font-story text-xl font-bold">이전·대기 아크</h2></div>
             <Badge tone="neutral"><History className="size-3" /> {previousArcs.length}개</Badge>
           </div>
           <div className="space-y-3">
@@ -218,12 +218,25 @@ export default function ArcPage() {
                   <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><Badge tone="neutral">{pastArc.startEpisode}–{pastArc.endEpisode}화</Badge><ArcStatusBadge status={pastArc.status} /></div><h3 className="mt-2 font-story text-lg font-bold">{pastArc.title}</h3><p className="mt-1 line-clamp-2 text-sm leading-6 text-muted">{pastArc.goal}</p></div>
                   {pastArc.status !== 'ACTIVE' ? <Button size="sm" variant="secondary" busy={activateMutation.isPending && activateMutation.variables?.id === pastArc.id} onClick={() => { if (window.confirm(`‘${pastArc.title}’을 현재 아크로 전환할까요? 기존 현재 아크는 보관된 이전 기록으로 이동합니다.`)) activateMutation.mutate(pastArc); }}>현재 아크로 전환</Button> : null}
                 </div>
+                <details className="group mt-3">
+                  <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-lg px-2 text-sm font-semibold text-plum-700 hover:bg-plum-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-plum-500 [&::-webkit-details-marker]:hidden">
+                    <ChevronDown aria-hidden="true" className="size-4 shrink-0 transition-transform group-open:rotate-180" />
+                    <span className="sr-only">{pastArc.title} </span>
+                    <span className="group-open:hidden">자세히 보기</span>
+                    <span className="hidden group-open:inline">접기</span>
+                  </summary>
+                  <dl className="mt-3 space-y-4 border-t border-line pt-4 text-sm">
+                    <div><dt className="font-bold">아크 목표</dt><dd className="mt-1 whitespace-pre-wrap break-words leading-7">{pastArc.goal}</dd></div>
+                    <div><dt className="font-bold">핵심 갈등</dt><dd className="mt-1 whitespace-pre-wrap break-words leading-7">{pastArc.conflict}</dd></div>
+                    <div><dt className="font-bold">회차별 반전</dt><dd className="mt-1 whitespace-pre-wrap break-words leading-7">{pastArc.reversalPlan.map((beat) => `${beat.episode}화 — ${beat.description}`).join('\n') || '아직 정한 반전이 없습니다.'}</dd></div>
+                  </dl>
+                </details>
               </article>
             ))}
           </div>
         </section>
       ) : null}
-      {arcsQuery.isError ? <FieldError>이전 아크 기록을 불러오지 못했습니다.</FieldError> : null}
+      {arcsQuery.isError ? <FieldError>이전·대기 아크 기록을 불러오지 못했습니다.</FieldError> : null}
 
       <Sheet
         open={plannerOpen}
