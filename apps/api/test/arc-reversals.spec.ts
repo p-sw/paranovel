@@ -36,7 +36,7 @@ describe('episode-specific arc reversals', () => {
     expect(created).not.toHaveProperty('twistPlan');
     const updatedPlan = [{ episode: 10, description: '적의 목적이 복수였음이 밝혀진다' }];
     const updated = await arcs.update(projectId, created.id, {
-      expectedRevision: created.revision, reversalPlan: updatedPlan,
+      expectedRevision: created.revision, reversalPlan: updatedPlan, confirmProtected: true,
     });
     expect(arcs.current(projectId)?.reversalPlan).toEqual(updatedPlan);
     const assembled = await memory.assemble(projectId, '복수');
@@ -44,7 +44,9 @@ describe('episode-specific arc reversals', () => {
     expect(assembled.retrievedMemories).toContain('10화 — 적의 목적이 복수였음이 밝혀진다');
     expect(assembled.retrievedMemories).not.toContain(reversalPlan[0]!.description);
 
-    await arcs.update(projectId, updated.id, { expectedRevision: updated.revision, reversalPlan: [] });
+    await arcs.update(projectId, updated.id, {
+      expectedRevision: updated.revision, reversalPlan: [], confirmProtected: true,
+    });
     expect(arcs.current(projectId)?.reversalPlan).toEqual([]);
     expect((await memory.assemble(projectId, '복수')).retrievedMemories).not.toContain(updatedPlan[0]!.description);
   });

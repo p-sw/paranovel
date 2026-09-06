@@ -408,10 +408,54 @@ describe('project chat', () => {
   it('rejects arc activation if the reviewed active arc changed', async () => {
     const old = await arcs.create(projectId, { ...arcFields, status: 'ACTIVE' });
     const history = await ask([proposal('ARC', 'CREATE', { ...arcFields, title: '다음', status: 'ACTIVE' })]);
-    await arcs.update(projectId, old.id, { expectedRevision: old.revision, title: '수정한 아크' });
+    await arcs.update(projectId, old.id, {
+      expectedRevision: old.revision, title: '수정한 아크', confirmProtected: true,
+    });
     await expect(chat.apply(projectId, history.messages[1]!.proposals[0]!.id)).rejects.toBeInstanceOf(ConflictException);
     expect(arcs.list(projectId)).toHaveLength(1);
     expect(arcs.current(projectId)?.title).toBe('수정한 아크');
+  });
+
+  it('rejects activation when writing progress changes the reviewed current-arc outcome', async () => {
+    const old = await arcs.create(projectId, { ...arcFields, status: 'ACTIVE' });
+    const history = await ask([proposal('ARC', 'CREATE', {
+      ...arcFields,
+      title: '다음 아크',
+      startEpisodeNumber: 9,
+      endEpisodeNumber: 16,
+      status: 'ACTIVE',
+    })]);
+    const stamp = new Date().toISOString();
+    database.orm.insert(episodes).values({
+      id: 'arc-ending-episode', projectId, number: 8, title: '마지막 문', direction: '문을 연다.', content: '문이 열렸다.',
+      status: 'DRAFT', revision: 1, createdAt: stamp, updatedAt: stamp,
+    }).run();
+
+    await expect(chat.apply(projectId, history.messages[1]!.proposals[0]!.id))
+      .rejects.toBeInstanceOf(ConflictException);
+    expect(arcs.current(projectId)?.id).toBe(old.id);
+    expect(arcs.list(projectId)).toHaveLength(1);
+  });
+
+  it.each([
+    [null, 'COMPLETE'],
+    [null, 'ARCHIVED'],
+    ['PLANNED', 'COMPLETE'],
+    ['PLANNED', 'ARCHIVED'],
+    ['ACTIVE', 'PLANNED'],
+    ['ACTIVE', 'COMPLETE'],
+    ['ACTIVE', 'ARCHIVED'],
+  ] as const)('rejects an ARC %s -> %s status transition while preparing proposals', async (currentStatus, nextStatus) => {
+    const current = currentStatus ? await arcs.create(projectId, { ...arcFields, status: currentStatus }) : null;
+    const invalid = current
+      ? proposal('ARC', 'UPDATE', { status: nextStatus }, current.id)
+      : proposal('ARC', 'CREATE', { ...arcFields, status: nextStatus });
+
+    await expect(ask([invalid])).rejects.toBeInstanceOf(BadGatewayException);
+
+    expect(chat.history(projectId).messages[1]).toMatchObject({ status: 'FAILED', proposals: [] });
+    expect(database.orm.select().from(chatProposals).all()).toHaveLength(0);
+    expect(arcs.list(projectId)).toEqual(current ? [current] : []);
   });
 
   it('keeps global improvements read-only and rejects cross-project targets and proposal application', async () => {

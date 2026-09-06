@@ -8,6 +8,7 @@ import { and, eq, isNull, or } from 'drizzle-orm';
 import { OpenRouterGateway } from '../ai/openrouter.gateway';
 import { DatabaseService } from '../database/database.service';
 import { formatArcMemory } from './arc-memory';
+import { formatCanonMemory } from './canon-memory';
 import {
   arcs,
   canonEntries,
@@ -67,6 +68,7 @@ export class MemoryService {
   }): Promise<void> {
     const pieces = chunkText(input.text);
     const isEpisode = ['EPISODE', 'EPISODE_SUMMARY'].includes(input.sourceType);
+    const isArc = input.sourceType === 'ARC';
     const sourceEpisode = isEpisode
       ? this.database.orm
           .select({ number: episodes.number, revision: episodes.revision, projectId: episodes.projectId })
@@ -74,9 +76,18 @@ export class MemoryService {
           .where(and(eq(episodes.id, input.sourceId), isNull(episodes.deletedAt)))
           .get()
       : undefined;
+    const sourceArc = isArc
+      ? this.database.orm
+          .select({ projectId: arcs.projectId, revision: arcs.revision, status: arcs.status })
+          .from(arcs)
+          .where(eq(arcs.id, input.sourceId))
+          .get()
+      : undefined;
     if (isEpisode && (!sourceEpisode || sourceEpisode.projectId !== input.projectId ||
       (input.expectedEpisode && (sourceEpisode.number !== input.expectedEpisode.number ||
         sourceEpisode.revision !== input.expectedEpisode.revision)))) return;
+    if (isArc && (!sourceArc || sourceArc.projectId !== input.projectId ||
+      !['ACTIVE', 'COMPLETE'].includes(sourceArc.status))) return;
     const episodeNumber = sourceEpisode?.number ?? 0;
     let vectors: number[][] = [];
     if (pieces.length > 0) {
@@ -97,6 +108,15 @@ export class MemoryService {
           .where(and(eq(episodes.id, input.sourceId), isNull(episodes.deletedAt))).get();
         if (!current || current.number !== sourceEpisode.number ||
           current.revision !== sourceEpisode.revision) return;
+      }
+      if (sourceArc) {
+        const current = this.database.orm
+          .select({ projectId: arcs.projectId, revision: arcs.revision, status: arcs.status })
+          .from(arcs)
+          .where(eq(arcs.id, input.sourceId))
+          .get();
+        if (!current || current.projectId !== sourceArc.projectId || current.revision !== sourceArc.revision
+          || current.status !== sourceArc.status || !['ACTIVE', 'COMPLETE'].includes(current.status)) return;
       }
       const oldRows = this.database.orm
         .select({ id: memoryChunks.id })
@@ -250,12 +270,19 @@ export class MemoryService {
              FROM memory_chunks_fts f
              JOIN memory_chunks m ON m.id = f.chunk_id
              WHERE memory_chunks_fts MATCH ? AND (m.project_id = ? OR m.project_id IS NULL)
+               AND (m.source_type != 'ARC' OR EXISTS (
+                 SELECT 1 FROM arcs searchable_arc
+                 WHERE searchable_arc.id = m.source_id
+                   AND searchable_arc.project_id = ?
+                   AND searchable_arc.status IN ('ACTIVE', 'COMPLETE')
+               ))
              ${episodeBoundarySql}
              ORDER BY bm25(memory_chunks_fts)
              LIMIT ?`,
           )
           .all(
             match,
+            projectId,
             projectId,
             ...(beforeEpisodeNumber === undefined
               ? [candidateLimit]
@@ -289,6 +316,12 @@ export class MemoryService {
                  JOIN memory_chunks m ON m.id = v.chunk_id
                  WHERE v.embedding MATCH ? AND k = ?
                    AND v.project_key = ?
+                   AND (m.source_type != 'ARC' OR EXISTS (
+                     SELECT 1 FROM arcs searchable_arc
+                     WHERE searchable_arc.id = m.source_id
+                       AND searchable_arc.project_id = ?
+                       AND searchable_arc.status IN ('ACTIVE', 'COMPLETE')
+                   ))
                    ${vectorBoundarySql}
                  ORDER BY v.distance`,
               )
@@ -296,6 +329,7 @@ export class MemoryService {
                 blob,
                 candidateLimit,
                 projectKey,
+                projectId,
                 ...(beforeEpisodeNumber === undefined ? [] : [BigInt(beforeEpisodeNumber)]),
               ) as Array<{
               id: string;
@@ -331,6 +365,7 @@ export class MemoryService {
         const source = this.database.orm.select({ arc: arcs, ordinal: memoryChunks.ordinal }).from(arcs)
           .innerJoin(memoryChunks, and(eq(memoryChunks.id, row.id), eq(memoryChunks.sourceId, arcs.id)))
           .where(and(eq(arcs.id, row.sourceId), eq(arcs.projectId, projectId))).get();
+        if (source && !['ACTIVE', 'COMPLETE'].includes(source.arc.status)) return [];
         const content = source ? chunkText(formatArcMemory(source.arc))[source.ordinal] : undefined;
         return content ? [{ ...row, content, score }] : [];
       });
@@ -472,6 +507,8 @@ export class MemoryService {
               logline: project.logline,
               genreTags: parseJson(project.genreTagsJson, []),
               details: parseJson(project.detailsJson, project.detailsJson),
+              targetEpisode: project.targetEpisode,
+              targetEpisodeSource: project.targetEpisodeSource,
             }
           : {},
       ),
@@ -593,10 +630,11 @@ export class MemoryService {
         projectId,
         sourceType: 'CANON',
         sourceId: entry.id,
-        text: `${entry.category}: ${entry.name}\n${entry.content}`,
+        text: formatCanonMemory(entry),
       });
     }
     for (const arc of this.database.orm.select().from(arcs).where(eq(arcs.projectId, projectId)).all()) {
+      if (!['ACTIVE', 'COMPLETE'].includes(arc.status)) continue;
       sources.push({
         projectId,
         sourceType: 'ARC',

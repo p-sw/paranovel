@@ -184,7 +184,7 @@ export function ConfirmDialog({
 
 export function FieldError({ children }: { children?: ReactNode }) {
   if (!children) return null;
-  return <p className="mt-1 text-sm text-red-700">{children}</p>;
+  return <p className="mt-1 text-sm text-red-700" role="alert">{children}</p>;
 }
 
 export function SkeletonCards({ count = 3 }: { count?: number }) {

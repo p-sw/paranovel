@@ -22,7 +22,7 @@ const nav = [
   { slug: 'episodes', label: '회차', shortLabel: '회차', icon: BookOpenText },
   { slug: 'chat', label: 'AI 채팅', shortLabel: 'AI 채팅', icon: MessageCircle },
   { slug: 'canon', label: '정사·설정', shortLabel: '정사', icon: Library },
-  { slug: 'arc', label: '현재 아크', shortLabel: '아크', icon: GitBranch },
+  { slug: 'arc', label: '아크 계획', shortLabel: '아크', icon: GitBranch },
   { slug: 'improvements', label: '개선점', shortLabel: '개선점', icon: Sparkles },
 ] as const;
 

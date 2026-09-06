@@ -7,10 +7,12 @@ import { api, ApiError } from '../api/client';
 import type { ProjectSessionResult, SetupAnswerRecord, SetupQuestion } from '../types';
 import ProjectWizardPage from './ProjectWizardPage';
 
-const title: SetupQuestion = { id: 'title', field: 'title', prompt: '작품 제목은?', inputType: 'text', options: [], required: true };
+const title: SetupQuestion = { id: 'title', field: 'title', prompt: '작품 제목은?', inputType: 'text', options: [], required: true, suggestedAnswer: '달 없는 밤' };
+const target: SetupQuestion = { id: 'target-episode', field: 'targetEpisode', prompt: '몇 화에 완결할까요?', inputType: 'text', options: [], required: false };
 const tone: SetupQuestion = { id: 'tone', field: 'tone', prompt: '어떤 분위기인가요?', inputType: 'single', options: ['밝음', '어두움'], required: false };
 const traits: SetupQuestion = { id: 'traits', field: 'traits', prompt: '주인공의 특성은?', inputType: 'multi', options: ['용기', '지혜'], required: false };
 const titleRecord: SetupAnswerRecord = { question: title, answer: '달 없는 밤', skipped: false };
+const targetRecord: SetupAnswerRecord = { question: target, answer: '10', skipped: false };
 const toneRecord: SetupAnswerRecord = { question: tone, answer: '밝음', skipped: false };
 
 function session(question: SetupQuestion, history: SetupAnswerRecord[] = []): ProjectSessionResult {
@@ -22,7 +24,11 @@ function readySession(history: SetupAnswerRecord[] = [titleRecord, toneRecord]):
     session: { id: 'session-1' }, history, stateToken: 'ready-state',
     step: { type: 'ready', blueprint: {
       title: '달 없는 밤', logline: '잃어버린 달을 찾는다.', genreTags: ['판타지'], details: '', defaultTargetChars: 5000, canon: [],
-      arc: { title: '달의 흔적', startEpisode: 1, endEpisode: 5, goal: '달 찾기', conflict: '추격자', reversalPlan: [] },
+      targetEpisode: 10, targetEpisodeSource: 'AI',
+      arcs: [
+        { title: '달의 흔적', startEpisode: 1, endEpisode: 5, goal: '달 찾기', conflict: '추격자', reversalPlan: [] },
+        { title: '달의 귀환', startEpisode: 6, endEpisode: 10, goal: '달 되찾기', conflict: '왕실', reversalPlan: [] },
+      ],
     } },
   };
 }
@@ -43,6 +49,106 @@ afterEach(() => {
 });
 
 describe('project interview input and navigation', () => {
+  it('prefills the AI title recommendation and submits the user-edited title', async () => {
+    const { user, respond } = await renderSession(session(title));
+    const input = screen.getByLabelText('답변');
+    expect(input).toHaveValue('달 없는 밤');
+    await user.clear(input);
+    await user.type(input, '달을 훔친 기록관');
+    await user.click(screen.getByRole('button', { name: '다음 질문' }));
+    expect(respond).toHaveBeenCalledWith('session-1', {
+      questionId: 'title', answer: '달을 훔친 기록관', position: 0, expectedState: 'state-0',
+    });
+  });
+
+  it('accepts a numeric target or lets the user delegate only that question to AI', async () => {
+    const { user, respond } = await renderSession(session(target, [titleRecord]));
+    expect(screen.getByLabelText('답변')).toHaveAttribute('type', 'number');
+    await user.click(screen.getByRole('button', { name: 'AI에게 완결 회차 맡기기' }));
+    expect(respond).toHaveBeenCalledWith('session-1', {
+      questionId: 'target-episode', skipOptional: true, position: 1, expectedState: 'state-1',
+    });
+    expect(screen.queryByRole('button', { name: '나머지 질문 건너뛰기' })).not.toBeInTheDocument();
+  });
+
+  it('shows the AI ending and every current or future arc in final review', async () => {
+    await renderSession(readySession());
+    expect(screen.getByLabelText('목표 완결 회차')).toHaveValue(10);
+    expect(screen.getByText(/AI가 작품 규모에 맞춰 제안한 회차/)).toBeVisible();
+    expect(screen.getByText('현재 아크').closest('summary')).toHaveTextContent('1–5화 · 달의 흔적');
+    expect(screen.getByText('대기 아크 1').closest('summary')).toHaveTextContent('6–10화 · 달의 귀환');
+  });
+
+  it('keeps the reviewed target read-only and returns to its interview question for changes', async () => {
+    const { user, respond } = await renderSession(readySession([titleRecord, targetRecord, toneRecord]));
+    expect(screen.getByLabelText('목표 완결 회차')).toHaveAttribute('readonly');
+
+    await user.click(screen.getByRole('button', { name: '목표 회차 다시 정하기' }));
+
+    expect(screen.getByRole('heading', { name: target.prompt })).toBeVisible();
+    expect(screen.getByLabelText('답변')).toHaveValue(10);
+    expect(respond).not.toHaveBeenCalled();
+  });
+
+  it('validates the target character count before submitting the reviewed blueprint', async () => {
+    const { user } = await renderSession(readySession());
+    const targetChars = screen.getByLabelText('회차 기본 목표 글자 수');
+    await user.clear(targetChars);
+    await user.type(targetChars, '400');
+    expect(screen.getByText(/회차 기본 목표 글자 수는 500자/)).toBeVisible();
+    expect(screen.getByRole('button', { name: '프로젝트 만들기' })).toBeDisabled();
+  });
+
+  it('submits user edits to every reviewed arc', async () => {
+    const commit = vi.spyOn(api.sessions, 'commit').mockResolvedValue({
+      project: { id: 'project-1', title: '달 없는 밤' } as never,
+    });
+    const { user } = await renderSession(readySession());
+    const futureTitle = screen.getAllByLabelText('아크 제목')[1]!;
+    await user.clear(futureTitle);
+    await user.type(futureTitle, '변경된 달의 귀환');
+    await user.click(screen.getByRole('button', { name: '프로젝트 만들기' }));
+
+    await waitFor(() => expect(commit).toHaveBeenCalledWith(
+      'session-1',
+      expect.objectContaining({
+        arcs: [
+          expect.objectContaining({ title: '달의 흔적' }),
+          expect.objectContaining({ title: '변경된 달의 귀환' }),
+        ],
+      }),
+      'ready-state',
+    ));
+  });
+
+  it('keeps a future arc panel open while its reviewed fields are edited', async () => {
+    const { user } = await renderSession(readySession());
+    const futureSummary = screen.getByText('대기 아크 1').closest('summary');
+    const futurePanel = futureSummary?.closest('details');
+    if (!futureSummary || !futurePanel) throw new Error('Expected the future arc review panel');
+
+    expect(futurePanel).not.toHaveAttribute('open');
+    await user.click(futureSummary);
+    expect(futurePanel).toHaveAttribute('open');
+    await user.type(screen.getAllByLabelText('아크 제목')[1]!, ' 수정');
+    expect(futurePanel).toHaveAttribute('open');
+  });
+
+  it('locks the review fieldset and its inputs while project creation is pending', async () => {
+    const commit = vi.spyOn(api.sessions, 'commit').mockReturnValue(new Promise<never>(() => undefined));
+    const { user } = await renderSession(readySession());
+    const titleInput = screen.getByLabelText('소설 제목');
+    const reviewFieldset = titleInput.closest('fieldset');
+
+    await user.click(screen.getByRole('button', { name: '프로젝트 만들기' }));
+
+    await waitFor(() => expect(commit).toHaveBeenCalledTimes(1));
+    expect(reviewFieldset).toBeDisabled();
+    expect(titleInput).toBeDisabled();
+    expect(screen.getByRole('button', { name: '이전 질문' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '프로젝트를 정리하는 중' })).toBeDisabled();
+  });
+
   it('enables the Other textarea only for Other and omits it when submitting an AI choice', async () => {
     const { user, respond } = await renderSession(session(tone, [titleRecord]));
     const textarea = screen.getByLabelText('기타 답변');
@@ -155,8 +261,32 @@ describe('project interview input and navigation', () => {
     const { user, respond } = await renderSession(legacy);
     expect(screen.getByRole('button', { name: '이전 질문' })).toBeDisabled();
     expect(screen.queryByLabelText('기타 답변')).not.toBeInTheDocument();
+    await user.clear(screen.getByLabelText('답변'));
     await user.type(screen.getByLabelText('답변'), '제목');
     await user.click(screen.getByRole('button', { name: '다음 질문' }));
     await waitFor(() => expect(respond).toHaveBeenCalledWith('session-1', { questionId: 'title', answer: '제목' }));
+  });
+
+  it('renders a cached legacy single-arc review safely while server recovery is unavailable', async () => {
+    const legacy = {
+      session: { id: 'session-1' },
+      step: {
+        type: 'ready',
+        blueprint: {
+          title: '달 없는 밤', logline: '잃어버린 달을 찾는다.', genreTags: ['판타지'],
+          details: '', defaultTargetChars: 5000, canon: [],
+          arc: { title: '달의 흔적', startEpisode: 1, endEpisode: 5, goal: '달 찾기', conflict: '추격자', reversalPlan: [] },
+        },
+      },
+    };
+    sessionStorage.setItem('paranovel.project-session', JSON.stringify(legacy));
+    vi.spyOn(api.sessions, 'get').mockRejectedValue(new Error('offline'));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+
+    render(<QueryClientProvider client={client}><MemoryRouter><ProjectWizardPage /></MemoryRouter></QueryClientProvider>);
+
+    expect(await screen.findByRole('heading', { name: '이 세계로 시작할까요?' })).toBeVisible();
+    expect(screen.getByText('현재 아크').closest('summary')).toHaveTextContent('1–5화 · 달의 흔적');
+    expect(screen.getByText(/저장된 인터뷰를 복구하지 못했습니다/)).toBeVisible();
   });
 });

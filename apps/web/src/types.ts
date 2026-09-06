@@ -54,6 +54,8 @@ export interface ArcPlanProposal {
   reversalPlan: Array<{ episode: number; description: string }>;
   episodeDirections: Array<{ episode: number; title: string; direction: string }>;
   conflicts: string[];
+  replaceArcId?: string;
+  replaceArcRevision?: number;
 }
 
 export type ProjectBlueprint = ContractProjectBlueprint & {

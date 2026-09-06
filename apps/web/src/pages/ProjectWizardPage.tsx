@@ -28,7 +28,28 @@ function draftFromRecord(record?: SetupAnswerRecord): AnswerDraft {
 function loadSession(): ProjectSessionResult | null {
   try {
     const raw = sessionStorage.getItem(SESSION_KEY);
-    return raw ? (JSON.parse(raw) as ProjectSessionResult) : null;
+    if (!raw) return null;
+    const result = JSON.parse(raw) as ProjectSessionResult;
+    if (result.step?.type !== 'ready') return result;
+    const stored = result.step.blueprint as ProjectBlueprint & {
+      arc?: ProjectBlueprint['arcs'][number];
+      arcs?: ProjectBlueprint['arcs'];
+    };
+    if (Array.isArray(stored?.arcs)) return result;
+    if (!stored?.arc) return null;
+    const { arc, ...rest } = stored;
+    return {
+      ...result,
+      step: {
+        type: 'ready',
+        blueprint: {
+          ...rest,
+          targetEpisode: arc.endEpisode,
+          targetEpisodeSource: 'AI',
+          arcs: [arc],
+        },
+      },
+    };
   } catch {
     return null;
   }
@@ -41,7 +62,9 @@ export default function ProjectWizardPage() {
   const [genreTags, setGenreTags] = useState<string[]>([]);
   const [customGenre, setCustomGenre] = useState('');
   const [sessionResult, setSessionResult] = useState<ProjectSessionResult | null>(() => loadSession());
-  const [answer, setAnswer] = useState<string | string[]>('');
+  const [answer, setAnswer] = useState<string | string[]>(
+    sessionResult?.step.type === 'question' ? sessionResult.step.question.suggestedAnswer ?? '' : '',
+  );
   const [otherSelected, setOtherSelected] = useState(false);
   const [otherText, setOtherText] = useState('');
   const [cursor, setCursor] = useState<number | null>(null);
@@ -57,6 +80,7 @@ export default function ProjectWizardPage() {
   const [resuming, setResuming] = useState(Boolean(sessionResult));
   const history = sessionResult?.history ?? [];
   const position = cursor ?? history.length;
+  const targetQuestionPosition = history.findIndex((record) => record.question.field === 'targetEpisode');
   const phase = sessionResult ? (sessionResult.step.type === 'ready' && cursor === null ? 'review' : 'interview') : 'basics';
 
   useEffect(() => {
@@ -69,7 +93,7 @@ export default function ProjectWizardPage() {
     setSessionResult(result);
     drafts.current = {};
     setCursor(null);
-    setAnswer('');
+    setAnswer(result.step.type === 'question' ? result.step.question.suggestedAnswer ?? '' : '');
     setOtherSelected(false);
     setOtherText('');
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(result));
@@ -155,6 +179,7 @@ export default function ProjectWizardPage() {
   const question = cursor !== null ? history[cursor]?.question ?? null
     : sessionResult?.step.type === 'question' ? sessionResult.step.question : null;
   const busy = respondMutation.isPending || skipping || commitMutation.isPending;
+  const blueprintIssue = blueprint ? validateBlueprintReview(blueprint, reviewGenres) : '검토할 설정이 없습니다.';
   const validAnswer = useMemo(() => {
     if (!question) return false;
     if (otherSelected) return Boolean(otherText.trim());
@@ -274,7 +299,7 @@ export default function ProjectWizardPage() {
           <section className="wizard-card">
             <p className="eyebrow">새로운 연재</p>
             <h1 className="section-title mt-2">어떤 이야기인가요?</h1>
-            <p className="page-lead mt-2">제목은 다음 단계에서 AI가 반드시 직접 물어봐요.</p>
+            <p className="page-lead mt-2">다음 단계에서 AI가 작품 제목을 추천해요. 마음에 들지 않으면 바로 고칠 수 있어요.</p>
             <form className="mt-8 space-y-7" onSubmit={submitBasics} noValidate>
               <div>
                 <label className="field-label" htmlFor="logline">로그라인 <span aria-hidden="true">*</span></label>
@@ -356,15 +381,20 @@ export default function ProjectWizardPage() {
                   value={typeof answer === 'string' ? answer : ''}
                   onChange={(event) => setAnswer(event.target.value)}
                   placeholder="자유롭게 적어 주세요"
+                  maxLength={10_000}
                 />
               ) : question.inputType === 'text' ? (
                 <input
                   className="input"
                   autoFocus
                   aria-label="답변"
+                  type={question.field === 'targetEpisode' ? 'number' : 'text'}
+                  min={question.field === 'targetEpisode' ? 5 : undefined}
+                  max={question.field === 'targetEpisode' ? 2000 : undefined}
                   value={typeof answer === 'string' ? answer : ''}
                   onChange={(event) => setAnswer(event.target.value)}
-                  placeholder="답을 입력해 주세요"
+                  placeholder={question.field === 'targetEpisode' ? '예: 100' : '답을 입력해 주세요'}
+                  maxLength={question.field === 'title' ? 200 : question.field === 'targetEpisode' ? undefined : 10_000}
                 />
               ) : (
                 <div>
@@ -415,13 +445,25 @@ export default function ProjectWizardPage() {
                 </div>
               )}
               </fieldset>
+              {question.field === 'title' && question.suggestedAnswer ? <p className="mt-4 text-sm text-plum-700">AI 추천 제목이에요. 그대로 확정하거나 입력란에서 자유롭게 바꿔 주세요.</p> : null}
+              {question.field === 'targetEpisode' ? <p className="mt-4 text-sm text-muted">목표가 없다면 AI가 이야기 규모에 맞춰 완결 회차와 전체 아크를 제안해요.</p> : null}
               {cursor !== null ? <p className="mt-4 text-sm text-muted">답변을 수정하고 다음으로 이동하면 이후 질문과 설정 초안이 새 답변에 맞춰 다시 만들어져요.</p> : null}
               <FieldError>{error}</FieldError>
               <div className="mt-7 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                 <Button type="button" variant="ghost" disabled={position === 0 || busy} onClick={() => showPosition(position - 1)}>
                   <ArrowLeft className="size-4" /> 이전 질문
                 </Button>
-                {!question.required && cursor === null ? (
+                {!question.required && cursor === null && question.field === 'targetEpisode' ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() => respondMutation.mutate({ question, skip: true })}
+                  >
+                    AI에게 완결 회차 맡기기
+                  </Button>
+                ) : null}
+                {!question.required && cursor === null && question.field !== 'targetEpisode' ? (
                   <Button
                     type="button"
                     variant="ghost"
@@ -443,15 +485,17 @@ export default function ProjectWizardPage() {
           <section className="wizard-card wizard-card-wide">
             <p className="eyebrow">마지막 확인</p>
             <h1 className="section-title mt-2">이 세계로 시작할까요?</h1>
+            <fieldset className="m-0 min-w-0 border-0 p-0" disabled={commitMutation.isPending}>
             <div className="mt-7 space-y-7">
               <section className="blueprint-section">
                 <h2>작품 정보</h2>
                 <div className="mt-4 space-y-4">
-                  <div><label className="field-label" htmlFor="review-title">소설 제목</label><input id="review-title" className="input" value={blueprint.title} onChange={(event) => setBlueprint({ ...blueprint, title: event.target.value })} /></div>
-                  <div><label className="field-label" htmlFor="review-logline">로그라인</label><textarea id="review-logline" className="input" value={blueprint.logline} onChange={(event) => setBlueprint({ ...blueprint, logline: event.target.value })} /></div>
+                  <div><label className="field-label" htmlFor="review-title">소설 제목</label><input id="review-title" className="input" maxLength={200} value={blueprint.title} onChange={(event) => setBlueprint({ ...blueprint, title: event.target.value })} /></div>
+                  <div><label className="field-label" htmlFor="review-logline">로그라인</label><textarea id="review-logline" className="input" maxLength={2_000} value={blueprint.logline} onChange={(event) => setBlueprint({ ...blueprint, logline: event.target.value })} /></div>
                   <div><label className="field-label" htmlFor="review-genres">장르 태그</label><input id="review-genres" className="input" value={reviewGenres} onChange={(event) => setReviewGenres(event.target.value)} /><p className="field-hint">쉼표로 구분해 주세요.</p></div>
-                  <div><label className="field-label" htmlFor="review-details">세계의 핵심</label><textarea id="review-details" className="input" value={blueprint.details} onChange={(event) => setBlueprint({ ...blueprint, details: event.target.value })} /></div>
+                  <div><label className="field-label" htmlFor="review-details">세계의 핵심</label><textarea id="review-details" className="input" maxLength={20_000} value={blueprint.details} onChange={(event) => setBlueprint({ ...blueprint, details: event.target.value })} /></div>
                   <div><label className="field-label" htmlFor="review-target-chars">회차 기본 목표 글자 수</label><input id="review-target-chars" type="number" min={500} max={30000} step={100} className="input" value={blueprint.defaultTargetChars} onChange={(event) => setBlueprint({ ...blueprint, defaultTargetChars: Number(event.target.value) })} /></div>
+                  <div><label className="field-label" htmlFor="review-target-episode">목표 완결 회차</label><input id="review-target-episode" type="number" className="input" value={blueprint.targetEpisode} readOnly /><p className="field-hint">{blueprint.targetEpisodeSource === 'AI' ? '목표를 비워 두어 AI가 작품 규모에 맞춰 제안한 회차예요.' : '인터뷰에서 정한 목표예요.'} 마지막 아크도 이 회차에 끝납니다.</p>{targetQuestionPosition >= 0 ? <Button type="button" className="mt-2" variant="ghost" size="sm" onClick={() => showPosition(targetQuestionPosition)}>목표 회차 다시 정하기</Button> : null}</div>
                 </div>
               </section>
 
@@ -461,9 +505,9 @@ export default function ProjectWizardPage() {
                   {blueprint.canon.map((entry, index) => (
                     <div className="blueprint-canon-row" key={index}>
                       <select aria-label={`${index + 1}번째 설정 분류`} className="input" value={entry.category} onChange={(event) => setBlueprint({ ...blueprint, canon: blueprint.canon.map((item, itemIndex) => itemIndex === index ? { ...item, category: event.target.value as CanonCategory } : item) })}>{Object.entries(CANON_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
-                      <input aria-label={`${index + 1}번째 설정 이름`} className="input" value={entry.name} placeholder="설정 이름" onChange={(event) => setBlueprint({ ...blueprint, canon: blueprint.canon.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) })} />
+                      <input aria-label={`${index + 1}번째 설정 이름`} className="input" maxLength={200} value={entry.name} placeholder="설정 이름" onChange={(event) => setBlueprint({ ...blueprint, canon: blueprint.canon.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) })} />
                       <input aria-label={`${index + 1}번째 설정 별칭`} className="input sm:col-span-2" value={entry.aliases.join(', ')} placeholder="별칭 (쉼표로 구분)" onChange={(event) => setBlueprint({ ...blueprint, canon: blueprint.canon.map((item, itemIndex) => itemIndex === index ? { ...item, aliases: event.target.value.split(',').map((alias) => alias.trim()).filter(Boolean) } : item) })} />
-                      <textarea aria-label={`${index + 1}번째 설정 내용`} className="input" value={entry.content} placeholder="확정 내용" onChange={(event) => setBlueprint({ ...blueprint, canon: blueprint.canon.map((item, itemIndex) => itemIndex === index ? { ...item, content: event.target.value } : item) })} />
+                      <textarea aria-label={`${index + 1}번째 설정 내용`} className="input" maxLength={50_000} value={entry.content} placeholder="확정 내용" onChange={(event) => setBlueprint({ ...blueprint, canon: blueprint.canon.map((item, itemIndex) => itemIndex === index ? { ...item, content: event.target.value } : item) })} />
                       <IconDelete label={`${entry.name || index + 1} 설정 제거`} onClick={() => setBlueprint({ ...blueprint, canon: blueprint.canon.filter((_, itemIndex) => itemIndex !== index) })} />
                     </div>
                   ))}
@@ -472,22 +516,34 @@ export default function ProjectWizardPage() {
               </section>
 
               <section className="blueprint-section">
-                <h2>첫 아크</h2><p>시작과 끝을 포함해 5–20화 범위로 맞춰 주세요.</p>
+                <h2>완결까지의 전체 아크</h2><p>첫 아크는 현재 계획으로, 이후 아크는 바꿀 수 있는 대기 계획으로 저장됩니다. 각 범위는 5–20화이며 1화부터 빈틈없이 이어져야 합니다.</p>
                 <div className="mt-4 space-y-4">
-                  <div><label className="field-label" htmlFor="review-arc-title">아크 제목</label><input id="review-arc-title" className="input" value={blueprint.arc.title} onChange={(event) => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, title: event.target.value } })} /></div>
-                  <div className="grid grid-cols-2 gap-3"><div><label className="field-label" htmlFor="review-arc-start">시작 회차</label><input id="review-arc-start" type="number" min={1} className="input" value={blueprint.arc.startEpisode} onChange={(event) => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, startEpisode: Number(event.target.value) } })} /></div><div><label className="field-label" htmlFor="review-arc-end">끝 회차</label><input id="review-arc-end" type="number" min={1} className="input" value={blueprint.arc.endEpisode} onChange={(event) => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, endEpisode: Number(event.target.value) } })} /></div></div>
-                  <div><label className="field-label" htmlFor="review-arc-goal">목표</label><textarea id="review-arc-goal" className="input" value={blueprint.arc.goal} onChange={(event) => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, goal: event.target.value } })} /></div>
-                  <div><label className="field-label" htmlFor="review-arc-conflict">갈등</label><textarea id="review-arc-conflict" className="input" value={blueprint.arc.conflict} onChange={(event) => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, conflict: event.target.value } })} /></div>
-                  <div><label className="field-label">회차별 반전</label><div className="mt-2 space-y-2">{blueprint.arc.reversalPlan.map((beat, index) => <div className="grid grid-cols-[5rem_1fr_2.75rem] gap-2" key={index}><input className="input" type="number" min={1} aria-label={`${index + 1}번째 반전 회차`} value={beat.episode} onChange={(event) => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, reversalPlan: blueprint.arc.reversalPlan.map((item, itemIndex) => itemIndex === index ? { ...item, episode: Number(event.target.value) } : item) } })} /><input className="input" aria-label={`${index + 1}번째 반전 내용`} value={beat.description} onChange={(event) => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, reversalPlan: blueprint.arc.reversalPlan.map((item, itemIndex) => itemIndex === index ? { ...item, description: event.target.value } : item) } })} /><IconDelete label={`${index + 1}번째 반전 제거`} onClick={() => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, reversalPlan: blueprint.arc.reversalPlan.filter((_, itemIndex) => itemIndex !== index) } })} /></div>)}</div><Button type="button" className="mt-2" variant="ghost" size="sm" onClick={() => setBlueprint({ ...blueprint, arc: { ...blueprint.arc, reversalPlan: [...blueprint.arc.reversalPlan, { episode: blueprint.arc.startEpisode, description: '' }] } })}><Plus className="size-4" /> 반전 추가</Button></div>
+                  {blueprint.arcs.map((arc, arcIndex) => {
+                    const updateArc = (next: typeof arc) => setBlueprint({ ...blueprint, arcs: blueprint.arcs.map((item, index) => index === arcIndex ? next : item) });
+                    return (
+                      <details className="rounded-2xl border border-line bg-paper p-4" open={arcIndex === 0 ? true : undefined} key={arcIndex}>
+                        <summary className="cursor-pointer font-bold"><span className="mr-2 text-plum-700">{arcIndex === 0 ? '현재 아크' : `대기 아크 ${arcIndex}`}</span>{arc.startEpisode}–{arc.endEpisode}화 · {arc.title}</summary>
+                        <div className="mt-4 space-y-4">
+                          <div><label className="field-label" htmlFor={`review-arc-title-${arcIndex}`}>아크 제목</label><input id={`review-arc-title-${arcIndex}`} className="input" maxLength={200} value={arc.title} onChange={(event) => updateArc({ ...arc, title: event.target.value })} /></div>
+                          <div className="grid grid-cols-2 gap-3"><div><label className="field-label" htmlFor={`review-arc-start-${arcIndex}`}>시작 회차</label><input id={`review-arc-start-${arcIndex}`} type="number" min={1} className="input" value={arc.startEpisode} onChange={(event) => updateArc({ ...arc, startEpisode: Number(event.target.value) })} /></div><div><label className="field-label" htmlFor={`review-arc-end-${arcIndex}`}>끝 회차</label><input id={`review-arc-end-${arcIndex}`} type="number" min={1} className="input" value={arc.endEpisode} onChange={(event) => updateArc({ ...arc, endEpisode: Number(event.target.value) })} /></div></div>
+                          <div><label className="field-label" htmlFor={`review-arc-goal-${arcIndex}`}>목표</label><textarea id={`review-arc-goal-${arcIndex}`} className="input" maxLength={10_000} value={arc.goal} onChange={(event) => updateArc({ ...arc, goal: event.target.value })} /></div>
+                          <div><label className="field-label" htmlFor={`review-arc-conflict-${arcIndex}`}>갈등</label><textarea id={`review-arc-conflict-${arcIndex}`} className="input" maxLength={10_000} value={arc.conflict} onChange={(event) => updateArc({ ...arc, conflict: event.target.value })} /></div>
+                          <div><label className="field-label">회차별 반전</label><div className="mt-2 space-y-2">{arc.reversalPlan.map((beat, beatIndex) => <div className="grid grid-cols-[5rem_1fr_2.75rem] gap-2" key={beatIndex}><input className="input" type="number" min={arc.startEpisode} max={arc.endEpisode} aria-label={`${arcIndex + 1}번째 아크 ${beatIndex + 1}번째 반전 회차`} value={beat.episode} onChange={(event) => updateArc({ ...arc, reversalPlan: arc.reversalPlan.map((item, index) => index === beatIndex ? { ...item, episode: Number(event.target.value) } : item) })} /><input className="input" maxLength={10_000} aria-label={`${arcIndex + 1}번째 아크 ${beatIndex + 1}번째 반전 내용`} value={beat.description} onChange={(event) => updateArc({ ...arc, reversalPlan: arc.reversalPlan.map((item, index) => index === beatIndex ? { ...item, description: event.target.value } : item) })} /><IconDelete label={`${arcIndex + 1}번째 아크 ${beatIndex + 1}번째 반전 제거`} onClick={() => updateArc({ ...arc, reversalPlan: arc.reversalPlan.filter((_, index) => index !== beatIndex) })} /></div>)}</div><Button type="button" className="mt-2" variant="ghost" size="sm" onClick={() => updateArc({ ...arc, reversalPlan: [...arc.reversalPlan, { episode: arc.startEpisode, description: '' }] })}><Plus className="size-4" /> 반전 추가</Button></div>
+                        </div>
+                      </details>
+                    );
+                  })}
                 </div>
               </section>
             </div>
-            <p className="mt-5 rounded-xl bg-sage-50 p-4 text-sm leading-6 text-sage-700">이 화면에서 확정한 항목만 프로젝트의 초기 정사와 아크로 저장됩니다.</p>
+            </fieldset>
+            <p className="mt-5 rounded-xl bg-sage-50 p-4 text-sm leading-6 text-sage-700">이 화면에서 확인한 초기 정사와 전체 아크만 프로젝트에 적용됩니다. 대기 아크는 이후 전개에 맞춰 다시 바꿀 수 있어요.</p>
+            {blueprintIssue ? <p className="mt-3 rounded-xl bg-amber-50 p-3 text-sm text-amber-800">확인 필요: {blueprintIssue}</p> : null}
             <FieldError>{error}</FieldError>
             <Button className="mt-6" variant="ghost" disabled={!history.length || busy} onClick={() => showPosition(history.length - 1)}>
               <ArrowLeft className="size-4" /> 이전 질문
             </Button>
-            <Button className="mt-6 w-full" size="lg" busy={commitMutation.isPending} disabled={!blueprint.title.trim() || !blueprint.logline.trim() || !reviewGenres.trim() || !blueprint.arc.title.trim() || blueprint.arc.endEpisode - blueprint.arc.startEpisode + 1 < 5 || blueprint.arc.endEpisode - blueprint.arc.startEpisode + 1 > 20 || blueprint.canon.some((entry) => !entry.name.trim() || !entry.content.trim())} onClick={() => commitMutation.mutate()}>
+            <Button className="mt-6 w-full" size="lg" busy={commitMutation.isPending} disabled={Boolean(blueprintIssue)} onClick={() => commitMutation.mutate()}>
               {commitMutation.isPending ? '프로젝트를 정리하는 중' : '프로젝트 만들기'}
             </Button>
           </section>
@@ -501,6 +557,44 @@ export default function ProjectWizardPage() {
       </main>
     </div>
   );
+}
+
+function validateBlueprintReview(blueprint: ProjectBlueprint, genres: string): string {
+  const genreTags = genres.split(',').map((genre) => genre.trim()).filter(Boolean);
+  if (!blueprint.title.trim() || !blueprint.logline.trim() || !genreTags.length) return '제목, 로그라인과 장르를 입력해 주세요.';
+  if (blueprint.title.trim().length > 200) return '제목은 200자 이하여야 합니다.';
+  if (blueprint.logline.trim().length > 2_000) return '로그라인은 2,000자 이하여야 합니다.';
+  if (blueprint.details.length > 20_000) return '세계의 핵심 설정은 20,000자 이하여야 합니다.';
+  if (!Number.isInteger(blueprint.defaultTargetChars) || blueprint.defaultTargetChars < 500 || blueprint.defaultTargetChars > 30_000) {
+    return '회차 기본 목표 글자 수는 500자에서 30,000자 사이여야 합니다.';
+  }
+  if (!Number.isInteger(blueprint.targetEpisode) || blueprint.targetEpisode < 5 || blueprint.targetEpisode > 2_000) {
+    return '목표 완결 회차는 5화에서 2,000화 사이여야 합니다.';
+  }
+  if (!blueprint.arcs.length || blueprint.arcs.length > 100) return '완결까지 이어지는 아크가 1개에서 100개 사이여야 합니다.';
+  for (const [index, arc] of blueprint.arcs.entries()) {
+    if (!arc.title.trim() || !arc.goal.trim() || !arc.conflict.trim()) return `${index + 1}번째 아크의 제목, 목표와 갈등을 입력해 주세요.`;
+    if (arc.title.trim().length > 200 || arc.goal.trim().length > 10_000 || arc.conflict.trim().length > 10_000) {
+      return `${index + 1}번째 아크의 제목은 200자, 목표와 갈등은 각각 10,000자 이하여야 합니다.`;
+    }
+    if (!Number.isInteger(arc.startEpisode) || !Number.isInteger(arc.endEpisode) || arc.startEpisode < 1) {
+      return `${index + 1}번째 아크의 회차 범위는 양의 정수여야 합니다.`;
+    }
+    const span = arc.endEpisode - arc.startEpisode + 1;
+    if (span < 5 || span > 20) return `${index + 1}번째 아크는 5화에서 20화 사이여야 합니다.`;
+    const expectedStart = index === 0 ? 1 : blueprint.arcs[index - 1]!.endEpisode + 1;
+    if (arc.startEpisode !== expectedStart) return `${index + 1}번째 아크가 ${expectedStart}화부터 이어지도록 범위를 맞춰 주세요.`;
+    if (arc.reversalPlan.some((beat) => !Number.isInteger(beat.episode) || !beat.description.trim() || beat.description.trim().length > 10_000
+      || beat.episode < arc.startEpisode || beat.episode > arc.endEpisode)) {
+      return `${index + 1}번째 아크의 반전 회차와 내용을 확인해 주세요.`;
+    }
+  }
+  if (blueprint.arcs.at(-1)?.endEpisode !== blueprint.targetEpisode) return '마지막 아크의 끝 회차를 목표 완결 회차와 맞춰 주세요.';
+  if (blueprint.canon.some((entry) => !entry.name.trim() || !entry.content.trim())) return '초기 정사의 이름과 내용을 모두 입력하거나 빈 항목을 삭제해 주세요.';
+  if (blueprint.canon.some((entry) => entry.name.trim().length > 200 || entry.content.trim().length > 50_000)) {
+    return '초기 정사의 이름은 200자, 내용은 50,000자 이하여야 합니다.';
+  }
+  return '';
 }
 
 function IconDelete({ label, onClick }: { label: string; onClick: () => void }) {
