@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,6 +14,7 @@ import { DatabaseService } from '../src/database/database.service';
 import { EpisodesService } from '../src/episodes/episodes.service';
 import { MemoryService } from '../src/memory/memory.service';
 import { ProjectsService } from '../src/projects/projects.service';
+import { SideStoriesService } from '../src/side-stories/side-stories.service';
 
 const appearance = {
   category: 'CHARACTER_APPEARANCE', name: '하린', aliases: ['기록관'],
@@ -79,6 +80,52 @@ describe('character appearance canon', () => {
     });
   });
 
+  it('accepts only live main episodes from the same project as canon provenance', async () => {
+    const episodesService = new EpisodesService(database, projects, memory, {} as never);
+    const main = await episodesService.create(projectId, {
+      title: '본편 출처',
+      direction: '정사의 출처가 된다.',
+      content: '본편의 기록',
+    });
+    await expect(canon.create(projectId, {
+      category: 'RULE',
+      name: '올바른 출처',
+      content: '본편에서 확정된 규칙',
+      sourceEpisodeId: main.id,
+    })).resolves.toMatchObject({ sourceEpisodeId: main.id });
+
+    const side = await new SideStoriesService(database, memory).create(projectId, {
+      title: '외전 출처',
+      direction: '본편 정사의 출처가 될 수 없다.',
+      content: '외전의 기록',
+      groupId: null,
+      branchFromEpisodeId: null,
+    });
+    await expect(canon.create(projectId, {
+      category: 'RULE',
+      name: '외전 출처',
+      content: '격리되어야 하는 규칙',
+      sourceEpisodeId: side.id,
+    })).rejects.toBeInstanceOf(BadRequestException);
+
+    const otherProjectId = projects.createInternal({
+      title: '다른 기록관',
+      logline: '다른 프로젝트의 이야기',
+      genreTags: ['판타지'],
+    }).id;
+    const foreignMain = await episodesService.create(otherProjectId, {
+      title: '다른 본편',
+      direction: '다른 프로젝트에 속한다.',
+      content: '다른 본편의 기록',
+    });
+    await expect(canon.create(projectId, {
+      category: 'RULE',
+      name: '다른 프로젝트 출처',
+      content: '섞이면 안 되는 규칙',
+      sourceEpisodeId: foreignMain.id,
+    })).rejects.toBeInstanceOf(BadRequestException);
+  });
+
   it('accepts appearance in worldbuilding, project blueprints and episode extraction output contracts', () => {
     expect(worldbuildingValidator.parse({ suggestions: [appearance], conflicts: [] }).suggestions).toEqual([appearance]);
     expect(episodeMemoryValidator.parse(extractedMemory).canonCandidates).toEqual([appearance]);
@@ -112,7 +159,11 @@ describe('appearance category migration', () => {
         (id, project_id, category, name, aliases_json, content, metadata_json, status, revision, source_episode_id, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run('canon', 'project', 'CHARACTER', '하린', '["기록관"]', '기억을 읽는다.', '{"source":"원문"}', 'ACCEPTED', 7, 'episode', stamp, stamp);
-      const before = initialized.connection.prepare('SELECT * FROM canon_entries').all();
+      const legacyColumns = [
+        'id', 'project_id', 'category', 'name', 'aliases_json', 'content',
+        'metadata_json', 'status', 'revision', 'source_episode_id', 'created_at', 'updated_at',
+      ].join(', ');
+      const before = initialized.connection.prepare(`SELECT ${legacyColumns} FROM canon_entries`).all();
       initialized.onApplicationShutdown();
 
       // Restore the v5 canon table in an otherwise complete database so later,
@@ -132,7 +183,8 @@ describe('appearance category migration', () => {
           source_episode_id TEXT REFERENCES episodes(id) ON DELETE SET NULL,
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
-        INSERT INTO canon_entries_legacy SELECT * FROM canon_entries;
+        INSERT INTO canon_entries_legacy (${legacyColumns})
+        SELECT ${legacyColumns} FROM canon_entries;
         DROP TABLE canon_entries;
         ALTER TABLE canon_entries_legacy RENAME TO canon_entries;
         CREATE INDEX idx_canon_project_category ON canon_entries(project_id, category, status);
@@ -143,7 +195,7 @@ describe('appearance category migration', () => {
       legacy.close();
 
       migrated = new DatabaseService();
-      expect(migrated.connection.prepare('SELECT * FROM canon_entries').all()).toEqual(before);
+      expect(migrated.connection.prepare(`SELECT ${legacyColumns} FROM canon_entries`).all()).toEqual(before);
       expect(migrated.connection.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_canon_project_category'").get()).toBeDefined();
       expect(migrated.connection.pragma('foreign_key_check')).toEqual([]);
       migrated.connection.prepare("UPDATE canon_entries SET category = 'CHARACTER_APPEARANCE'").run();

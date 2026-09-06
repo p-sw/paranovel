@@ -201,6 +201,24 @@
   .episode-number { @apply flex size-12 shrink-0 items-baseline justify-center rounded-xl bg-paper pt-3 font-story text-lg font-bold text-plum-700; }
   .episode-number small { @apply ml-0.5 text-[10px] font-semibold; }
   .episode-row h2 { @apply truncate font-story text-lg font-bold; }
+  .side-story-section { @apply mt-12 space-y-5 border-t border-line pt-9; }
+  .side-story-section-heading { @apply flex flex-wrap items-end justify-between gap-3; }
+  .side-story-block { @apply space-y-4 rounded-2xl border border-line bg-surface p-4 shadow-sm sm:p-5; }
+  .side-story-block-heading, .side-story-group-heading { @apply flex flex-wrap items-start justify-between gap-3; }
+  .side-story-block-heading h3, .side-story-group-heading h3 { @apply font-story text-xl font-bold text-ink; }
+  .side-story-block-heading p { @apply mt-1 text-xs text-muted; }
+  .side-story-block .episode-list { @apply shadow-none; }
+  .side-story-block .episode-row h4 { @apply truncate font-story text-lg font-bold; }
+  .side-story-number { @apply bg-plum-50; }
+  .side-story-number.standalone { @apply items-center pt-0 text-xs; }
+  .side-story-number.standalone span { @apply font-sans font-bold; }
+  .side-story-context-grid { @apply grid gap-2 sm:grid-cols-3; }
+  .side-story-context-grid > div { @apply flex min-w-0 items-start gap-2 rounded-xl bg-paper p-3 text-xs leading-5 text-muted; }
+  .side-story-context-grid svg { @apply mt-0.5 shrink-0 text-plum-600; }
+  .side-story-context-grid strong { @apply mr-1.5 text-ink; }
+  .side-story-arc-summary { @apply rounded-xl border border-plum-100 bg-plum-50 px-3 py-2 text-xs leading-5 text-plum-700; }
+  .side-story-empty { @apply flex items-center gap-3 rounded-2xl border border-dashed border-line bg-paper px-4 py-5 text-sm leading-6 text-muted; }
+  .side-story-empty.compact { @apply rounded-xl py-3; }
   .proposal-box { @apply rounded-2xl border border-plum-100 bg-plum-50 p-4; }
   .generation-preview { @apply space-y-4; }
   .sheet-body-header { @apply shrink-0 px-5 pt-4 sm:px-6; }

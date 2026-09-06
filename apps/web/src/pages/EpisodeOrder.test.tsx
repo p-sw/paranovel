@@ -40,6 +40,7 @@ function titles() {
 
 beforeEach(() => {
   vi.spyOn(api.episodes, 'order').mockResolvedValue(order([null, 'b', null, 'd', null]));
+  vi.spyOn(api.sideStories, 'list').mockResolvedValue({ standalone: [], groups: [] });
   vi.spyOn(api.episodes, 'updateOrder').mockImplementation(async (_projectId, input) => {
     const saved = order(input.slots, 'saved');
     vi.mocked(api.episodes.order).mockResolvedValue(saved);
@@ -111,7 +112,11 @@ describe('episode order editor', () => {
     expect(api.episodes.updateOrder).toHaveBeenCalledWith('story', { slots: [null, 'b', 'd', null], expectedRevision: 'original' });
     expect(titles()).toEqual(['빈 회차', '원고 d', '원고 b', '빈 회차']);
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['episodes', 'story'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['episode-flow', 'story'] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['scene', 'story'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['side-stories', 'story'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['side-story-groups', 'story'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['side-story-group', 'story'] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['projects'] });
     view.unmount();
     vi.mocked(api.episodes.order).mockResolvedValue(order([null, 'b', 'd', null], 'saved'));

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { DatabaseService } from '../src/database/database.service';
-import { episodes } from '../src/database/schema';
+import { canonEntries, episodes } from '../src/database/schema';
 import { MemoryService } from '../src/memory/memory.service';
 import { ProjectsService } from '../src/projects/projects.service';
 
@@ -51,7 +52,8 @@ describe('episode indexing during order changes', () => {
     expect(current).toHaveLength(1);
     expect(current[0]).toMatchObject({ content: '새 순서의 기억' });
     if (database.vectorAvailable) {
-      expect(database.connection.prepare('SELECT episode_number FROM memory_chunks_vec').all()).toEqual([{ episode_number: 2 }]);
+      expect(database.connection.prepare('SELECT flow_key, flow_position FROM memory_chunks_vec').all())
+        .toEqual([{ flow_key: 'MAIN', flow_position: 2 }]);
     }
   });
 
@@ -76,6 +78,26 @@ describe('episode indexing during order changes', () => {
       projectId, sourceType: 'EPISODE', sourceId: 'episode-one', text: '1화의 오래된 기억',
       expectedEpisode: { number: 1, revision: 1 },
     });
+    expect(embeddings).not.toHaveBeenCalled();
+    expect(database.connection.prepare('SELECT * FROM memory_chunks').all()).toEqual([]);
+  });
+
+  it('does not recreate a known canon source deleted before its queued indexing begins', async () => {
+    const stamp = new Date().toISOString();
+    database.orm.insert(canonEntries).values({
+      id: 'deleted-canon', projectId, sideStoryGroupId: null, category: 'RULE',
+      name: '삭제될 규칙', aliasesJson: '[]', content: '오래된 규칙', metadataJson: '{}',
+      status: 'ACTIVE', revision: 1, sourceEpisodeId: null, createdAt: stamp, updatedAt: stamp,
+    }).run();
+    database.orm.delete(canonEntries).where(eq(canonEntries.id, 'deleted-canon')).run();
+
+    await memory.indexSource({
+      projectId,
+      sourceType: 'CANON',
+      sourceId: 'deleted-canon',
+      text: '삭제된 정사의 오래된 인덱스',
+    });
+
     expect(embeddings).not.toHaveBeenCalled();
     expect(database.connection.prepare('SELECT * FROM memory_chunks').all()).toEqual([]);
   });

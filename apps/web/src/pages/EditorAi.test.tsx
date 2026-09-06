@@ -34,6 +34,9 @@ beforeEach(() => {
   history = { messages: [] };
   vi.spyOn(api.episodes, 'get').mockImplementation(async () => saved);
   vi.spyOn(api.episodes, 'list').mockImplementation(async () => [saved]);
+  vi.spyOn(api.episodes, 'flow').mockImplementation(async (projectId) => ({
+    kind: 'MAIN', label: '회차', group: null, episodes: await api.episodes.list(projectId),
+  }));
   vi.spyOn(api.episodes, 'update').mockImplementation(async (_project, _episode, input) => {
     saved = { ...saved, ...input, revision: saved.revision + 1 };
     return saved;

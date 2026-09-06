@@ -67,6 +67,11 @@ export class EpisodesController {
     return this.episodes.get(projectId, episodeId);
   }
 
+  @Get(':episodeId/flow')
+  flow(@Param('projectId') projectId: string, @Param('episodeId') episodeId: string) {
+    return this.episodes.flow(projectId, episodeId);
+  }
+
   @Post('repair')
   repairDraft(
     @Param('projectId') projectId: string,

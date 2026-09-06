@@ -13,6 +13,7 @@ import { ImprovementsModule } from './improvements/improvements.module';
 import { MemoryModule } from './memory/memory.module';
 import { ProjectsModule } from './projects/projects.module';
 import { PromptsModule } from './prompts/prompts.module';
+import { SideStoriesModule } from './side-stories/side-stories.module';
 
 const webDistPath = process.env.WEB_DIST_PATH
   ? resolve(process.env.WEB_DIST_PATH)
@@ -33,6 +34,7 @@ const webDistPath = process.env.WEB_DIST_PATH
     ArcsModule,
     ImprovementsModule,
     EpisodesModule,
+    SideStoriesModule,
     ComparisonsModule,
     ChatModule,
   ],

@@ -16,6 +16,7 @@ import {
 
 const FAILED_REPLY = '편집 AI가 답변을 완료하지 못했습니다. 다시 시도해 주세요.';
 type MessageRow = typeof editorAiMessages.$inferSelect;
+type StoredEditorAiEdit = EditorAiEdit & { baseFlowRevision?: string };
 
 function splitsCharacter(content: string, offset: number) {
   return /[\uD800-\uDBFF]/.test(content[offset - 1] ?? '') && /[\uDC00-\uDFFF]/.test(content[offset] ?? '');
@@ -72,10 +73,18 @@ export class EditorAiService implements OnModuleInit {
     if (turn.replay) return this.history(projectId, episodeId);
 
     try {
+      const baseFlowRevision = await this.episodes.prepareEditorAiFlowRevision(
+        projectId,
+        episodeId,
+        turn.episode.revision,
+      );
       const memory = await this.memory.assemble(projectId, `${input.content}\n${input.selection.text}`, episodeId);
       signal?.throwIfAborted();
+      if (baseFlowRevision !== undefined) {
+        this.episodes.assertSideFlowRevisionForEpisode(projectId, episodeId, baseFlowRevision);
+      }
       const { start, end } = input.selection;
-      const staged: { edit: EditorAiEdit | null } = { edit: null };
+      const staged: { edit: StoredEditorAiEdit | null } = { edit: null };
       const hasSelection = end > start;
       const tool = editorTool(hasSelection);
       const readTools = hasSelection ? [tool] : [tool, replaceTextTool, readManuscriptTool];
@@ -140,6 +149,9 @@ export class EditorAiService implements OnModuleInit {
           staged.edit = {
             ...edit, start: target.start, end: target.end, original: target.text,
             baseRevision: turn.episode.revision, status: 'PENDING',
+            ...(baseFlowRevision !== undefined
+              ? { baseFlowRevision }
+              : {}),
           };
           return { status: 'PREVIEW_READY', title: edit.title, start: target.start, end: target.end,
             message: '전후 비교 카드에 표시할 수정안을 준비했습니다. 사용자가 수락하고 적용해야 원고에 반영됩니다.' };
@@ -148,7 +160,11 @@ export class EditorAiService implements OnModuleInit {
         this.database.orm.update(editorAiMessages).set({ runId }).where(eq(editorAiMessages.id, turn.assistantId)).run();
       });
       signal?.throwIfAborted();
-      this.episodes.get(projectId, episodeId);
+      if (baseFlowRevision !== undefined) {
+        this.episodes.assertSideFlowRevisionForEpisode(projectId, episodeId, baseFlowRevision);
+      } else {
+        this.episodes.get(projectId, episodeId);
+      }
       this.database.orm.update(editorAiMessages).set({
         content: result.value.reply, status: 'COMPLETE', error: null, runId: result.runId,
         editJson: staged.edit ? stringifyJson(staged.edit) : null,
@@ -158,7 +174,7 @@ export class EditorAiService implements OnModuleInit {
       this.logger.error({ event: 'editor_ai_failed', projectId, episodeId, messageId: turn.assistantId, error: serializeError(error) });
       this.database.orm.update(editorAiMessages).set({ status: 'FAILED', error: FAILED_REPLY })
         .where(eq(editorAiMessages.id, turn.assistantId)).run();
-      if (error instanceof NotFoundException) throw error;
+      if (error instanceof NotFoundException || error instanceof ConflictException) throw error;
       throw new BadGatewayException(FAILED_REPLY, { cause: error });
     }
   }
@@ -173,9 +189,14 @@ export class EditorAiService implements OnModuleInit {
         throw new NotFoundException('적용할 수정안을 찾을 수 없습니다.');
       }
       if (row.appliedAt) return { episode: current, message: this.view(row) };
-      const edit = parseJson<EditorAiEdit | null>(row.editJson, null);
+      const edit = parseJson<StoredEditorAiEdit | null>(row.editJson, null);
       if (!edit) throw new BadRequestException('수정안을 읽을 수 없습니다. 편집 AI에 다시 요청해 주세요.');
       this.assertRevision(current.revision, edit.baseRevision);
+      this.episodes.assertSideFlowRevisionForEpisode(
+        projectId,
+        episodeId,
+        edit.baseFlowRevision,
+      );
       this.assertSelection(current.content, { start: edit.start, end: edit.end, text: edit.original });
       const episode = this.episodes.updateSavedDraft(projectId, episodeId, {
         expectedRevision: edit.baseRevision,
@@ -204,12 +225,20 @@ export class EditorAiService implements OnModuleInit {
   }
 
   private view(row: MessageRow): EditorAiMessage {
-    const edit = parseJson<EditorAiEdit | null>(row.editJson, null);
+    const edit = parseJson<StoredEditorAiEdit | null>(row.editJson, null);
     return {
       id: row.id, projectId: row.projectId, episodeId: row.episodeId, clientMessageId: row.clientMessageId,
       role: row.role as EditorAiMessage['role'], content: row.content, status: row.status as EditorAiMessage['status'],
       request: parseJson<EditorAiInput | null>(row.requestJson, null),
-      edit: edit ? { ...edit, status: row.appliedAt ? 'APPLIED' : 'PENDING' } : null,
+      edit: edit ? {
+        title: edit.title,
+        start: edit.start,
+        end: edit.end,
+        original: edit.original,
+        replacement: edit.replacement,
+        baseRevision: edit.baseRevision,
+        status: row.appliedAt ? 'APPLIED' : 'PENDING',
+      } : null,
       error: row.error, createdAt: row.createdAt,
     };
   }

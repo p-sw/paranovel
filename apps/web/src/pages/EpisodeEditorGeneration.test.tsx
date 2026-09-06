@@ -28,6 +28,7 @@ beforeEach(() => {
   };
   vi.spyOn(api.episodes, 'get').mockImplementation(async (_project, episodeId) => savedEpisodes[episodeId]);
   vi.spyOn(api.episodes, 'list').mockImplementation(async () => Object.values(savedEpisodes));
+  vi.spyOn(api.episodes, 'flow').mockImplementation(async () => ({ kind: 'MAIN', label: '회차', group: null, episodes: Object.values(savedEpisodes) }));
   vi.spyOn(api.episodes, 'update').mockImplementation(async (_project, episodeId, input) => {
     const current = savedEpisodes[episodeId];
     const updated: Episode = {
@@ -88,6 +89,30 @@ function pendingGeneration() {
 }
 
 describe('new episode generation in the editor', () => {
+  it('uses only the current side-story group for labels and previous/next navigation', async () => {
+    const first = { ...emptyEpisode, kind: 'SIDE_STORY' as const, sideStoryGroupId: 'group-1', number: 1, status: 'DRAFT' as const };
+    const second = { ...first, id: 'other', number: 2, title: '두 번째 외전', content: '외전의 다음 장면.' };
+    const main = { ...emptyEpisode, id: 'main', kind: 'MAIN' as const, number: 99, title: '섞이면 안 되는 본편', status: 'DRAFT' as const };
+    savedEpisodes = { episode: first, other: second, main };
+    vi.mocked(api.episodes.flow).mockResolvedValue({
+      kind: 'SIDE_STORY', label: '외전 · 수도 야화',
+      group: {
+        id: 'group-1', projectId: 'story', title: '수도 야화', description: '', branchFromEpisodeId: null,
+        nextEpisodeNumber: 3, revision: 1,
+      },
+      episodes: [first, second],
+    });
+    const { user } = renderEditor({ request: false });
+
+    expect(await screen.findByText('외전 1화')).toBeVisible();
+    expect(screen.getByText('외전 · 수도 야화')).toBeVisible();
+    expect(screen.queryByText('섞이면 안 되는 본편')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '이전 외전' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: '다음 외전' }));
+    await waitFor(() => expect(screen.getByRole('textbox', { name: '회차 제목' })).toHaveValue('두 번째 외전'));
+    expect(screen.getByText('외전 2화')).toBeVisible();
+  });
+
   it('streams into the main editor once in StrictMode, keeps it readable during review, and saves after review', async () => {
     const stream = pendingGeneration();
     const repair = vi.spyOn(api.episodes, 'repair');

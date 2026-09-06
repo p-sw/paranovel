@@ -4,11 +4,11 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { AiRunnerService } from '../ai/ai-runner.service';
 import { worldbuildingSchema, worldbuildingValidator } from '../ai/ai.schemas';
 import { DatabaseService } from '../database/database.service';
-import { canonEntries } from '../database/schema';
+import { canonEntries, episodes } from '../database/schema';
 import { MemoryService } from '../memory/memory.service';
 import {
   assertEnum,
@@ -38,8 +38,15 @@ export class CanonService {
       .from(canonEntries)
       .where(
         status
-          ? and(eq(canonEntries.projectId, projectId), eq(canonEntries.status, status))
-          : eq(canonEntries.projectId, projectId),
+          ? and(
+              eq(canonEntries.projectId, projectId),
+              isNull(canonEntries.sideStoryGroupId),
+              eq(canonEntries.status, status),
+            )
+          : and(
+              eq(canonEntries.projectId, projectId),
+              isNull(canonEntries.sideStoryGroupId),
+            ),
       )
       .all();
     return rows.map((row) => this.toView(row));
@@ -49,7 +56,11 @@ export class CanonService {
     const row = this.database.orm
       .select()
       .from(canonEntries)
-      .where(and(eq(canonEntries.id, canonId), eq(canonEntries.projectId, projectId)))
+      .where(and(
+        eq(canonEntries.id, canonId),
+        eq(canonEntries.projectId, projectId),
+        isNull(canonEntries.sideStoryGroupId),
+      ))
       .get();
     if (!row) throw new NotFoundException('Canon entry not found');
     return this.toView(row);
@@ -65,6 +76,7 @@ export class CanonService {
     const input = (body ?? {}) as Record<string, unknown>;
     const stamp = now();
     const entryId = id();
+    const sourceEpisodeId = this.mainSourceEpisodeId(projectId, input.sourceEpisodeId);
     const row: typeof canonEntries.$inferInsert = {
       id: entryId,
       projectId,
@@ -79,12 +91,28 @@ export class CanonService {
       ),
       status: input.status === undefined ? 'ACTIVE' : assertEnum(input.status, 'status', STATUSES),
       revision: 1,
-      sourceEpisodeId: typeof input.sourceEpisodeId === 'string' ? input.sourceEpisodeId : null,
+      sourceEpisodeId,
+      sideStoryGroupId: null,
       createdAt: stamp,
       updatedAt: stamp,
     };
     this.database.orm.insert(canonEntries).values(row).run();
     return this.get(projectId, entryId);
+  }
+
+  private mainSourceEpisodeId(projectId: string, value: unknown): string | null {
+    if (value === undefined || value === null) return null;
+    if (typeof value !== 'string') throw new BadRequestException('sourceEpisodeId must be a string or null');
+    const source = this.database.orm.select({ id: episodes.id }).from(episodes).where(and(
+      eq(episodes.id, value),
+      eq(episodes.projectId, projectId),
+      eq(episodes.kind, 'MAIN'),
+      isNull(episodes.deletedAt),
+    )).get();
+    if (!source) {
+      throw new BadRequestException('sourceEpisodeId must reference a live main episode in this project');
+    }
+    return source.id;
   }
 
   async update(projectId: string, canonId: string, body: unknown) {
@@ -97,7 +125,11 @@ export class CanonService {
     const current = this.database.orm
       .select()
       .from(canonEntries)
-      .where(and(eq(canonEntries.id, canonId), eq(canonEntries.projectId, projectId)))
+      .where(and(
+        eq(canonEntries.id, canonId),
+        eq(canonEntries.projectId, projectId),
+        isNull(canonEntries.sideStoryGroupId),
+      ))
       .get();
     if (!current) throw new NotFoundException('Canon entry not found');
     const input = (body ?? {}) as Record<string, unknown>;
@@ -190,6 +222,7 @@ export class CanonService {
       status: row.status,
       revision: row.revision,
       sourceEpisodeId: row.sourceEpisodeId,
+      sideStoryGroupId: row.sideStoryGroupId,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };

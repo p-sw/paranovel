@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { AiRunnerService } from '../ai/ai-runner.service';
 import { arcPlanSchema, arcPlanValidator } from '../ai/ai.schemas';
 import { DatabaseService } from '../database/database.service';
@@ -35,7 +35,7 @@ export class ArcsService {
     return this.database.orm
       .select()
       .from(arcs)
-      .where(eq(arcs.projectId, projectId))
+      .where(and(eq(arcs.projectId, projectId), isNull(arcs.sideStoryGroupId)))
       .all()
       .map((row) => this.toView(row));
   }
@@ -47,6 +47,7 @@ export class ArcsService {
       .where(
         and(
           eq(arcs.projectId, projectId),
+          isNull(arcs.sideStoryGroupId),
           eq(arcs.status, 'ACTIVE'),
         ),
       )
@@ -104,6 +105,7 @@ export class ArcsService {
     const row: typeof arcs.$inferInsert = {
       id: arcId,
       projectId,
+      sideStoryGroupId: null,
       title: requireString(input.title, 'title', { max: 200 }),
       startEpisodeNumber: start,
       endEpisodeNumber: end,
@@ -126,7 +128,11 @@ export class ArcsService {
     const row = this.database.orm
       .select()
       .from(arcs)
-      .where(and(eq(arcs.id, arcId), eq(arcs.projectId, projectId)))
+      .where(and(
+        eq(arcs.id, arcId),
+        eq(arcs.projectId, projectId),
+        isNull(arcs.sideStoryGroupId),
+      ))
       .get();
     if (!row) throw new NotFoundException('Arc not found');
     return this.toView(row);
@@ -142,7 +148,11 @@ export class ArcsService {
     const current = this.database.orm
       .select()
       .from(arcs)
-      .where(and(eq(arcs.id, arcId), eq(arcs.projectId, projectId)))
+      .where(and(
+        eq(arcs.id, arcId),
+        eq(arcs.projectId, projectId),
+        isNull(arcs.sideStoryGroupId),
+      ))
       .get();
     if (!current) throw new NotFoundException('Arc not found');
     const input = (body ?? {}) as Record<string, unknown>;
@@ -196,6 +206,7 @@ export class ArcsService {
       .where(
         and(
           eq(arcs.projectId, projectId),
+          isNull(arcs.sideStoryGroupId),
           eq(arcs.status, 'ACTIVE'),
         ),
       )
@@ -235,6 +246,7 @@ export class ArcsService {
   private async index(row: typeof arcs.$inferSelect): Promise<void> {
     await this.memory.indexSource({
       projectId: row.projectId,
+      sideStoryGroupId: row.sideStoryGroupId,
       sourceType: 'ARC',
       sourceId: row.id,
       text: formatArcMemory(row),

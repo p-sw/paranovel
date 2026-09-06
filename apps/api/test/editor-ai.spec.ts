@@ -11,6 +11,7 @@ import { EpisodesService } from '../src/episodes/episodes.service';
 import { MemoryService } from '../src/memory/memory.service';
 import { ProjectsService } from '../src/projects/projects.service';
 import { PromptRegistryService } from '../src/prompts/prompt-registry.service';
+import { SideStoriesService } from '../src/side-stories/side-stories.service';
 
 describe('episode editing AI', () => {
   let database: DatabaseService;
@@ -18,24 +19,28 @@ describe('episode editing AI', () => {
   let episodes: EpisodesService;
   let memory: MemoryService;
   let editor: EditorAiService;
+  let sideStories: SideStoriesService;
   let projectId: string;
   let episodeId: string;
   const original = '앞 문장.\n하린은 😀 숨을 삼켰다.\n뒤 문장.';
   const selected = '하린은 😀 숨을 삼켰다.';
   const replacement = '하린의 손끝이 차갑게 굳었다.';
   const completeChat = vi.fn();
+  const completeJson = vi.fn();
 
   beforeEach(async () => {
     vi.stubEnv('DB_PATH', ':memory:');
     vi.stubEnv('OPENROUTER_EMBEDDING_DIMENSIONS', '4');
     vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     completeChat.mockReset();
+    completeJson.mockReset();
     database = new DatabaseService();
     projects = new ProjectsService(database);
     memory = new MemoryService(database, { embeddings: async (texts: string[]) => texts.map(() => [0, 1, 0, 1]) } as never);
-    const ai = { completeChat } as unknown as AiRunnerService;
+    const ai = { completeChat, completeJson } as unknown as AiRunnerService;
     episodes = new EpisodesService(database, projects, memory, ai);
     editor = new EditorAiService(database, episodes, memory, ai);
+    sideStories = new SideStoriesService(database, memory);
     projectId = projects.createInternal({ title: '문 앞에서', logline: '기억을 읽는 기록관', genreTags: ['판타지'] }).id;
     episodeId = (await episodes.create(projectId, { title: '닫힌 문', direction: '비밀을 찾는다.', content: original })).id;
   });
@@ -55,6 +60,39 @@ describe('episode editing AI', () => {
       await input.readTool(input.readTools[0].function.name, JSON.stringify({ title: '긴장감을 높인 문장', replacement: text }));
       return { runId: 'edit-run', value: { reply: '인물의 반응을 구체적으로 다듬었어요.' } };
     });
+  }
+
+  async function groupedSideStory(withPredecessor = false) {
+    const group = sideStories.createGroup(projectId, {
+      title: '문 너머의 기록',
+      description: '분기점에서 시작한 외전',
+      branchFromEpisodeId: episodeId,
+      canon: '이 외전에서는 문이 기억을 보관한다.',
+      arc: {
+        title: '잃어버린 기록',
+        goal: '사라진 기억을 되찾는다.',
+        conflict: '문이 기억을 돌려주지 않는다.',
+        endEpisodeNumber: 3,
+        reversalPlan: [],
+      },
+    });
+    const predecessor = withPredecessor
+      ? await sideStories.create(projectId, {
+          title: '외전의 분기 기억',
+          direction: '문에 남은 기억을 조사한다.',
+          content: '문에는 먼저 다녀간 사람의 기억이 남아 있었다.',
+          groupId: group.id,
+          branchFromEpisodeId: null,
+        })
+      : undefined;
+    const target = await sideStories.create(projectId, {
+      title: '외전 첫 장면',
+      direction: '문 너머로 들어간다.',
+      content: original,
+      groupId: group.id,
+      branchFromEpisodeId: null,
+    });
+    return { group, predecessor, target };
   }
 
   it('stages an exact Korean/emoji selection, then applies it once with normal memory invalidation', async () => {
@@ -243,6 +281,120 @@ describe('episode editing AI', () => {
     const result = await editor.send(projectId, episodeId, request(hasSelection ? {} : { selection: { start: 0, end: 0, text: '' } }));
     expect(() => editor.apply(projectId, episodeId, result.messages[1]!.id)).toThrow(ConflictException);
     expect(episodes.get(projectId, episodeId).content).toBe('직접 고친 원고');
+  });
+
+  it.each([
+    ['anchor scene', ({ target }: Awaited<ReturnType<typeof groupedSideStory>>) => {
+      episodes.updateScene(projectId, episodeId, { expectedRevision: 1, location: '바뀐 본편 장면' });
+      expect(episodes.get(projectId, target.id).revision).toBe(1);
+    }],
+    ['group metadata', ({ group, target }: Awaited<ReturnType<typeof groupedSideStory>>) => {
+      sideStories.updateGroup(projectId, group.id, { expectedRevision: group.revision, description: '사용자가 바꾼 설명' });
+      expect(episodes.get(projectId, target.id).revision).toBe(1);
+    }],
+    ['target scene', ({ target }: Awaited<ReturnType<typeof groupedSideStory>>) => {
+      episodes.updateScene(projectId, target.id, { expectedRevision: 1, location: '바뀐 외전 장면' });
+      expect(episodes.get(projectId, target.id).revision).toBe(1);
+    }],
+  ])('rejects a grouped side-story preview after its %s changes without a target revision', async (_label, mutate) => {
+    const context = await groupedSideStory();
+    answer();
+    const history = await editor.send(projectId, context.target.id, request());
+    const message = history.messages[1]!;
+    expect(message.edit).not.toHaveProperty('baseFlowRevision');
+    const raw = database.orm.select({ editJson: editorAiMessages.editJson })
+      .from(editorAiMessages).where(eq(editorAiMessages.id, message.id)).get();
+    expect(JSON.parse(raw!.editJson!)).toMatchObject({ baseFlowRevision: expect.any(String) });
+
+    mutate(context);
+
+    expect(() => editor.apply(projectId, context.target.id, message.id)).toThrow(ConflictException);
+    expect(episodes.get(projectId, context.target.id)).toMatchObject({ content: original, revision: 1 });
+    expect(editor.history(projectId, context.target.id).messages[1]?.edit?.status).toBe('PENDING');
+  });
+
+  it.each(['memory', 'model'] as const)('fails a grouped side-story reply when the flow changes during %s work', async (stage) => {
+    const { target } = await groupedSideStory();
+    let release!: () => void;
+    if (stage === 'memory') {
+      const assemble = memory.assemble.bind(memory);
+      vi.spyOn(memory, 'assemble').mockImplementationOnce(async (...args) => {
+        const result = await assemble(...args);
+        await new Promise<void>((resolve) => { release = resolve; });
+        return result;
+      });
+    } else {
+      completeChat.mockImplementationOnce(async (input) => {
+        await input.readTool(input.readTools[0].function.name, JSON.stringify({ title: '폐기될 수정안', replacement }));
+        await new Promise<void>((resolve) => { release = resolve; });
+        return { runId: 'stale-side-flow', value: { reply: '이 답변은 저장되면 안 됩니다.' } };
+      });
+    }
+
+    const pending = editor.send(projectId, target.id, request());
+    const rejected = expect(pending).rejects.toBeInstanceOf(ConflictException);
+    await vi.waitFor(() => expect(release).toBeDefined());
+    episodes.updateScene(projectId, target.id, {
+      expectedRevision: target.revision,
+      location: `사용자가 ${stage} 중 고친 장면`,
+    });
+    expect(episodes.get(projectId, target.id).revision).toBe(target.revision);
+    release();
+    await rejected;
+
+    expect(editor.history(projectId, target.id).messages[1]).toMatchObject({
+      status: 'FAILED',
+      edit: null,
+    });
+    expect(episodes.get(projectId, target.id).content).toBe(original);
+    expect(completeChat).toHaveBeenCalledTimes(stage === 'model' ? 1 : 0);
+  });
+
+  it('refreshes stale side-story predecessors before assembling editor context', async () => {
+    const { predecessor, target } = await groupedSideStory(true);
+    const extraction = (event: string) => ({
+      events: [event],
+      emotionalChanges: [],
+      newForeshadowing: [],
+      resolvedForeshadowing: [],
+      endScene: {
+        location: '기억의 문',
+        time: null,
+        pointOfView: null,
+        characters: [],
+        goal: null,
+      },
+      canonCandidates: [],
+    });
+    completeJson.mockResolvedValueOnce({ value: extraction('예전 분기 기억') });
+    await episodes.finalize(projectId, predecessor!.id, { expectedRevision: predecessor!.revision });
+    await episodes.update(projectId, predecessor!.id, {
+      expectedRevision: predecessor!.revision,
+      content: '사용자가 분기 기억을 고쳤다.',
+    });
+    expect(episodes.get(projectId, predecessor!.id)).toMatchObject({
+      revision: predecessor!.revision + 1,
+      status: 'MEMORY_STALE',
+    });
+    completeJson.mockResolvedValueOnce({ value: extraction('새로 확정한 분기 기억') });
+    completeChat.mockImplementationOnce(async (input) => {
+      const recent = JSON.parse(input.variables.recent_summaries) as Array<{
+        episode_id: string;
+        synopsis: string;
+      }>;
+      expect(recent).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          episode_id: predecessor!.id,
+          synopsis: '새로 확정한 분기 기억',
+        }),
+      ]));
+      return { runId: 'refreshed-editor-context', value: { reply: '최신 분기 기억을 반영했어요.' } };
+    });
+
+    await editor.send(projectId, target.id, request());
+
+    expect(episodes.get(projectId, predecessor!.id).status).toBe('CONFIRMED');
+    expect(completeJson).toHaveBeenCalledTimes(2);
   });
 
   it('rejects unknown tools and range overrides while permitting one valid edit', async () => {

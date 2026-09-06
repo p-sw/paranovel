@@ -145,7 +145,11 @@ export class ProjectsService {
     const aggregate = this.database.orm
       .select({ count: count(), last: max(episodes.number) })
       .from(episodes)
-      .where(and(eq(episodes.projectId, row.id), isNull(episodes.deletedAt)))
+      .where(and(
+        eq(episodes.projectId, row.id),
+        eq(episodes.kind, 'MAIN'),
+        isNull(episodes.deletedAt),
+      ))
       .get();
     const last = aggregate?.last ?? null;
     return {

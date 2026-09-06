@@ -91,9 +91,9 @@ export class ChatReadToolsService {
         const args = listArgs.parse(raw);
         if (args.kind === 'PROJECT') return { records: [this.projects.get(projectId)], nextOffset: null };
         const specifications = {
-          EPISODE: { table: 'episodes', fields: 'id, number, title, status, revision', scope: 'project_id = ? AND deleted_at IS NULL', order: 'number' },
-          CANON: { table: 'canon_entries', fields: 'id, name, category, status, revision', scope: 'project_id = ?', order: 'created_at, id' },
-          ARC: { table: 'arcs', fields: 'id, title, status, revision, start_episode_number AS startEpisodeNumber, end_episode_number AS endEpisodeNumber', scope: 'project_id = ?', order: 'start_episode_number, id' },
+          EPISODE: { table: 'episodes', fields: 'id, number, title, status, revision', scope: "project_id = ? AND kind = 'MAIN' AND deleted_at IS NULL", order: 'number' },
+          CANON: { table: 'canon_entries', fields: 'id, name, category, status, revision', scope: 'project_id = ? AND side_story_group_id IS NULL', order: 'created_at, id' },
+          ARC: { table: 'arcs', fields: 'id, title, status, revision, start_episode_number AS startEpisodeNumber, end_episode_number AS endEpisodeNumber', scope: 'project_id = ? AND side_story_group_id IS NULL', order: 'start_episode_number, id' },
           IMPROVEMENT: { table: 'improvements', fields: 'id, title, active, revision, scope, project_id AS projectId', scope: '(project_id = ? OR project_id IS NULL)', order: 'created_at, id' },
         } as const;
         const spec = specifications[args.kind];
@@ -106,7 +106,7 @@ export class ChatReadToolsService {
         if (args.kind === 'EPISODE') {
           if (!args.id && !args.episodeNumber) return { error: 'ID_OR_EPISODE_NUMBER_REQUIRED' };
           const episode = this.database.orm.select().from(episodes).where(and(
-            eq(episodes.projectId, projectId), isNull(episodes.deletedAt),
+            eq(episodes.projectId, projectId), eq(episodes.kind, 'MAIN'), isNull(episodes.deletedAt),
             args.id ? eq(episodes.id, args.id) : eq(episodes.number, args.episodeNumber!),
           )).get();
           if (!episode) return { error: 'NOT_FOUND' };

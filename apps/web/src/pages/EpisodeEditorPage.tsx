@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import * as Tabs from '@radix-ui/react-tabs';
 import {
   AlertTriangle,
@@ -61,6 +61,30 @@ import {
 type Draft = Pick<Episode, 'title' | 'direction' | 'content'>;
 
 const emptyDraft: Draft = { title: '', direction: '', content: '' };
+
+function invalidateEpisodeMutationCaches(
+  queryClient: QueryClient,
+  projectId: string,
+  episode: Episode,
+) {
+  void queryClient.invalidateQueries({ queryKey: ['episodes', projectId] });
+  void queryClient.invalidateQueries({ queryKey: ['episode-flow', projectId] });
+  void queryClient.invalidateQueries({ queryKey: ['scene', projectId] });
+  if (episode.kind === 'SIDE_STORY') {
+    void queryClient.invalidateQueries({ queryKey: ['side-stories', projectId] });
+    if (episode.sideStoryGroupId) {
+      void queryClient.invalidateQueries({ queryKey: ['side-story-groups', projectId] });
+      void queryClient.invalidateQueries({ queryKey: ['side-story-group', projectId] });
+    }
+    return;
+  }
+  void queryClient.invalidateQueries({ queryKey: ['episode-order', projectId] });
+  // A main-story edit, scene change, finalization, reorder, or deletion can
+  // stale or detach every side flow anchored at or after this episode.
+  void queryClient.invalidateQueries({ queryKey: ['side-stories', projectId] });
+  void queryClient.invalidateQueries({ queryKey: ['side-story-groups', projectId] });
+  void queryClient.invalidateQueries({ queryKey: ['side-story-group', projectId] });
+}
 
 export default function EpisodeEditorPage() {
   const { projectId = '', episodeId = '' } = useParams();
@@ -119,9 +143,9 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
     queryKey: ['episodes', projectId, episodeId],
     queryFn: () => api.episodes.get(projectId, episodeId),
   });
-  const episodeListQuery = useQuery({
-    queryKey: ['episodes', projectId],
-    queryFn: () => api.episodes.list(projectId),
+  const episodeFlowQuery = useQuery({
+    queryKey: ['episode-flow', projectId, episodeId],
+    queryFn: () => api.episodes.flow(projectId, episodeId),
   });
 
   useEffect(() => {
@@ -211,8 +235,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
         clearEpisodeDraftBackup(episodeId);
       }
       queryClient.setQueryData(['episodes', projectId, episodeId], updated);
-      queryClient.invalidateQueries({ queryKey: ['episodes', projectId], exact: true });
-      queryClient.invalidateQueries({ queryKey: ['episode-order', projectId] });
+      invalidateEpisodeMutationCaches(queryClient, projectId, updated);
       return updated;
     } catch (reason) {
       setSaveState('error');
@@ -434,7 +457,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
     if (element) element.setSelectionRange(element.selectionEnd, element.selectionEnd);
   };
 
-  const episodes = [...(episodeListQuery.data ?? [])].sort((a, b) => a.number - b.number);
+  const episodes = [...(episodeFlowQuery.data?.episodes ?? [])].sort((a, b) => (a.number ?? 0) - (b.number ?? 0));
   const currentIndex = episodes.findIndex((item) => item.id === episodeId);
   const previous = currentIndex > 0 ? episodes[currentIndex - 1] : null;
   const next = currentIndex >= 0 && currentIndex < episodes.length - 1 ? episodes[currentIndex + 1] : null;
@@ -450,8 +473,18 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
   const isBusy = continuationOpen || generationBusy;
   const editorLocked = isBusy || editorApplying || Boolean(recoveryBackup);
   const episodeDestination = (item: Episode) => item.status === 'INCOMPLETE'
-    ? `/projects/${projectId}/episodes?resume=${encodeURIComponent(item.id)}`
+    ? item.kind === 'SIDE_STORY'
+      ? `/projects/${projectId}/episodes?resumeSideStory=${encodeURIComponent(item.id)}`
+      : `/projects/${projectId}/episodes?resume=${encodeURIComponent(item.id)}`
     : `/projects/${projectId}/episodes/${item.id}`;
+  const sideStory = episode.kind === 'SIDE_STORY';
+  const toolbarLabel = sideStory
+    ? episode.number ? `외전 ${episode.number}화` : '단편 외전'
+    : `${episode.number ?? ''}화`;
+  const railLabel = sideStory
+    ? episodeFlowQuery.data?.group?.title ? `외전 · ${episodeFlowQuery.data.group.title}` : '단편 외전'
+    : '회차';
+  const siblingLabel = sideStory ? '외전' : '회차';
 
   const prepareEditorRequest = async (content: string, clientMessageId: string): Promise<EditorAiInput> => {
     const target = editorAiSelectionRef.current;
@@ -489,9 +522,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
       queryClient.setQueryData<EditorAiHistory>(['editor-ai', projectId, episodeId], (history) => history ? {
         messages: history.messages.map((item) => item.id === message.id ? message : item),
       } : history);
-      for (const key of [['episodes', projectId], ['episode-order', projectId], ['scene', projectId, episodeId]]) {
-        void queryClient.invalidateQueries({ queryKey: key });
-      }
+      invalidateEpisodeMutationCaches(queryClient, projectId, updated);
       const end = edit.start + edit.replacement.length;
       if (rangeStillMatches(updated.content, edit.start, end, edit.replacement)) {
         const snapshot = { start: edit.start, end, text: edit.replacement, content: updated.content, revision: updated.revision };
@@ -531,7 +562,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
   return (
     <div className={cx('editor-page', editorAiOpen && 'editor-ai-open')}>
       <aside className="episode-rail" aria-label="회차 빠른 이동">
-        <div className="episode-rail-title">회차</div>
+        <div className="episode-rail-title">{railLabel}</div>
         <nav>
           {episodes.map((item) => (
             <Link
@@ -544,7 +575,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
                 void saveNow().then(() => navigate(episodeDestination(item))).catch(() => undefined);
               }}
             >
-              <span>{item.number}</span>
+              <span>{item.kind === 'SIDE_STORY' ? item.number ? `외전 ${item.number}` : '단편' : item.number}</span>
               <span className="truncate">{item.title || '제목 없음'}</span>
               {item.status === 'INCOMPLETE' ? <Badge tone="warning">미완성</Badge> : null}
             </Link>
@@ -555,11 +586,11 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
       <section className="editor-center">
         <header className="editor-toolbar">
           <div className="flex items-center gap-1">
-            <IconButton label="이전 회차" disabled={!previous} onClick={() => previous && void saveNow().then(() => navigate(episodeDestination(previous))).catch(() => undefined)}>
+            <IconButton label={`이전 ${siblingLabel}`} disabled={!previous} onClick={() => previous && void saveNow().then(() => navigate(episodeDestination(previous))).catch(() => undefined)}>
               <ChevronLeft className="size-5" />
             </IconButton>
-            <span className="whitespace-nowrap text-xs font-semibold text-muted">{episode.number}화</span>
-            <IconButton label="다음 회차" disabled={!next} onClick={() => next && void saveNow().then(() => navigate(episodeDestination(next))).catch(() => undefined)}>
+            <span className="whitespace-nowrap text-xs font-semibold text-muted">{toolbarLabel}</span>
+            <IconButton label={`다음 ${siblingLabel}`} disabled={!next} onClick={() => next && void saveNow().then(() => navigate(episodeDestination(next))).catch(() => undefined)}>
               <ChevronRight className="size-5" />
             </IconButton>
           </div>
@@ -680,9 +711,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
           revisionRef.current = finalized.revision;
           setRevision(finalized.revision);
           queryClient.setQueryData(['episodes', projectId, episodeId], finalized);
-          queryClient.invalidateQueries({ queryKey: ['episodes', projectId] });
-          queryClient.invalidateQueries({ queryKey: ['episode-order', projectId] });
-          queryClient.invalidateQueries({ queryKey: ['scene', projectId, episodeId] });
+          invalidateEpisodeMutationCaches(queryClient, projectId, finalized);
         }} />
         </fieldset>
       </aside>
@@ -695,7 +724,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
           revisionRef.current = finalized.revision;
           setRevision(finalized.revision);
           queryClient.setQueryData(['episodes', projectId, episodeId], finalized);
-          queryClient.invalidateQueries({ queryKey: ['scene', projectId, episodeId] });
+          invalidateEpisodeMutationCaches(queryClient, projectId, finalized);
         }} />
         </fieldset>
       </Sheet>
@@ -717,6 +746,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
           revisionRef.current = updated.revision;
           setRevision(updated.revision);
           queryClient.setQueryData(['episodes', projectId, episodeId], updated);
+          invalidateEpisodeMutationCaches(queryClient, projectId, updated);
           requestAnimationFrame(() => {
             textareaRef.current?.focus();
             textareaRef.current?.setSelectionRange(cursorOffset, cursorOffset);
@@ -740,6 +770,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
           setRevision(updated.revision);
           setLastReplacement({ start: snapshot.start, original: snapshot.text, replacement });
           queryClient.setQueryData(['episodes', projectId, episodeId], updated);
+          invalidateEpisodeMutationCaches(queryClient, projectId, updated);
           queryClient.invalidateQueries({ queryKey: ['improvements', projectId] });
         }}
       />
@@ -767,6 +798,8 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
                 revisionRef.current = result.revision;
                 setRevision(result.revision);
                 setLastReplacement(null);
+                queryClient.setQueryData(['episodes', projectId, episodeId], result);
+                invalidateEpisodeMutationCaches(queryClient, projectId, result);
               } catch (reason) {
                 setSaveError(messageOf(reason));
               }
@@ -824,7 +857,11 @@ function ContextPanel({
         <SceneFields projectId={projectId} episode={episode} />
         <div className="info-box mt-5">
           <Info className="mt-0.5 size-4 shrink-0" />
-          <p>이어쓰기는 현재 커서 앞 문단과 이 방향, 현재 아크, 관련 정사와 개선점을 함께 참고해요.</p>
+          <p>{episode.kind === 'SIDE_STORY'
+            ? episode.sideStoryGroupId
+              ? '이어쓰기는 현재 커서 앞 문단과 이 방향, 같은 외전 그룹의 아크와 정사만 함께 참고해요.'
+              : '이어쓰기는 현재 커서 앞 문단과 이 방향, 이 외전에 허용된 정사만 함께 참고해요.'
+            : '이어쓰기는 현재 커서 앞 문단과 이 방향, 현재 아크, 관련 정사와 개선점을 함께 참고해요.'}</p>
         </div>
         <div className="mt-6">
           <h3 className="field-label">직전 문단</h3>
@@ -909,6 +946,7 @@ function SceneFields({ projectId, episode }: { projectId: string; episode: Episo
     onSuccess: (updated) => {
       setScene(updated);
       queryClient.setQueryData(['scene', projectId, episode.id], updated);
+      invalidateEpisodeMutationCaches(queryClient, projectId, episode);
       setError('');
     },
     onError: (reason) => setError(isConflict(reason) ? '본문이 변경되었습니다. 장면 정보를 다시 확인해 주세요.' : messageOf(reason)),
