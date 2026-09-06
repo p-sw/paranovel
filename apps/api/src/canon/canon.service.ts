@@ -21,7 +21,7 @@ import {
   stringArray,
 } from '../shared/utils';
 
-const CATEGORIES = ['CHARACTER', 'LOCATION', 'ORGANIZATION', 'ABILITY', 'RULE', 'TIMELINE', 'OTHER'] as const;
+const CATEGORIES = ['CHARACTER', 'CHARACTER_APPEARANCE', 'LOCATION', 'ORGANIZATION', 'ABILITY', 'RULE', 'TIMELINE', 'OTHER'] as const;
 const STATUSES = ['ACTIVE', 'PENDING', 'ACCEPTED', 'REJECTED'] as const;
 
 @Injectable()

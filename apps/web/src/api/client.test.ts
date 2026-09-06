@@ -52,6 +52,20 @@ describe('NDJSON client', () => {
 });
 
 describe('write contracts', () => {
+  it('sends the saved revision and stable key for highlights and guards placement by image ID', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => Response.json({ configured: true, image: null, generation: null }));
+    vi.stubGlobal('fetch', fetchMock);
+    await api.highlights.generate('project', 'episode', 7, 'same-paid-request');
+    await api.highlights.place('project', 'episode', { expectedEpisodeRevision: 8, expectedImageId: 'image', afterParagraphId: 3 });
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/projects/project/episodes/episode/highlight/generate', expect.objectContaining({
+      method: 'POST', body: JSON.stringify({ expectedRevision: 7 }),
+      headers: expect.objectContaining({ 'Idempotency-Key': 'same-paid-request' }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/projects/project/episodes/episode/highlight/placement', expect.objectContaining({
+      method: 'PATCH', body: JSON.stringify({ expectedEpisodeRevision: 8, expectedImageId: 'image', afterParagraphId: 3 }),
+    }));
+  });
+
   it('maps arc episode fields and keeps the optimistic revision', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('{}', {
       status: 200,

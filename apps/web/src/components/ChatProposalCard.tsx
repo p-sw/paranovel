@@ -24,7 +24,7 @@ const ignoredFields = new Set([
 const valueLabels: Record<string, string> = {
   ACTIVE: '사용 중', PENDING: '검토 대기', ACCEPTED: '확정', REJECTED: '제외',
   PLANNED: '계획됨', COMPLETE: '완료', ARCHIVED: '보관됨',
-  CHARACTER: '인물', LOCATION: '장소', ORGANIZATION: '조직', ABILITY: '능력',
+  CHARACTER: '인물', CHARACTER_APPEARANCE: '인물 외형', LOCATION: '장소', ORGANIZATION: '조직', ABILITY: '능력',
   RULE: '규칙', TIMELINE: '연표', OTHER: '기타', STYLE: '문체',
 };
 

@@ -29,7 +29,7 @@ export const editableValidators = {
     defaultTargetChars: z.number().int().min(500).max(30_000),
   }),
   CANON: z.strictObject({
-    category: z.enum(['CHARACTER', 'LOCATION', 'ORGANIZATION', 'ABILITY', 'RULE', 'TIMELINE', 'OTHER']),
+    category: z.enum(['CHARACTER', 'CHARACTER_APPEARANCE', 'LOCATION', 'ORGANIZATION', 'ABILITY', 'RULE', 'TIMELINE', 'OTHER']),
     name: short,
     aliases: z.array(z.string()),
     content: z.string().trim().min(1).max(50_000),

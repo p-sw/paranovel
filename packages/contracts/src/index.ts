@@ -1,10 +1,13 @@
 import { z } from 'zod';
 
+export * from './highlight.js';
+
 export const idSchema = z.string().min(1);
 export const isoDateSchema = z.string().datetime({ offset: true }).or(z.string().datetime());
 
 export const canonCategorySchema = z.enum([
   'CHARACTER',
+  'CHARACTER_APPEARANCE',
   'LOCATION',
   'ORGANIZATION',
   'ABILITY',

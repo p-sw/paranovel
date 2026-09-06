@@ -7,6 +7,7 @@ import {
 import { and, count, eq, isNull, max } from 'drizzle-orm';
 import { DatabaseService } from '../database/database.service';
 import { episodes, memoryChunks, projects } from '../database/schema';
+import { flushHighlightFileCleanup } from '../highlights/highlight-storage.service';
 import {
   id,
   now,
@@ -139,6 +140,7 @@ export class ProjectsService {
       }
       this.database.orm.delete(projects).where(eq(projects.id, projectId)).run();
     })();
+    flushHighlightFileCleanup(this.database);
   }
 
   private toView(row: typeof projects.$inferSelect): ProjectView {

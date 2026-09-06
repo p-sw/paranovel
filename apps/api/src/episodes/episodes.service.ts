@@ -1,3 +1,4 @@
+import { flushHighlightFileCleanup } from '../highlights/highlight-storage.service';
 import {
   BadGatewayException,
   BadRequestException,
@@ -213,6 +214,7 @@ export class EpisodesService {
     this.memory.removeSource('EPISODE', episodeId);
     this.memory.removeSource('EPISODE_SUMMARY', episodeId);
     this.database.orm.delete(episodes).where(eq(episodes.id, episodeId)).run();
+    flushHighlightFileCleanup(this.database);
     this.invalidateFrom(projectId, current.number + 1);
   }
 
@@ -487,7 +489,11 @@ export class EpisodesService {
         const duplicate = this.database.orm
           .select({ id: canonEntries.id })
           .from(canonEntries)
-          .where(and(eq(canonEntries.projectId, projectId), eq(canonEntries.name, candidate.name)))
+          .where(and(
+            eq(canonEntries.projectId, projectId),
+            eq(canonEntries.category, candidate.category),
+            eq(canonEntries.name, candidate.name),
+          ))
           .get();
         if (duplicate) continue;
         this.database.orm.insert(canonEntries).values({

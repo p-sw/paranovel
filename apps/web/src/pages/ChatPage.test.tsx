@@ -37,10 +37,10 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('project AI chat', () => {
-  it('shows exact free-text and nested metadata values in the proposal review', async () => {
+  it.each([['CHARACTER', '인물'], ['CHARACTER_APPEARANCE', '인물 외형']])('shows the %s label and exact free-text metadata in the proposal review', async (category, label) => {
     vi.mocked(api.chat.history).mockResolvedValue({ messages: [{ ...assistantMessage, proposals: [{
       ...proposal, before: null, operation: 'CREATE', after: {
-        name: 'ACTIVE', category: 'CHARACTER', content: 'ARCHIVED',
+        name: 'ACTIVE', category, content: 'ARCHIVED',
         metadata: { source: 'ACTIVE', id: 'user-defined-id', active: false, episode: 1, description: '실제 사용자 데이터' },
       },
     }] }] });
@@ -48,7 +48,7 @@ describe('project AI chat', () => {
     const card = within(await screen.findByRole('region', { name: '능력의 대가 변경 변경안' }));
     expect(card.getByText('ACTIVE', { exact: true })).toBeInTheDocument();
     expect(card.getByText('ARCHIVED', { exact: true })).toBeInTheDocument();
-    expect(card.getByText('인물', { exact: true })).toBeInTheDocument();
+    expect(card.getByText(label!, { exact: true })).toBeInTheDocument();
     expect(card.getByText(/source: ACTIVE/)).toHaveTextContent('id: user-defined-id');
     expect(card.getByText(/source: ACTIVE/)).toHaveTextContent('active: false');
     expect(card.getByText(/source: ACTIVE/)).toHaveTextContent('description: 실제 사용자 데이터');

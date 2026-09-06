@@ -72,7 +72,7 @@ export class ChatReadToolsService {
         const record = value as unknown as RecordSnapshot;
         snapshots.set(`${entityKind}:${record.id}`, record);
         catalog.push({ kind: entityKind, id: record.id, name: record.name ?? record.title, revision: record.revision,
-          status: record.status, active: record.active, scope: record.scope, projectId: record.projectId });
+          category: record.category, status: record.status, active: record.active, scope: record.scope, projectId: record.projectId });
       }
     }
     return { snapshots, catalog };

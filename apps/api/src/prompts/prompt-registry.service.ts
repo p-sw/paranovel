@@ -20,6 +20,7 @@ export const REQUIRED_PROMPT_IDS = [
   'episode-direction',
   'episode-draft',
   'episode-continue',
+  'episode-highlight',
   'scene-extract',
   'episode-memory-extract',
   'continuity-review',

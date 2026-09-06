@@ -9,6 +9,7 @@ import { ComparisonsModule } from './comparisons/comparisons.module';
 import { DatabaseModule } from './database/database.module';
 import { EpisodesModule } from './episodes/episodes.module';
 import { HealthController } from './health.controller';
+import { HighlightsModule } from './highlights/highlights.module';
 import { ImprovementsModule } from './improvements/improvements.module';
 import { MemoryModule } from './memory/memory.module';
 import { ProjectsModule } from './projects/projects.module';
@@ -33,6 +34,7 @@ const webDistPath = process.env.WEB_DIST_PATH
     ArcsModule,
     ImprovementsModule,
     EpisodesModule,
+    HighlightsModule,
     ComparisonsModule,
     ChatModule,
   ],

@@ -14,6 +14,7 @@ export const GENRE_SUGGESTIONS = [
 
 export const CANON_LABELS: Record<CanonCategory, string> = {
   CHARACTER: '인물',
+  CHARACTER_APPEARANCE: '인물 외형',
   LOCATION: '장소',
   ORGANIZATION: '조직',
   ABILITY: '능력',

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -17,6 +17,7 @@ beforeEach(() => {
   localStorage.clear();
   vi.spyOn(api.episodes, 'get').mockResolvedValue(episode);
   vi.spyOn(api.episodes, 'list').mockResolvedValue([episode]);
+  vi.spyOn(api.highlights, 'get').mockResolvedValue({ configured: true, image: null, generation: null });
   vi.spyOn(api.scenes, 'get').mockResolvedValue({
     episodeId: episode.id, characters: [], location: null, time: null, pointOfView: null, goal: null, sourceRevision: 1,
   });
@@ -68,5 +69,37 @@ describe('continuation draft review', () => {
     expect(update).toHaveBeenCalledWith('story', 'episode', expect.objectContaining({ expectedRevision: 1, forceNeedsReview: true }));
     expect(update.mock.calls[0][2].content).toContain('추가 문장.');
     expect(update.mock.calls[0][2].content).toContain('원래 본문.');
+  });
+});
+
+describe('highlight source capture', () => {
+  it('drains an older autosave and all newer edits before generating from the saved revision', async () => {
+    const completions: Array<(value: Episode) => void> = [];
+    const update = vi.spyOn(api.episodes, 'update').mockImplementation(() => new Promise((resolve) => completions.push(resolve)));
+    const generate = vi.spyOn(api.highlights, 'generate').mockResolvedValue({ configured: true, image: null, generation: null });
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={['/projects/story/episodes/episode']}>
+        <Routes><Route path="/projects/:projectId/episodes/:episodeId" element={<EpisodeEditorPage />} /></Routes>
+      </MemoryRouter>
+    </QueryClientProvider>);
+    const textarea = await screen.findByRole('textbox', { name: '회차 본문' });
+    await user.clear(textarea);
+    await user.type(textarea, '먼저 저장할 본문.');
+    await waitFor(() => expect(update).toHaveBeenCalledOnce());
+    await user.type(textarea, ' 나중에 작성한 문장.');
+    await user.click(screen.getByRole('button', { name: '하이라이트 삽화 생성' }));
+    expect(textarea).toBeDisabled();
+    expect(screen.getByRole('textbox', { name: '회차 제목' })).toBeDisabled();
+    expect(generate).not.toHaveBeenCalled();
+    await act(async () => completions[0]({ ...episode, content: update.mock.calls[0][2].content!, revision: 2 }));
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+    expect(update.mock.calls[1][2]).toMatchObject({ expectedRevision: 2, content: '먼저 저장할 본문. 나중에 작성한 문장.' });
+    expect(generate).not.toHaveBeenCalled();
+    await act(async () => completions[1]({ ...episode, content: update.mock.calls[1][2].content!, revision: 3 }));
+    await waitFor(() => expect(generate).toHaveBeenCalledWith('story', 'episode', 3, expect.any(String)));
+    expect(textarea).toBeEnabled();
+    expect(textarea).toHaveValue('먼저 저장할 본문. 나중에 작성한 문장.');
   });
 });

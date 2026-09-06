@@ -4,6 +4,7 @@ import { z } from 'zod';
 const stringArray = { type: 'array', items: { type: 'string' } } as const;
 const canonCategoryValidator = z.enum([
   'CHARACTER',
+  'CHARACTER_APPEARANCE',
   'LOCATION',
   'ORGANIZATION',
   'ABILITY',
@@ -259,7 +260,7 @@ export const episodeMemorySchema: JsonSchema = {
         properties: {
           category: {
             type: 'string',
-            enum: ['CHARACTER', 'LOCATION', 'ORGANIZATION', 'ABILITY', 'RULE', 'TIMELINE', 'OTHER'],
+            enum: ['CHARACTER', 'CHARACTER_APPEARANCE', 'LOCATION', 'ORGANIZATION', 'ABILITY', 'RULE', 'TIMELINE', 'OTHER'],
           },
           name: { type: 'string' },
           aliases: stringArray,
@@ -305,7 +306,7 @@ export const worldbuildingSchema: JsonSchema = {
         properties: {
           category: {
             type: 'string',
-            enum: ['CHARACTER', 'LOCATION', 'ORGANIZATION', 'ABILITY', 'RULE', 'TIMELINE', 'OTHER'],
+            enum: ['CHARACTER', 'CHARACTER_APPEARANCE', 'LOCATION', 'ORGANIZATION', 'ABILITY', 'RULE', 'TIMELINE', 'OTHER'],
           },
           name: { type: 'string' },
           aliases: stringArray,

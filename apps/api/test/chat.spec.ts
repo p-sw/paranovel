@@ -69,6 +69,24 @@ describe('project chat', () => {
     expect(completeChat.mock.calls[0]![0].history.at(-1)).toEqual({ role: 'user', content: '작품을 개선해 줘' });
   });
 
+  it('creates and updates distinct same-name appearance canon through approved chat proposals', async () => {
+    const character = await canon.create(projectId, canonFields);
+    const visualFields = { category: 'CHARACTER_APPEARANCE', name: canonFields.name, content: '은발, 보라색 눈, 남색 코트, 초승달 귀걸이' };
+    const created = await ask([proposal('CANON', 'CREATE', visualFields)]);
+    expect(canon.list(projectId)).toHaveLength(1);
+    const applied = await chat.apply(projectId, created.messages[1]!.proposals[0]!.id);
+    const appearanceId = applied.proposal.targetId!;
+    expect(canon.get(projectId, appearanceId)).toMatchObject(visualFields);
+    expect(reads.snapshot(projectId).catalog.filter((record) => record.kind === 'CANON')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: character.id, name: canonFields.name, category: 'CHARACTER' }),
+      expect.objectContaining({ id: appearanceId, name: canonFields.name, category: 'CHARACTER_APPEARANCE' }),
+    ]));
+    const updated = await ask([proposal('CANON', 'UPDATE', { content: `${visualFields.content}, 검은 장화` }, appearanceId)], 'turn-2');
+    await chat.apply(projectId, updated.messages.at(-1)!.proposals[0]!.id);
+    expect(canon.get(projectId, appearanceId).content).toContain('검은 장화');
+    expect(canon.get(projectId, character.id).content).toBe(canonFields.content);
+  });
+
   it('omits unsupported temperature on actual Luna gateway requests while requiring tools and structured output', async () => {
     vi.stubEnv('OPENROUTER_API_KEY', 'test-chat-key');
     vi.stubEnv('AI_CHAT_MODEL', 'openai/gpt-5.6-luna');

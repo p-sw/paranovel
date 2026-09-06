@@ -12,6 +12,7 @@ import { Badge, Button, ConfirmDialog, EmptyState, ErrorState, FieldError, Sheet
 const categoryGroups: Array<{ value: 'ALL' | CanonCategory; label: string }> = [
   { value: 'ALL', label: '전체' },
   { value: 'CHARACTER', label: '인물' },
+  { value: 'CHARACTER_APPEARANCE', label: '인물 외형' },
   { value: 'LOCATION', label: '장소' },
   { value: 'ORGANIZATION', label: '조직' },
   { value: 'ABILITY', label: '능력' },
@@ -216,7 +217,7 @@ export default function CanonPage() {
               <button className="canon-card-main" onClick={() => setEditing(entry)}>
                 <div className="flex items-center justify-between gap-2">
                   <Badge tone={entry.status === 'PENDING' ? 'warning' : 'neutral'}>
-                    {entry.category === 'CHARACTER' ? <UserRound className="size-3" /> : null}
+                    {entry.category === 'CHARACTER' || entry.category === 'CHARACTER_APPEARANCE' ? <UserRound className="size-3" /> : null}
                     {CANON_LABELS[entry.category]}
                   </Badge>
                   {entry.status === 'PENDING' ? <span className="flex items-center gap-1 text-xs font-semibold text-amber-800"><Clock3 className="size-3.5" /> 검토 필요</span> : null}
@@ -308,7 +309,11 @@ function CanonEditor({
         <div><label className="field-label" htmlFor="canon-category">분류</label><select id="canon-category" className="input" value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value as CanonCategory })}>{categoryGroups.slice(1).map((group) => <option value={group.value} key={group.value}>{group.label}</option>)}</select></div>
         <div><label className="field-label" htmlFor="canon-name">이름</label><input id="canon-name" className="input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="예: 세라 벨로아" /></div>
         <div><label className="field-label" htmlFor="canon-aliases">별칭</label><input id="canon-aliases" className="input" value={aliasesText} onChange={(event) => setAliasesText(event.target.value)} placeholder="쉼표로 구분" /></div>
-        <div><label className="field-label" htmlFor="canon-content">확정 내용</label><textarea id="canon-content" className="input" value={form.content} onChange={(event) => setForm({ ...form, content: event.target.value })} placeholder="외형, 성격, 과거, 관계나 변하지 않는 규칙을 명확하게 적어 주세요." /></div>
+        <div>
+          <label className="field-label" htmlFor="canon-content">확정 내용</label>
+          {form.category === 'CHARACTER_APPEARANCE' ? <p id="canon-appearance-guide" className="mb-2 text-sm text-muted">인물과 같은 이름을 사용하고 머리카락 색·길이·스타일, 눈동자 색, 피부색, 체형, 옷의 종류·색·소재, 신발, 장신구, 특징적인 흉터 등을 기록하세요. 평소 외형과 특정 장면의 복장을 구분하고, 미정인 정보는 미정으로 남겨 두세요.</p> : null}
+          <textarea id="canon-content" className="input" value={form.content} onChange={(event) => setForm({ ...form, content: event.target.value })} aria-describedby={form.category === 'CHARACTER_APPEARANCE' ? 'canon-appearance-guide' : undefined} placeholder={form.category === 'CHARACTER_APPEARANCE' ? '머리카락: 은빛, 허리까지 오는 긴 생머리\n눈동자: 짙은 보라색\n피부: 밝은 올리브색\n체형: 키가 크고 마른 체격\n평소 복장: 남색 벨벳 코트와 검은 장화\n장신구: 왼쪽 귀의 은색 초승달 귀걸이\n기타 특징: 오른쪽 눈썹 위의 작은 흉터' : '외형, 성격, 과거, 관계나 변하지 않는 규칙을 명확하게 적어 주세요.'} />
+        </div>
         <FieldError>{error}</FieldError>
       </form>
     </Sheet>

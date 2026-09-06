@@ -5,6 +5,7 @@ import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { schema } from './schema';
+import { EPISODE_HIGHLIGHT_MIGRATION } from './highlight-migration';
 
 const INITIAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -240,6 +241,33 @@ CREATE TABLE chat_proposals (
 CREATE INDEX idx_chat_proposals_message ON chat_proposals(message_id);
 `;
 
+const CHARACTER_APPEARANCE_MIGRATION = `
+CREATE TABLE canon_entries_with_appearance (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  category TEXT NOT NULL CHECK (category IN ('CHARACTER','CHARACTER_APPEARANCE','LOCATION','ORGANIZATION','ABILITY','RULE','TIMELINE','OTHER')),
+  name TEXT NOT NULL,
+  aliases_json TEXT NOT NULL DEFAULT '[]',
+  content TEXT NOT NULL,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','PENDING','ACCEPTED','REJECTED')),
+  revision INTEGER NOT NULL DEFAULT 1,
+  source_episode_id TEXT REFERENCES episodes(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+INSERT INTO canon_entries_with_appearance (
+  id, project_id, category, name, aliases_json, content, metadata_json,
+  status, revision, source_episode_id, created_at, updated_at
+)
+SELECT id, project_id, category, name, aliases_json, content, metadata_json,
+       status, revision, source_episode_id, created_at, updated_at
+FROM canon_entries;
+DROP TABLE canon_entries;
+ALTER TABLE canon_entries_with_appearance RENAME TO canon_entries;
+CREATE INDEX idx_canon_project_category ON canon_entries(project_id, category, status);
+`;
+
 @Injectable()
 export class DatabaseService implements OnApplicationShutdown {
   readonly connection: Database.Database;
@@ -271,6 +299,8 @@ export class DatabaseService implements OnApplicationShutdown {
       { version: 3, sql: IMPROVEMENT_BATCH_MIGRATION },
       { version: 4, sql: AI_RUN_OBSERVABILITY_MIGRATION },
       { version: 5, sql: PROJECT_CHAT_MIGRATION },
+      { version: 6, sql: CHARACTER_APPEARANCE_MIGRATION },
+      { version: 7, sql: EPISODE_HIGHLIGHT_MIGRATION },
     ];
     this.connection.exec(
       'CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)',

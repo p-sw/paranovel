@@ -200,7 +200,31 @@ export const chatProposals = sqliteTable('chat_proposals', {
   appliedAt: text('applied_at'),
 });
 
+export const episodeHighlights = sqliteTable('episode_highlights', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  episodeId: text('episode_id').notNull(),
+  idempotencyKey: text('idempotency_key').notNull(),
+  sourceRevision: integer('source_revision').notNull(),
+  sourceContent: text('source_content').notNull(),
+  canonSnapshotJson: text('canon_snapshot_json').notNull(),
+  status: text('status').notNull(),
+  isCurrent: integer('is_current', { mode: 'boolean' }).notNull(),
+  error: text('error'),
+  runId: text('run_id'),
+  planJson: text('plan_json'),
+  providerResultJson: text('provider_result_json'),
+  fileName: text('file_name'),
+  mimeType: text('mime_type'),
+  anchorSourceContent: text('anchor_source_content'),
+  anchorText: text('anchor_text'),
+  anchorOffset: integer('anchor_offset'),
+  createdAt: text('created_at').notNull(),
+  completedAt: text('completed_at'),
+});
+
 export const schema = {
+  episodeHighlights,
   chatMessages,
   chatProposals,
   projects,

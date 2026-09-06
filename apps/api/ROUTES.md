@@ -33,9 +33,22 @@ Chat uses `AI_CHAT_MODEL` (default `openai/gpt-5.6-luna`) for project-scoped rea
 
 NDJSON events are `meta`, `stage`, `delta`, `reset`, `warning`, `done`, and `error`. Text remains a preview until a non-blocked `done`; the client then saves it through create/PATCH. Continuity repair retains the original preview until the corrected result passes review and arrives in `done`. Clients retain the last readable preview through `reset`, reject empty `done` and EOF without `done`, and ignore data after completion. Incomplete text can only be saved explicitly with review required.
 
+## Episode highlight illustrations
+
+The base is `/projects/:projectId/episodes/:episodeId/highlight`.
+
+- `GET` — returns `{ configured, image, generation }`. `image` is the current saved illustration or null. `generation` is the latest persisted operation (`RUNNING`, `SUCCEEDED`, `FAILED`), its idempotency key, source revision, safe error, and `retryableDownload` flag.
+- `POST .../generate` — `{ expectedRevision }` with required `Idempotency-Key` (1–200 characters). A new request validates the saved episode and generates one illustration; the response waits for completion. An identical in-progress replay returns 202 with the saved state; a completed/failed replay returns the saved state without another generation. Another simultaneous request or a key reused with a different revision returns 409. A latest failed operation with a stored provider URL can use its original key/revision to retry downloading only. Persisted generation failures return 200 with `generation.status = FAILED`; preflight errors use 400/404/409/503.
+- `PATCH .../placement` — `{ expectedEpisodeRevision, expectedImageId, afterParagraphId }`. Paragraph IDs are one-based nonblank lines; offsets are UTF-16. Updates placement only. Changed episode/image versions return 409.
+- `DELETE` — `{ expectedImageId }`. Removes the current image; a changed image or an in-progress generation returns 409.
+- `GET .../:imageId/image` — serves the current local raster file after validating project/episode ownership. Superseded or deleted images return 404.
+
+Image responses include original generation and placement text snapshots for exact client-side stale/anchor checks. They do not contain provider URLs, API keys, or filesystem paths. Generation and placement never update episode text, revision, or prose memories. The server persists provider results before downloading, replaces the current image only after atomic file storage, and marks interrupted operations failed at startup without retrying paid API calls. Episode/project deletion cascades image metadata and queues file cleanup.
+
 ## Canon, arcs, and improvements
 
 - `GET|POST /projects/:projectId/canon`, `POST .../canon/generate`, `GET|PATCH|DELETE .../canon/:canonId`; PATCH requires `expectedRevision`.
+  `CHARACTER_APPEARANCE` stores detailed freeform visual facts in `content`, separate from `CHARACTER`. AI-generated entries remain candidates until approved.
 - `GET|POST /projects/:projectId/arcs`, `GET .../arcs/current`, `POST .../arcs/plan`, `PATCH|DELETE .../arcs/:arcId`; the plan route returns a strict AI proposal and PATCH requires `expectedRevision`.
   Activating a new arc archives the previously active arc.
 - `GET|POST /improvements`, `PATCH|DELETE /improvements/:improvementId`; PATCH requires `expectedRevision`.
