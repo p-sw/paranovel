@@ -178,10 +178,11 @@ export default function EditorAiPanel({ projectId, episodeId, open, disabled, di
         <div className="flex min-w-0 flex-1 items-center gap-2">
           {selected ? <TextSelect className="size-4 shrink-0" aria-hidden="true" /> : <CornerDownLeft className="size-4 shrink-0" aria-hidden="true" />}
           <span>{selected ? `선택한 부분 · ${characterCount(selection!.text)}자` : selection ? '커서 위치에서 이어쓰기' : '원고 끝에서 이어쓰기'}</span>
+          {selected ? <span className="shrink-0 text-[10px] font-normal text-muted">고정됨</span> : null}
         </div>
         {selection ? <IconButton type="button" label="편집 AI 선택 해제" onClick={onClearSelection}><X className="size-3.5" /></IconButton> : null}
       </div>
-      {selected ? <p className="editor-ai-selection-text">{selection!.text}</p> : null}
+      {selected ? <p className="editor-ai-selection-text" aria-label="편집 AI에 고정한 원문">{selection!.text}</p> : null}
       {selectionStale ? <p className="mb-2 text-xs text-red-700" role="alert">원고가 바뀌었어요. 수정할 부분을 다시 선택하거나 선택을 해제해 주세요.</p> : null}
       <label className="sr-only" htmlFor="editor-ai-input">편집 AI에게 보낼 메시지</label>
       <div className="editor-ai-input-wrap">

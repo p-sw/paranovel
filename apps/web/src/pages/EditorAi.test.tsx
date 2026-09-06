@@ -57,14 +57,16 @@ beforeEach(() => {
 
 afterEach(() => { vi.restoreAllMocks(); localStorage.clear(); });
 
-async function openEditor() {
+async function openEditor(openPanel = true) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const view = render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/projects/story/episodes/episode']}>
     <Routes><Route path="/projects/:projectId/episodes/:episodeId" element={<EpisodeEditorPage />} /></Routes>
   </MemoryRouter></QueryClientProvider>);
   const editor = await screen.findByRole('textbox', { name: '회차 본문' }) as HTMLTextAreaElement;
-  fireEvent.click(screen.getByRole('button', { name: '편집 AI' }));
-  await screen.findByRole('heading', { name: '이 문장부터, 함께 써요' });
+  if (openPanel) {
+    fireEvent.click(screen.getByRole('button', { name: '편집 AI' }));
+    await screen.findByRole('heading', { name: '이 문장부터, 함께 써요' });
+  }
   return { ...view, client, editor };
 }
 
@@ -84,6 +86,69 @@ async function ask(content = '긴장감을 높여줘') {
 }
 
 describe('editing conversation in the episode workspace', () => {
+  it('keeps a passage attached and highlighted when focus moves and the browser collapses its native selection', async () => {
+    const { editor, container } = await openEditor();
+    select(editor);
+    const input = screen.getByRole('textbox', { name: '편집 AI에게 보낼 메시지' });
+    input.focus();
+    editor.setSelectionRange(source.length, source.length);
+    fireEvent.keyUp(editor, { key: 'Tab' });
+    expect(input).toHaveFocus();
+    expect(screen.getByLabelText('편집 AI에 고정한 원문')).toHaveTextContent(selected);
+    expect(container.querySelector('.story-editor-highlight mark')).toHaveTextContent(selected);
+    await ask();
+    expect(vi.mocked(api.editorAi.send).mock.calls[0]![2].selection).toEqual({
+      start: source.indexOf(selected), end: source.indexOf(selected) + selected.length, text: selected,
+    });
+    expect(screen.getByRole('button', { name: '선택한 부분에 적용' })).toBeEnabled();
+  });
+
+  it('attaches a passage selected before opening the AI panel and preserves it through auto-focus', async () => {
+    const { editor, container } = await openEditor(false);
+    select(editor);
+    fireEvent.click(screen.getByRole('button', { name: '편집 AI' }));
+    await screen.findByRole('heading', { name: '이 문장부터, 함께 써요' });
+    expect(screen.getByRole('textbox', { name: '편집 AI에게 보낼 메시지' })).toHaveFocus();
+    expect(screen.getByLabelText('편집 AI에 고정한 원문')).toHaveTextContent(selected);
+    expect(container.querySelector('.story-editor-highlight mark')).toHaveTextContent(selected);
+    await ask();
+    expect(vi.mocked(api.editorAi.send).mock.calls[0]![2].selection.text).toBe(selected);
+  });
+
+  it('changes the attached passage only when a new passage is selected or it is explicitly cleared', async () => {
+    const { editor, container } = await openEditor();
+    select(editor);
+    editor.setSelectionRange(0, 0);
+    fireEvent.select(editor);
+    expect(screen.getByLabelText('편집 AI에 고정한 원문')).toHaveTextContent(selected);
+    select(editor, '뒤 문장.');
+    expect(screen.getByLabelText('편집 AI에 고정한 원문')).toHaveTextContent('뒤 문장.');
+    expect(container.querySelector('.story-editor-highlight mark')).toHaveTextContent('뒤 문장.');
+    fireEvent.click(screen.getByRole('button', { name: '편집 AI 선택 해제' }));
+    expect(screen.queryByLabelText('편집 AI에 고정한 원문')).not.toBeInTheDocument();
+    expect(container.querySelector('.story-editor-highlight')).toBeNull();
+    expect(screen.getByText('원고 끝에서 이어쓰기')).toBeInTheDocument();
+    await ask();
+    expect(vi.mocked(api.editorAi.send).mock.calls[0]![2].selection.text).toBe('');
+  });
+
+  it('requires a fresh attachment when the author changes the manuscript underneath a pinned passage', async () => {
+    const { editor, container } = await openEditor();
+    select(editor);
+    fireEvent.change(editor, { target: { value: `새 문장.\n${source}` } });
+    expect(container.querySelector('.story-editor-highlight')).toBeNull();
+    expect(screen.getByRole('alert')).toHaveTextContent('원고가 바뀌었어요.');
+    const input = screen.getByRole('textbox', { name: '편집 AI에게 보낼 메시지' });
+    fireEvent.change(input, { target: { value: '긴장감을 높여줘' } });
+    expect(screen.getByRole('button', { name: '편집 AI에 보내기' })).toBeDisabled();
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(api.editorAi.send).not.toHaveBeenCalled();
+    select(editor);
+    await ask();
+    expect(vi.mocked(api.editorAi.send).mock.calls[0]![2]).toMatchObject({ expectedRevision: 2,
+      selection: { start: editor.value.indexOf(selected), end: editor.value.indexOf(selected) + selected.length, text: selected } });
+  });
+
   it('sends the exact selection through the separate editor API, applies it, and continues with the replacement selected', async () => {
     const { editor } = await openEditor();
     select(editor);

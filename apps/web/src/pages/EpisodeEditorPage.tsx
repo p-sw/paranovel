@@ -35,6 +35,7 @@ import { characterCount, createIdempotencyKey, cx } from '../lib';
 import DraftPreview, { DraftGenerationStatus } from '../components/DraftPreview';
 import ContinuityIssues from '../components/ContinuityIssues';
 import EditorAiPanel from '../components/EditorAiPanel';
+import StoryEditor from '../components/StoryEditor';
 import { useContinuityRepair } from '../useContinuityRepair';
 import { rangeStillMatches, replaceUtf16Range } from '../editorText';
 import type {
@@ -85,6 +86,8 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [saveError, setSaveError] = useState('');
   const [selection, setSelection] = useState<SelectionSnapshot | null>(null);
+  const [editorAiSelection, setEditorAiSelection] = useState<SelectionSnapshot | null>(null);
+  const editorAiSelectionRef = useRef<SelectionSnapshot | null>(null);
   const [continuationOpen, setContinuationOpen] = useState(false);
   const [replacementOpen, setReplacementOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
@@ -236,6 +239,11 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
     return () => window.clearTimeout(timeout);
   }, [draft, episodeId, recoveryBackup, saveNow]);
 
+  const rememberEditorSelection = useCallback((snapshot: SelectionSnapshot | null) => {
+    editorAiSelectionRef.current = snapshot;
+    setEditorAiSelection(snapshot);
+  }, []);
+
   const captureSelection = useCallback(() => {
     const element = textareaRef.current;
     if (!element) return null;
@@ -249,8 +257,21 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
       revision: revisionRef.current,
     };
     setSelection(snapshot);
+    // The editor cursor and the AI's attached passage have separate lifetimes.
+    // Focus transfers, collapsed ranges and delayed select events must not
+    // replace an attached passage. Only a new selection or explicit clear does.
+    if (document.activeElement === element && (snapshot.text || !editorAiSelectionRef.current?.text)) {
+      rememberEditorSelection(snapshot);
+    }
     return snapshot;
-  }, []);
+  }, [rememberEditorSelection]);
+
+  const clearEditorSelection = () => {
+    rememberEditorSelection(null);
+    setSelection(null);
+    const element = textareaRef.current;
+    if (element) element.setSelectionRange(element.selectionEnd, element.selectionEnd);
+  };
 
   const episodes = [...(episodeListQuery.data ?? [])].sort((a, b) => a.number - b.number);
   const currentIndex = episodes.findIndex((item) => item.id === episodeId);
@@ -269,7 +290,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
   const editorLocked = isBusy || editorApplying || Boolean(recoveryBackup);
 
   const prepareEditorRequest = async (content: string, clientMessageId: string): Promise<EditorAiInput> => {
-    const target = selection;
+    const target = editorAiSelectionRef.current;
     const saved = await saveNow();
     if (!saved || saved.content !== draftRef.current.content) throw new Error('원고 저장이 끝난 뒤 다시 시도해 주세요.');
     if (target && target.content !== saved.content) throw new Error('원고가 변경되었습니다. 수정할 부분을 다시 선택해 주세요.');
@@ -309,9 +330,11 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
       }
       const end = edit.start + edit.replacement.length;
       if (rangeStillMatches(updated.content, edit.start, end, edit.replacement)) {
-        setSelection({ start: edit.start, end, text: edit.replacement, content: updated.content, revision: updated.revision });
+        const snapshot = { start: edit.start, end, text: edit.replacement, content: updated.content, revision: updated.revision };
+        setSelection(snapshot);
+        rememberEditorSelection(snapshot);
         requestAnimationFrame(() => textareaRef.current?.setSelectionRange(edit.start, end));
-      } else setSelection(null);
+      } else clearEditorSelection();
     } finally {
       editorApplyingRef.current = false;
       setEditorApplying(false);
@@ -327,7 +350,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
     };
     draftRef.current = recovered;
     setDraft(recovered);
-    setSelection(null);
+    clearEditorSelection();
     recoveryPendingRef.current = false;
     setRecoveryBackup(null);
     setSaveState('idle');
@@ -405,9 +428,9 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
             placeholder="회차 제목"
             disabled={editorLocked}
           />
-          <textarea
-            ref={textareaRef}
-            className="story-editor"
+          <StoryEditor
+            textareaRef={textareaRef}
+            highlight={editorAiOpen ? editorAiSelection : null}
             aria-label="회차 본문"
             value={draft.content}
             placeholder="첫 문장을 써 보세요. 이곳은 서식 없는 원고 편집기입니다."
@@ -417,6 +440,10 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
             onSelect={captureSelection}
             onPointerUp={captureSelection}
             onKeyUp={captureSelection}
+            onBlur={() => {
+              const snapshot = captureSelection();
+              if (snapshot?.text) rememberEditorSelection(snapshot);
+            }}
           />
         </div>
 
@@ -459,9 +486,9 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
       </section>
 
       <EditorAiPanel projectId={projectId} episodeId={episodeId} open={editorAiOpen}
-        disabled={editorLocked || replacementOpen} selection={selection} content={draft.content} revision={revision}
+        disabled={editorLocked || replacementOpen} selection={editorAiSelection} content={draft.content} revision={revision}
         dirty={draft.content !== savedRef.current.content || draft.title !== savedRef.current.title || draft.direction !== savedRef.current.direction}
-        onClose={() => setEditorAiOpen(false)} onClearSelection={() => setSelection(null)}
+        onClose={() => setEditorAiOpen(false)} onClearSelection={clearEditorSelection}
         prepareRequest={prepareEditorRequest} onApply={applyEditorEdit} />
 
       <aside className="editor-context-panel">
