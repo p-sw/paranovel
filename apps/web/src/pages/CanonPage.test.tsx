@@ -14,10 +14,10 @@ const appearance: CanonEntry = {
   createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 };
 
-function renderPage() {
+function renderPage(path = '/projects/story/canon') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return render(<QueryClientProvider client={client}>
-    <MemoryRouter initialEntries={['/projects/story/canon']}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId" element={<Outlet context={{ project: { title: '기록의 문' } }} />}>
           <Route path="canon" element={<CanonPage />} />
@@ -28,6 +28,88 @@ function renderPage() {
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+describe('pending canon filter', () => {
+  it('does not claim there are no pending entries when loading fails', async () => {
+    vi.spyOn(api.canon, 'list').mockRejectedValue(new Error('정사 조회 실패'));
+
+    renderPage('/projects/story/canon?status=PENDING');
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('정사 조회 실패');
+    expect(screen.queryByText('검토 중인 정사가 없어요')).not.toBeInTheDocument();
+    expect(screen.queryByText('아직 확정된 설정이 없어요')).not.toBeInTheDocument();
+  });
+
+  it('combines pending status with category and search while allowing all statuses again', async () => {
+    const pendingCharacter: CanonEntry = { ...appearance, id: 'pending-character', category: 'CHARACTER', status: 'PENDING' };
+    const pendingLocation: CanonEntry = { ...appearance, id: 'pending-location', category: 'LOCATION', name: '왕궁', aliases: [], content: '왕궁의 비밀 통로', status: 'PENDING' };
+    vi.spyOn(api.canon, 'list').mockResolvedValue([
+      pendingCharacter, pendingLocation, appearance,
+      { ...appearance, id: 'accepted', status: 'ACCEPTED' },
+      { ...appearance, id: 'rejected', status: 'REJECTED' },
+    ]);
+    const user = userEvent.setup();
+    renderPage();
+    const list = within(await screen.findByRole('region', { name: '정사 목록' }));
+    expect(list.getAllByRole('article')).toHaveLength(5);
+    await user.click(screen.getByRole('checkbox', { name: '검토 중만 보기' }));
+    expect(list.getAllByRole('article')).toHaveLength(2);
+    expect(list.getAllByRole('button', { name: '정사로 승인' })).toHaveLength(2);
+
+    await user.type(screen.getByRole('textbox', { name: '정사 검색' }), '기록관');
+    expect(list.getAllByRole('article')).toHaveLength(1);
+    expect(list.getByRole('heading', { name: '하린' })).toBeVisible();
+    await user.click(screen.getByRole('tab', { name: '장소' }));
+    expect(screen.queryByRole('region', { name: '정사 목록' })).not.toBeInTheDocument();
+    expect(screen.getByText('조건에 맞는 설정이 없어요')).toBeVisible();
+    await user.clear(screen.getByRole('textbox', { name: '정사 검색' }));
+    expect(screen.getByRole('heading', { name: '왕궁' })).toBeVisible();
+    await user.click(screen.getByRole('tab', { name: '전체' }));
+    await user.click(screen.getByRole('checkbox', { name: '검토 중만 보기' }));
+    expect(within(screen.getByRole('region', { name: '정사 목록' })).getAllByRole('article')).toHaveLength(5);
+  });
+
+  it('starts filtered from the warning link and removes approved entries from the pending list', async () => {
+    const pending: CanonEntry = { ...appearance, status: 'PENDING' };
+    const list = vi.spyOn(api.canon, 'list').mockResolvedValue([pending]);
+    vi.spyOn(api.canon, 'update').mockImplementation(async () => {
+      list.mockResolvedValue([appearance]);
+      return appearance;
+    });
+    const user = userEvent.setup();
+    renderPage('/projects/story/canon?status=PENDING');
+    expect(screen.getByRole('checkbox', { name: '검토 중만 보기' })).toBeChecked();
+    await user.click(await screen.findByRole('button', { name: '정사로 승인' }));
+    expect(await screen.findByText('검토 중인 정사가 없어요')).toBeVisible();
+    expect(screen.queryByRole('region', { name: '정사 목록' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '첫 설정 추가' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('checkbox', { name: '검토 중만 보기' }));
+    expect(screen.getByRole('heading', { name: '하린' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: '정사로 승인' })).not.toBeInTheDocument();
+  });
+
+  it('shows approval failures and blocks duplicate approvals while the request is pending', async () => {
+    const pending: CanonEntry = { ...appearance, status: 'PENDING' };
+    vi.spyOn(api.canon, 'list').mockResolvedValue([pending]);
+    let rejectApproval!: (reason: Error) => void;
+    const update = vi.spyOn(api.canon, 'update').mockImplementation(() => new Promise((_resolve, reject) => {
+      rejectApproval = reject;
+    }));
+    const user = userEvent.setup();
+    renderPage('/projects/story/canon?status=PENDING');
+    const approve = await screen.findByRole('button', { name: '정사로 승인' });
+
+    await user.click(approve);
+    expect(approve).toBeDisabled();
+    expect(approve).toHaveAttribute('aria-busy', 'true');
+    await user.click(approve);
+    expect(update).toHaveBeenCalledTimes(1);
+
+    rejectApproval(new Error('승인 충돌'));
+    expect(await screen.findByText('정사 승인에 실패했습니다. 승인 충돌')).toBeVisible();
+    expect(approve).toBeEnabled();
+  });
+});
 
 describe('character appearance canon editor', () => {
   it('shows visual-detail guidance and saves a separate appearance entry', async () => {

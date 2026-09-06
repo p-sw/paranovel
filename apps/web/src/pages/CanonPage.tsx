@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import * as Tabs from '@radix-ui/react-tabs';
 import { BookKey, Check, Clock3, Plus, Search, Sparkles, Trash2, UserRound } from 'lucide-react';
-import { useOutletContext, useParams } from 'react-router-dom';
+import { useOutletContext, useParams, useSearchParams } from 'react-router-dom';
 import { api, messageOf } from '../api/client';
 import { CANON_LABELS, cx } from '../lib';
 import type { CanonCategory, CanonEntry } from '../types';
@@ -32,6 +32,8 @@ export default function CanonPage() {
   const { projectId = '' } = useParams();
   const { project } = useOutletContext<ProjectOutletContext>();
   const queryClient = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const pendingOnly = searchParams.get('status') === 'PENDING';
   const [filter, setFilter] = useState<'ALL' | CanonCategory>('ALL');
   const [search, setSearch] = useState('');
   const [editing, setEditing] = useState<CanonEntry | 'new' | null>(null);
@@ -130,12 +132,14 @@ export default function CanonPage() {
   const entries = useMemo(() => {
     const keyword = search.trim().toLocaleLowerCase('ko-KR');
     return (canonQuery.data ?? []).filter((entry) => {
+      if (pendingOnly && entry.status !== 'PENDING') return false;
       if (filter !== 'ALL' && entry.category !== filter) return false;
       if (!keyword) return true;
       return [entry.name, entry.content, ...entry.aliases].some((text) => text.toLocaleLowerCase('ko-KR').includes(keyword));
     });
-  }, [canonQuery.data, filter, search]);
+  }, [canonQuery.data, filter, search, pendingOnly]);
   const pendingCount = canonQuery.data?.filter((entry) => entry.status === 'PENDING').length ?? 0;
+  const hasSearchOrCategory = Boolean(search.trim()) || filter !== 'ALL';
 
   return (
     <div className="page-container">
@@ -157,6 +161,7 @@ export default function CanonPage() {
         <div className="review-banner"><Sparkles className="size-5" /><span><strong>{pendingCount}개의 설정 후보</strong>가 승인을 기다리고 있어요.</span></div>
       ) : null}
       {generateMutation.isError ? <FieldError>{messageOf(generateMutation.error)}</FieldError> : null}
+      {approveMutation.isError ? <FieldError>정사 승인에 실패했습니다. {messageOf(approveMutation.error)}</FieldError> : null}
       {acceptGeneratedMessage ? <div className={acceptGeneratedFailed ? 'warning-box mb-5' : 'info-box mb-5'} role={acceptGeneratedFailed ? 'alert' : 'status'}>{acceptGeneratedMessage}</div> : null}
 
       {generated.length ? (
@@ -187,11 +192,27 @@ export default function CanonPage() {
       ) : null}
 
       <div className="filter-row">
-        <label className="search-field">
-          <Search className="size-4" aria-hidden="true" />
-          <span className="sr-only">정사 검색</span>
-          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="인물, 사건, 설정 검색" />
-        </label>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <label className="search-field min-w-0 sm:flex-1">
+            <Search className="size-4" aria-hidden="true" />
+            <span className="sr-only">정사 검색</span>
+            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="인물, 사건, 설정 검색" />
+          </label>
+          <label className="flex min-h-11 shrink-0 cursor-pointer items-center gap-2 text-sm text-muted">
+            <input
+              type="checkbox"
+              className="size-4 accent-plum-600"
+              checked={pendingOnly}
+              onChange={(event) => {
+                const next = new URLSearchParams(searchParams);
+                if (event.target.checked) next.set('status', 'PENDING');
+                else next.delete('status');
+                setSearchParams(next, { replace: true });
+              }}
+            />
+            검토 중만 보기
+          </label>
+        </div>
         <Tabs.Root value={filter} onValueChange={(value) => setFilter(value as typeof filter)}>
           <Tabs.List className="filter-tabs" aria-label="정사 분류">
             {categoryGroups.map((group) => <Tabs.Trigger className="filter-chip" key={group.value} value={group.value}>{group.label}</Tabs.Trigger>)}
@@ -201,12 +222,12 @@ export default function CanonPage() {
 
       {canonQuery.isPending ? <SkeletonCards count={6} /> : null}
       {canonQuery.isError ? <ErrorState message={messageOf(canonQuery.error)} onRetry={() => canonQuery.refetch()} /> : null}
-      {!canonQuery.isPending && !entries.length ? (
+      {canonQuery.isSuccess && !entries.length ? (
         <EmptyState
           icon={<BookKey className="size-8" />}
-          title={search || filter !== 'ALL' ? '조건에 맞는 설정이 없어요' : '아직 확정된 설정이 없어요'}
-          description={search || filter !== 'ALL' ? '검색어나 분류를 바꿔 보세요.' : '인물과 세계의 규칙을 기록하면 AI가 매번 참고합니다.'}
-          action={!search && filter === 'ALL' ? <Button onClick={() => setEditing('new')}><Plus className="size-4" /> 첫 설정 추가</Button> : undefined}
+          title={hasSearchOrCategory ? '조건에 맞는 설정이 없어요' : pendingOnly ? '검토 중인 정사가 없어요' : '아직 확정된 설정이 없어요'}
+          description={hasSearchOrCategory ? '검색어나 분류를 바꿔 보세요.' : pendingOnly ? '새로 검토할 정사가 생기면 여기에 표시돼요.' : '인물과 세계의 규칙을 기록하면 AI가 매번 참고합니다.'}
+          action={!pendingOnly && !hasSearchOrCategory ? <Button onClick={() => setEditing('new')}><Plus className="size-4" /> 첫 설정 추가</Button> : undefined}
         />
       ) : null}
 
@@ -227,7 +248,14 @@ export default function CanonPage() {
                 <p className="canon-content">{entry.content}</p>
               </button>
               <div className="canon-card-actions">
-                {entry.status === 'PENDING' ? <Button size="sm" onClick={() => approveMutation.mutate(entry)}><Check className="size-4" /> 정사로 승인</Button> : null}
+                {entry.status === 'PENDING' ? (
+                  <Button
+                    size="sm"
+                    busy={approveMutation.isPending && approveMutation.variables?.id === entry.id}
+                    disabled={approveMutation.isPending}
+                    onClick={() => approveMutation.mutate(entry)}
+                  ><Check className="size-4" /> 정사로 승인</Button>
+                ) : null}
                 <button onClick={() => setDeleting(entry)} aria-label={`${entry.name} 삭제`}><Trash2 className="size-4" /></button>
               </div>
             </article>

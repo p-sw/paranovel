@@ -57,6 +57,7 @@ function ProjectEpisodes({ projectId }: { projectId: string }) {
   const [creatorOpen, setCreatorOpen] = useState(false);
   const [resumingEpisode, setResumingEpisode] = useState<Episode | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
+  const [pendingCanonCount, setPendingCanonCount] = useState(0);
   const [deleting, setDeleting] = useState<Episode | null>(null);
   const [draft, setDraft] = useState<OrderDraft | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -64,6 +65,24 @@ function ProjectEpisodes({ projectId }: { projectId: string }) {
     queryKey: ['episode-order', projectId],
     queryFn: () => api.episodes.order(projectId),
     enabled: !draft,
+  });
+  const checkCanonMutation = useMutation({
+    mutationFn: async () => {
+      const entries = await queryClient.fetchQuery({
+        queryKey: ['canon', projectId],
+        queryFn: () => api.canon.list(projectId),
+        staleTime: 0,
+        retry: false,
+      });
+      return entries.filter((entry) => entry.status === 'PENDING').length;
+    },
+    onSuccess: (count) => {
+      setPendingCanonCount(count);
+      if (!count) {
+        setResumingEpisode(null);
+        setCreatorOpen(true);
+      }
+    },
   });
   const invalidateEpisodes = () => {
     void queryClient.invalidateQueries({ queryKey: ['episodes', projectId] });
@@ -119,9 +138,7 @@ function ProjectEpisodes({ projectId }: { projectId: string }) {
   const locked = busy || dragging;
   const conflict = isConflict(saveMutation.error);
   const openCreator = () => {
-    if (editing) return;
-    setResumingEpisode(null);
-    setCreatorOpen(true);
+    if (!editing && !checkCanonMutation.isPending) checkCanonMutation.mutate();
   };
   const save = () => {
     if (draft && !locked && !conflict) saveMutation.mutate(draft);
@@ -149,7 +166,7 @@ function ProjectEpisodes({ projectId }: { projectId: string }) {
           ) : (
             <Button
               variant="secondary"
-              disabled={!orderQuery.data || !items.length || orderQuery.isFetching || deleteMutation.isPending}
+              disabled={!orderQuery.data || !items.length || orderQuery.isFetching || deleteMutation.isPending || checkCanonMutation.isPending}
               onClick={() => {
                 if (!orderQuery.data) return;
                 saveMutation.reset();
@@ -158,12 +175,18 @@ function ProjectEpisodes({ projectId }: { projectId: string }) {
               }}
             ><Pencil className="size-4" /> 수정</Button>
           )}
-          <Button disabled={editing} onClick={openCreator}>
+          <Button disabled={editing} busy={checkCanonMutation.isPending} onClick={openCreator}>
             <Plus className="size-4" /> 새 회차
           </Button>
         </div>
       </header>
 
+      {checkCanonMutation.isError ? (
+        <ErrorState
+          message={`검토 중인 정사를 확인하지 못했어요. ${messageOf(checkCanonMutation.error)}`}
+          onRetry={openCreator}
+        />
+      ) : null}
       {editing ? (
         <p className="mb-4 text-sm text-muted" id="episode-order-instructions">
           손잡이를 끌어 회차 번호를 바꾸세요. 빈 회차는 바로 삭제할 수 있어요.
@@ -190,7 +213,7 @@ function ProjectEpisodes({ projectId }: { projectId: string }) {
           icon={<BookOpenText className="size-8" />}
           title="첫 회차가 기다리고 있어요"
           description="원하는 내용을 적거나 바로 다음으로 넘어가세요. AI가 제목과 전개 방향을 만들어요."
-          action={<Button onClick={openCreator}><FilePlus2 className="size-4" /> 첫 회차 만들기</Button>}
+          action={<Button busy={checkCanonMutation.isPending} onClick={openCreator}><FilePlus2 className="size-4" /> 첫 회차 만들기</Button>}
         />
       ) : null}
       {editing && !items.length ? (
@@ -258,6 +281,20 @@ function ProjectEpisodes({ projectId }: { projectId: string }) {
       ) : null}
 
       {creatorOpen ? <CreateEpisodeSheet open={creatorOpen} onOpenChange={setCreatorOpen} projectId={projectId} initialEpisode={resumingEpisode} /> : null}
+      <ConfirmDialog
+        open={pendingCanonCount > 0}
+        onOpenChange={(open) => !open && setPendingCanonCount(0)}
+        title="검토 중인 정사가 있어요"
+        description={`검토 중인 정사 ${pendingCanonCount}개는 승인 전까지 새 회차 집필의 정사 자료에 포함되지 않아요. 먼저 정사를 검토하거나 그대로 회차 만들기를 진행할 수 있어요.`}
+        confirmLabel="계속 만들기"
+        confirmVariant="primary"
+        extraAction={<Link className="button button-secondary button-md" to={`/projects/${projectId}/canon?status=PENDING`}>정사 검토하기</Link>}
+        onConfirm={() => {
+          setPendingCanonCount(0);
+          setResumingEpisode(null);
+          setCreatorOpen(true);
+        }}
+      />
       <ConfirmDialog
         open={Boolean(deleting)}
         onOpenChange={(open) => !open && setDeleting(null)}

@@ -143,6 +143,8 @@ export function ConfirmDialog({
   title,
   description,
   confirmLabel = '삭제',
+  confirmVariant = 'danger',
+  extraAction,
   onConfirm,
   busy,
 }: {
@@ -151,6 +153,8 @@ export function ConfirmDialog({
   title: string;
   description: string;
   confirmLabel?: string;
+  confirmVariant?: ButtonProps['variant'];
+  extraAction?: ReactNode;
   onConfirm: () => void;
   busy?: boolean;
 }) {
@@ -167,7 +171,8 @@ export function ConfirmDialog({
             <AlertDialog.Cancel asChild>
               <Button variant="secondary">취소</Button>
             </AlertDialog.Cancel>
-            <Button variant="danger" busy={busy} onClick={onConfirm}>
+            {extraAction}
+            <Button variant={confirmVariant} busy={busy} onClick={onConfirm}>
               {confirmLabel}
             </Button>
           </div>

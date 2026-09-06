@@ -5,13 +5,20 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Outlet, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { EpisodeOrder } from '@paranovel/contracts';
 import { api } from '../api/client';
-import type { Episode } from '../types';
+import type { CanonEntry, Episode } from '../types';
+import CanonPage from './CanonPage';
 import EpisodesPage from './EpisodesPage';
 
 const proposal = {
   title: '닫힌 문 너머',
   direction: '기록관이 사라진 동료의 흔적을 따라 왕궁에 들어간다.',
   conflicts: [],
+};
+
+const pendingCanon: CanonEntry = {
+  id: 'pending', projectId: 'story', category: 'CHARACTER', name: '검토할 인물', aliases: [],
+  content: '기억을 읽는 기록관', metadata: {}, revision: 1, status: 'PENDING',
+  createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 };
 
 const incompleteEpisode: Episode = {
@@ -35,9 +42,13 @@ function EditorRoute() {
   return <div data-testid="editor-route">{JSON.stringify({ episodeId, state: location.state })}</div>;
 }
 
-function renderPage(initialEntry = '/projects/story/episodes', cachedOrder?: EpisodeOrder) {
+function renderPage(cachedCanon?: CanonEntry[], initialEntry = '/projects/story/episodes', cachedOrder?: EpisodeOrder) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   if (cachedOrder) queryClient.setQueryData(['episode-order', 'story'], cachedOrder);
+  if (cachedCanon) {
+    queryClient.setQueryDefaults(['canon', 'story'], { staleTime: Infinity });
+    queryClient.setQueryData(['canon', 'story'], cachedCanon);
+  }
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[initialEntry]}>
@@ -47,6 +58,7 @@ function renderPage(initialEntry = '/projects/story/episodes', cachedOrder?: Epi
           <Route path="/projects/:projectId" element={<Outlet context={{ project: { genreTags: ['판타지'], logline: '기록관의 모험' } }} />}>
             <Route path="episodes" element={<EpisodesPage />} />
             <Route path="episodes/:episodeId" element={<EditorRoute />} />
+            <Route path="canon" element={<CanonPage />} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -85,6 +97,7 @@ beforeEach(() => {
     return episode;
   });
   vi.spyOn(api.episodes, 'propose').mockResolvedValue(proposal);
+  vi.spyOn(api.canon, 'list').mockResolvedValue([]);
 });
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -98,6 +111,83 @@ async function openCreator() {
 }
 
 describe('new episode flow', () => {
+  it.each(['새 회차', '첫 회차 만들기'])('checks current canon before %s and lets the user cancel or continue past the warning', async (entryPoint) => {
+    vi.mocked(api.canon.list).mockResolvedValue([
+      pendingCanon,
+      { ...pendingCanon, id: 'pending-location', category: 'LOCATION' },
+      { ...pendingCanon, id: 'active', status: 'ACTIVE' },
+      { ...pendingCanon, id: 'accepted', status: 'ACCEPTED' },
+      { ...pendingCanon, id: 'rejected', status: 'REJECTED' },
+    ]);
+    const generate = vi.spyOn(api.episodes, 'generate').mockResolvedValue({ content: '새 회차 본문', issues: [], blocked: false });
+    const create = vi.mocked(api.episodes.create);
+    const user = userEvent.setup();
+    renderPage([]);
+    await user.click(await screen.findByRole('button', { name: entryPoint }));
+
+    const warning = await screen.findByRole('alertdialog', { name: '검토 중인 정사가 있어요' });
+    expect(warning).toHaveAccessibleDescription(/검토 중인 정사 2개는 승인 전까지/);
+    expect(screen.queryByRole('dialog', { name: '새 회차 만들기' })).not.toBeInTheDocument();
+    expect(api.episodes.propose).not.toHaveBeenCalled();
+    expect(generate).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    await user.click(within(warning).getByRole('button', { name: '취소' }));
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: entryPoint }));
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: '계속 만들기' }));
+    expect(api.canon.list).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    await screen.findByRole('dialog', { name: '새 회차 만들기' });
+    await user.click(screen.getByRole('button', { name: '다음' }));
+    await user.click(await screen.findByRole('button', { name: 'AI 회차 작성' }));
+    expect(await screen.findByTestId('editor-route')).toHaveTextContent(JSON.stringify({ episodeId: 'episode-1', state: { generateEpisode: true } }));
+    expect(generate).not.toHaveBeenCalled();
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens only pending canon from the warning without starting episode planning', async () => {
+    vi.mocked(api.canon.list).mockResolvedValue([
+      pendingCanon, { ...pendingCanon, id: 'active', status: 'ACTIVE', name: '확정된 인물' },
+    ]);
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole('button', { name: '새 회차' }));
+    const warning = await screen.findByRole('alertdialog');
+    await user.click(within(warning).getByRole('link', { name: '정사 검토하기' }));
+
+    expect(await screen.findByRole('checkbox', { name: '검토 중만 보기' })).toBeChecked();
+    expect(await screen.findByRole('heading', { name: pendingCanon.name })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: '확정된 인물' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(api.episodes.propose).not.toHaveBeenCalled();
+  });
+
+  it('waits for the canon check, keeps creation closed on failure, and retries with the latest status', async () => {
+    let fail!: (reason: Error) => void;
+    vi.mocked(api.canon.list)
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }))
+      .mockResolvedValueOnce([{ ...pendingCanon, status: 'ACTIVE' }]);
+    const user = userEvent.setup();
+    renderPage([pendingCanon]);
+    await user.click(screen.getByRole('button', { name: '새 회차' }));
+    expect(screen.getByRole('button', { name: '새 회차' })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: '첫 회차 만들기' })).toBeDisabled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(api.episodes.propose).not.toHaveBeenCalled();
+
+    await act(async () => fail(new Error('정사 조회 실패')));
+    expect(await screen.findByRole('alert')).toHaveTextContent('검토 중인 정사를 확인하지 못했어요. 정사 조회 실패');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '다시 시도' }));
+    expect(await screen.findByRole('dialog', { name: '새 회차 만들기' })).toBeVisible();
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(screen.queryByText(/정사 조회 실패/)).not.toBeInTheDocument();
+    expect(api.canon.list).toHaveBeenCalledTimes(2);
+  });
+
   it('repeatedly refines and persists the same episode with revision context before starting AI writing', async () => {
     vi.mocked(api.episodes.propose).mockResolvedValueOnce({ ...proposal, conflicts: ['처음 제안에서 확인할 충돌'] });
     const firstRefinement = {
@@ -434,7 +524,7 @@ describe('incomplete episode plans', () => {
 
   it('opens an incomplete plan directly from the resume URL without proposing or creating again', async () => {
     persistedEpisodes = [incompleteEpisode];
-    renderPage('/projects/story/episodes?resume=episode-1');
+    renderPage(undefined, '/projects/story/episodes?resume=episode-1');
 
     expect(await screen.findByRole('dialog', { name: '새 회차 만들기' })).toBeVisible();
     expect(screen.getByLabelText('회차 제목')).toHaveValue(proposal.title);
@@ -577,7 +667,7 @@ describe('episode resume navigation races', () => {
     };
     let finish!: (order: EpisodeOrder) => void;
     vi.mocked(api.episodes.order).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
-    renderPage('/projects/story/episodes?resume=episode-1', cachedOrder);
+    renderPage(undefined, '/projects/story/episodes?resume=episode-1', cachedOrder);
     expect(await screen.findByRole('link', { name: /닫힌 문 너머/ })).toBeVisible();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
