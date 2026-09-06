@@ -9,10 +9,17 @@ import { MemoryService } from '../memory/memory.service';
 import { serializeError } from '../shared/error-log';
 import { id, now, parseJson, stringifyJson } from '../shared/utils';
 import { EpisodesService } from './episodes.service';
-import { editorAiInput, editorReplySchema, editorReplyValidator, editorTool, editToolInput } from './editor-ai.schemas';
+import {
+  editorAiInput, editorReplySchema, editorReplyValidator, editorTool, editToolInput,
+  readManuscriptInput, readManuscriptTool, replaceTextInput, replaceTextTool,
+} from './editor-ai.schemas';
 
 const FAILED_REPLY = '편집 AI가 답변을 완료하지 못했습니다. 다시 시도해 주세요.';
 type MessageRow = typeof editorAiMessages.$inferSelect;
+
+function splitsCharacter(content: string, offset: number) {
+  return /[\uD800-\uDBFF]/.test(content[offset - 1] ?? '') && /[\uDC00-\uDFFF]/.test(content[offset] ?? '');
+}
 
 @Injectable()
 export class EditorAiService implements OnModuleInit {
@@ -69,7 +76,9 @@ export class EditorAiService implements OnModuleInit {
       signal?.throwIfAborted();
       const { start, end } = input.selection;
       const staged: { edit: EditorAiEdit | null } = { edit: null };
-      const tool = editorTool(end > start);
+      const hasSelection = end > start;
+      const tool = editorTool(hasSelection);
+      const readTools = hasSelection ? [tool] : [tool, replaceTextTool, readManuscriptTool];
       const result = await this.ai.completeChat({
         task: 'episode_editor', promptId: 'episode-editor', projectId, episodeId, modelRole: 'WRITING',
         signal, maxTokens: 12_000, toolMaxTokens: 16_000,
@@ -81,6 +90,7 @@ export class EditorAiService implements OnModuleInit {
           episode_context: {
             number: turn.episode.number, title: turn.episode.title, direction: turn.episode.direction,
             revision: turn.episode.revision, totalCharacters: turn.episode.content.length,
+            editingMode: hasSelection ? 'SELECTION' : 'AUTO',
             textBefore: turn.episode.content.slice(Math.max(0, start - 30_000), start),
             selection: input.selection,
             textAfter: turn.episode.content.slice(end, end + 30_000),
@@ -89,24 +99,50 @@ export class EditorAiService implements OnModuleInit {
         },
         history: this.modelHistory(projectId, episodeId, input.clientMessageId),
         schema: { name: 'episode_editor_reply', value: editorReplySchema }, validator: editorReplyValidator,
-        readTools: [tool],
+        readTools,
         readTool: async (name, argumentsJson) => {
           signal?.throwIfAborted();
-          if (name !== tool.function.name) return { error: '선택 범위에 제공된 편집 도구만 사용할 수 있습니다.' };
-          if (staged.edit) return { error: '수정안은 이미 준비되었습니다. 추가 수정은 다음 대화에서 요청받으세요.' };
+          if (!readTools.some((item) => item.function.name === name)) return { error: '현재 요청에 제공된 편집 도구만 사용할 수 있습니다.' };
           let args: unknown;
           try { args = JSON.parse(argumentsJson); } catch { return { error: '도구 인자는 올바른 JSON이어야 합니다.' }; }
-          const edit = editToolInput.safeParse(args);
-          if (!edit.success) return { error: 'title과 replacement를 확인해 주세요.' };
-          if (edit.data.replacement === input.selection.text) return { error: '수정할 새 본문을 작성해 주세요.' };
-          if (turn.episode.content.length - (end - start) + edit.data.replacement.length > 1_000_000) {
+          const manuscript = turn.episode.content;
+          if (name === readManuscriptTool.function.name) {
+            const range = readManuscriptInput.safeParse(args);
+            if (!range.success || range.data.start > manuscript.length) return { error: '원고 안의 start와 1~20,000 사이의 length를 지정해 주세요.' };
+            let from = range.data.start;
+            let to = Math.min(manuscript.length, from + range.data.length);
+            if (splitsCharacter(manuscript, from)) from -= 1;
+            if (splitsCharacter(manuscript, to)) to += 1;
+            return { start: from, end: to, text: manuscript.slice(from, to), totalCharacters: manuscript.length };
+          }
+          if (staged.edit) return { error: '수정안은 이미 준비되었습니다. 추가 수정은 다음 대화에서 요청받으세요.' };
+          let target = input.selection;
+          let edit: { title: string; replacement: string };
+          if (name === replaceTextTool.function.name) {
+            const parsedEdit = replaceTextInput.safeParse(args);
+            if (!parsedEdit.success) return { error: 'title, original, replacement를 확인해 주세요. original에는 수정할 원문이 필요합니다.' };
+            const { original, title, replacement } = parsedEdit.data;
+            const from = manuscript.indexOf(original);
+            if (from < 0) return { error: 'original이 현재 원고와 일치하지 않습니다. 원고를 읽고 공백과 줄바꿈까지 그대로 복사해 주세요.' };
+            if (manuscript.indexOf(original, from + 1) >= 0) return { error: '같은 원문이 여러 곳에 있습니다. 수정할 위치가 하나로 정해지도록 앞뒤 문맥을 original에 포함해 주세요.' };
+            target = { start: from, end: from + original.length, text: original };
+            if (splitsCharacter(manuscript, target.start) || splitsCharacter(manuscript, target.end)) return { error: '문자 중간을 나눌 수 없습니다. 이모지 등은 온전한 문자로 포함해 주세요.' };
+            edit = { title, replacement };
+          } else {
+            const parsedEdit = editToolInput.safeParse(args);
+            if (!parsedEdit.success) return { error: 'title과 replacement를 확인해 주세요.' };
+            edit = parsedEdit.data;
+          }
+          if (edit.replacement === target.text) return { error: '수정할 새 본문을 작성해 주세요.' };
+          if (manuscript.length - (target.end - target.start) + edit.replacement.length > 1_000_000) {
             return { error: '원고는 1,000,000자 이하여야 합니다.' };
           }
           staged.edit = {
-            ...edit.data, start, end, original: input.selection.text,
+            ...edit, start: target.start, end: target.end, original: target.text,
             baseRevision: turn.episode.revision, status: 'PENDING',
           };
-          return { status: 'PREVIEW_READY', title: edit.data.title, message: '수정안을 준비했습니다. 사용자가 적용 버튼을 눌러야 원고에 반영됩니다.' };
+          return { status: 'PREVIEW_READY', title: edit.title, start: target.start, end: target.end,
+            message: '전후 비교 카드에 표시할 수정안을 준비했습니다. 사용자가 수락하고 적용해야 원고에 반영됩니다.' };
         },
       }, (runId) => {
         this.database.orm.update(editorAiMessages).set({ runId }).where(eq(editorAiMessages.id, turn.assistantId)).run();
@@ -152,13 +188,12 @@ export class EditorAiService implements OnModuleInit {
   }
 
   private assertRevision(actual: number, expected: number) {
-    if (actual !== expected) throw new ConflictException('원고가 변경되었습니다. 현재 원고에서 다시 선택하고 편집 AI에 요청해 주세요.');
+    if (actual !== expected) throw new ConflictException('원고가 변경되었습니다. 현재 원고를 기준으로 편집 AI에 다시 요청해 주세요.');
   }
 
   private assertSelection(content: string, selection: EditorAiInput['selection']) {
     const { start, end, text } = selection;
-    const splitsCharacter = (offset: number) => /[\uD800-\uDBFF]/.test(content[offset - 1] ?? '') && /[\uDC00-\uDFFF]/.test(content[offset] ?? '');
-    if (end < start || end > content.length || content.slice(start, end) !== text || splitsCharacter(start) || splitsCharacter(end)) {
+    if (end < start || end > content.length || content.slice(start, end) !== text || splitsCharacter(content, start) || splitsCharacter(content, end)) {
       throw new BadRequestException('선택한 문장이 원고와 일치하지 않습니다. 다시 선택해 주세요.');
     }
   }

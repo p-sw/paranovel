@@ -21,6 +21,40 @@ export const editToolInput = z.strictObject({
   replacement: z.string().max(100_000),
 });
 
+export const replaceTextInput = editToolInput.extend({
+  original: z.string().min(1).max(100_000),
+});
+
+export const readManuscriptInput = z.strictObject({
+  start: z.number().int().nonnegative(),
+  length: z.number().int().min(1).max(20_000),
+});
+
+function toolParameters(input: typeof replaceTextInput | typeof readManuscriptInput) {
+  const { $schema: _, ...parameters } = z.toJSONSchema(input);
+  return parameters;
+}
+
+export const replaceTextTool: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'replace_text',
+    description: '선택문이 없을 때 요청에 맞는 수정 범위를 원고에서 직접 골라 수정안을 준비한다. original에 현재 원고의 연속된 원문을 공백과 줄바꿈까지 그대로 복사하고 replacement에 그 범위를 교체할 본문을 넣는다. original은 원고에서 한 번만 나타나야 하며 중복되면 앞뒤 문맥을 포함한다. 삭제는 빈 replacement다. 사용자가 비교 카드에서 수락하기 전에는 원고가 변경되지 않는다. 한 답변에 수정안 하나만 준비한다.',
+    parameters: toolParameters(replaceTextInput),
+    strict: true,
+  },
+};
+
+export const readManuscriptTool: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'read_manuscript',
+    description: '현재 회차 원고에서 생략된 부분을 읽어 수정할 범위를 찾는다. start는 0부터 시작하는 UTF-16 위치, length는 읽을 길이(최대 20,000)다. 반환된 원문과 위치를 기준으로 필요하면 이어서 읽는다. 원고를 변경하지 않는다.',
+    parameters: toolParameters(readManuscriptInput),
+    strict: true,
+  },
+};
+
 export function editorTool(hasSelection: boolean): ToolDefinition {
   const { $schema: _, ...parameters } = z.toJSONSchema(editToolInput);
   return {

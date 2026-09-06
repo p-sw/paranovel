@@ -293,10 +293,10 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
     const target = editorAiSelectionRef.current;
     const saved = await saveNow();
     if (!saved || saved.content !== draftRef.current.content) throw new Error('원고 저장이 끝난 뒤 다시 시도해 주세요.');
-    if (target && target.content !== saved.content) throw new Error('원고가 변경되었습니다. 수정할 부분을 다시 선택해 주세요.');
+    if (target?.text && target.content !== saved.content) throw new Error('원고가 변경되었습니다. 수정할 부분을 다시 선택해 주세요.');
     return {
       content, clientMessageId, expectedRevision: saved.revision,
-      selection: target ? { start: target.start, end: target.end, text: target.text }
+      selection: target && target.content === saved.content ? { start: target.start, end: target.end, text: target.text }
         : { start: saved.content.length, end: saved.content.length, text: '' },
     };
   };

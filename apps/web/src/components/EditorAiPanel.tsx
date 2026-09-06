@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowDown, Check, CornerDownLeft, PencilLine, RotateCcw, Send, Sparkles, TextSelect, X } from 'lucide-react';
+import { ArrowDown, Check, PencilLine, RotateCcw, Send, Sparkles, TextSelect, X } from 'lucide-react';
 import type { EditorAiEdit, EditorAiInput } from '@paranovel/contracts';
 import { api, messageOf } from '../api/client';
 import { characterCount, createIdempotencyKey } from '../lib';
@@ -70,7 +70,7 @@ export default function EditorAiPanel({ projectId, episodeId, open, disabled, di
   const localNotSaved = localTurn && !messages.some((message) => message.clientMessageId === localTurn.clientMessageId);
   const unsentFailure = Boolean(localNotSaved && sendError && !pending);
   const selected = Boolean(selection?.text);
-  const selectionStale = Boolean(selection && selection.content !== content);
+  const selectionStale = Boolean(selected && selection && selection.content !== content);
   const busy = disabled || pending || applyMutation.isPending;
 
   useLayoutEffect(() => {
@@ -122,9 +122,9 @@ export default function EditorAiPanel({ projectId, episodeId, open, disabled, di
         {query.data && !messages.length && !localTurn ? <div className="editor-ai-welcome">
           <Sparkles className="size-6 text-plum-600" aria-hidden="true" />
           <h3 className="font-story text-lg font-bold">이 문장부터, 함께 써요</h3>
-          <p>새 장면을 쓰거나 문장을 다듬어 보세요.<br />본문을 선택하면 그 부분을 수정할 수 있어요.</p>
+          <p>새 장면을 쓰거나 문장을 다듬어 보세요.<br />선택하지 않으면 AI가 수정할 범위를 찾아요.<br />수정 전후를 비교하고 수락하면 본문에 적용돼요.</p>
           <div className="flex flex-wrap justify-center gap-2">
-            {(selected ? ['선택한 부분의 긴장감을 높여줘', '대사를 더 자연스럽게 다듬어줘'] : ['다음 장면을 써줘', '이번 회차의 전개를 함께 고민해줘']).map((suggestion) =>
+            {(selected ? ['선택한 부분의 긴장감을 높여줘', '대사를 더 자연스럽게 다듬어줘'] : ['도입부를 더 흥미롭게 다듬어줘', '다음 장면을 써줘']).map((suggestion) =>
               <Button key={suggestion} size="sm" variant="secondary" onClick={() => { setDraft(suggestion); inputRef.current?.focus(); }}>{suggestion}</Button>)}
           </div>
         </div> : null}
@@ -146,6 +146,7 @@ export default function EditorAiPanel({ projectId, episodeId, open, disabled, di
               </div>
             </> : <p className="editor-ai-message-text">{message.content}</p>}
           {message.edit ? <EditCard edit={message.edit} stale={dirty || message.edit.baseRevision !== revision} disabled={busy}
+            autoSelected={!messages.find((item) => item.role === 'user' && item.clientMessageId === message.clientMessageId)?.request?.selection.text}
             applying={applyMutation.isPending && applyMutation.variables?.id === message.id} error={applyErrors[message.id]}
             onApply={() => {
               if (applying.current || sending.current || busy) return;
@@ -176,8 +177,8 @@ export default function EditorAiPanel({ projectId, episodeId, open, disabled, di
     <form className="editor-ai-composer" onSubmit={submit}>
       <div className="editor-ai-selection">
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          {selected ? <TextSelect className="size-4 shrink-0" aria-hidden="true" /> : <CornerDownLeft className="size-4 shrink-0" aria-hidden="true" />}
-          <span>{selected ? `선택한 부분 · ${characterCount(selection!.text)}자` : selection ? '커서 위치에서 이어쓰기' : '원고 끝에서 이어쓰기'}</span>
+          {selected ? <TextSelect className="size-4 shrink-0" aria-hidden="true" /> : <Sparkles className="size-4 shrink-0" aria-hidden="true" />}
+          <span>{selected ? `선택한 부분 · ${characterCount(selection!.text)}자` : 'AI가 수정 범위를 선택해요'}</span>
           {selected ? <span className="shrink-0 text-[10px] font-normal text-muted">고정됨</span> : null}
         </div>
         {selection ? <IconButton type="button" label="편집 AI 선택 해제" onClick={onClearSelection}><X className="size-3.5" /></IconButton> : null}
@@ -202,20 +203,33 @@ export default function EditorAiPanel({ projectId, episodeId, open, disabled, di
   </aside>;
 }
 
-function EditCard({ edit, stale, disabled, applying, error, onApply }: {
-  edit: EditorAiEdit; stale: boolean; disabled: boolean; applying: boolean; error?: string; onApply: () => void;
+function EditCard({ edit, autoSelected, stale, disabled, applying, error, onApply }: {
+  edit: EditorAiEdit; autoSelected: boolean; stale: boolean; disabled: boolean; applying: boolean; error?: string; onApply: () => void;
 }) {
   const applied = edit.status === 'APPLIED';
   return <section className="editor-ai-edit" aria-label="원고 수정안">
     <h3 className="text-sm font-bold">{edit.title}</h3>
-    {edit.original ? <details className="editor-ai-source"><summary>원문 보기</summary><p>{edit.original}</p></details> : null}
-    <p className="editor-ai-replacement">{edit.replacement || '선택한 부분을 삭제합니다.'}</p>
+    <p className="mt-1 text-xs text-muted">{edit.end > edit.start
+      ? `${autoSelected ? 'AI가 고른 범위' : '선택한 범위'} · ${characterCount(edit.original)}자`
+      : '새 본문 삽입'}</p>
+    <div className="editor-ai-comparison">
+      <section className="editor-ai-version editor-ai-before" aria-label="수정 전">
+        <div className="editor-ai-version-heading"><h4>수정 전</h4><span>{characterCount(edit.original)}자</span></div>
+        <p className="editor-ai-version-text">{edit.original || <span className="text-muted">이 위치에 새 본문을 삽입합니다.</span>}</p>
+      </section>
+      <section className="editor-ai-version editor-ai-after" aria-label="수정 후">
+        <div className="editor-ai-version-heading"><h4>수정 후</h4><span>{characterCount(edit.replacement)}자</span></div>
+        <p className="editor-ai-version-text">{edit.replacement || <span className="text-muted">이 범위의 본문을 삭제합니다.</span>}</p>
+      </section>
+    </div>
     {applied ? <p className="mt-3 flex items-center gap-1.5 text-xs font-semibold text-sage-700"><Check className="size-4" />적용됨</p>
       : <>
         <Button className="mt-3 w-full" size="sm" disabled={disabled || stale} busy={applying} onClick={onApply}>
-          <Check className="size-4" />{edit.end > edit.start ? '선택한 부분에 적용' : '원고에 삽입'}
+          <Check className="size-4" />수락하고 적용
         </Button>
-        {stale ? <p className="mt-2 text-xs leading-5 text-muted">원고가 변경되어 적용할 수 없어요. 현재 원고를 기준으로 다시 요청해 주세요.</p> : null}
+        <p className="mt-2 text-xs leading-5 text-muted">{stale
+          ? '원고가 변경되어 적용할 수 없어요. 현재 원고를 기준으로 다시 요청해 주세요.'
+          : '수락하기 전에는 본문이 바뀌지 않아요.'}</p>
       </>}
     {error ? <p className="mt-2 text-sm text-red-700" role="alert">{error}</p> : null}
   </section>;
