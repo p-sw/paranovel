@@ -9,6 +9,7 @@ import { CanonService } from '../src/canon/canon.service';
 import { ChatReadToolsService } from '../src/chat/chat-read-tools.service';
 import { ChatService } from '../src/chat/chat.service';
 import { chatOutputSchema, chatOutputValidator, type ChatOutput } from '../src/chat/chat.schemas';
+import { generateImageTagsTool, ImageTagToolService } from '../src/chat/image-tag-tool.service';
 import { DatabaseService } from '../src/database/database.service';
 import { chatMessages, chatProposals, chatThreads, episodes } from '../src/database/schema';
 import { ImprovementsService } from '../src/improvements/improvements.service';
@@ -33,6 +34,7 @@ describe('project chat', () => {
   let chat: ChatService;
   let projectId: string;
   const completeChat = vi.fn();
+  const completeJson = vi.fn();
   const infoLog = vi.fn();
   const errorLog = vi.fn();
   const embeddings = vi.fn(async (texts: string[]) => texts.map(() => [0, 1, 0, 1]));
@@ -47,14 +49,16 @@ describe('project chat', () => {
     database = new DatabaseService();
     memory = new MemoryService(database, { embeddings } as never);
     projects = new ProjectsService(database);
-    const ai = { completeChat, chatModel: () => 'test-chat-model' } as unknown as AiRunnerService;
+    const ai = { completeChat, completeJson, chatModel: () => 'test-chat-model' } as unknown as AiRunnerService;
     canon = new CanonService(database, memory, ai);
     arcs = new ArcsService(database, memory, ai);
     improvements = new ImprovementsService(database, ai, memory);
-    reads = new ChatReadToolsService(database, projects, canon, arcs, improvements, memory, { isConfigured: () => false } as never);
+    const imageTags = new ImageTagToolService(projects, canon, ai);
+    reads = new ChatReadToolsService(database, projects, canon, arcs, improvements, memory, { isConfigured: () => false } as never, imageTags);
     chat = new ChatService(database, ai, projects, canon, arcs, improvements, memory, reads);
     projectId = projects.createInternal({ title: '기록의 문', logline: '기억을 읽는 기록관', genreTags: ['판타지'] }).id;
     completeChat.mockReset();
+    completeJson.mockReset();
     embeddings.mockClear();
   });
 
@@ -184,6 +188,118 @@ describe('project chat', () => {
     await chat.apply(projectId, updated.messages.at(-1)!.proposals[0]!.id);
     expect(canon.get(projectId, appearanceId).content).toContain('검은 장화');
     expect(canon.get(projectId, character.id).content).toBe(canonFields.content);
+  });
+
+  it('delegates image-tag requests to the nested tool once and persists its exact tags without proposals', async () => {
+    const appearance = canon.persistCreate(projectId, {
+      category: 'CHARACTER_APPEARANCE', name: '하린', content: '긴 은발, 보라색 눈, 남색 코트', status: 'ACTIVE',
+    });
+    const location = canon.persistCreate(projectId, {
+      category: 'LOCATION', name: '유리 온실', content: '높은 유리 천장과 흰 대리석 바닥', status: 'ACCEPTED',
+    });
+    const canonBefore = canon.list(projectId);
+    completeJson.mockResolvedValueOnce({ runId: 'image-tag-run', value: {
+      tags: ['1girl', 'long_silver_hair', 'purple_eyes', 'glasshouse', 'rain'],
+    } });
+    let firstToolResult: unknown;
+    let repeatedToolResult: unknown;
+    completeChat.mockImplementationOnce(async (request) => {
+      expect(request.readTools.map((tool: { function: { name: string } }) => tool.function.name)).toContain('generate_image_tags');
+      const args = JSON.stringify({
+        characterAppearanceIds: [appearance.id],
+        locationId: location.id,
+        additionalDescription: '비 오는 밤에 뒤돌아보는 장면',
+      });
+      firstToolResult = await request.readTool('generate_image_tags', args);
+      repeatedToolResult = await request.readTool('generate_image_tags', args);
+      return {
+        runId: 'project-chat-run',
+        value: { reply: '메인 모델이 바꾼 답변', proposals: [proposal('CANON', 'CREATE', canonFields)] },
+      };
+    });
+
+    const history = await chat.send(projectId, {
+      content: '하린이 유리 온실에서 비를 맞는 모습의 단부루 태그를 만들어 줘',
+      clientMessageId: 'image-tags',
+    });
+
+    expect(firstToolResult).toMatchObject({
+      tags: ['1girl', 'long_silver_hair', 'purple_eyes', 'glasshouse', 'rain'],
+      tagString: '1girl, long_silver_hair, purple_eyes, glasshouse, rain',
+      sourceCanonIds: [appearance.id, location.id],
+    });
+    expect(repeatedToolResult).toEqual(firstToolResult);
+    expect(completeJson).toHaveBeenCalledTimes(1);
+    expect(history.messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: '1girl, long_silver_hair, purple_eyes, glasshouse, rain',
+      proposals: [],
+      status: 'COMPLETE',
+    });
+    expect(database.orm.select().from(chatProposals).all()).toEqual([]);
+    expect(canon.list(projectId)).toEqual(canonBefore);
+  });
+
+  it('lets the outer model correct one invalid image-tag selection without rerunning nested generation', async () => {
+    const character = canon.persistCreate(projectId, canonFields);
+    const appearance = canon.persistCreate(projectId, {
+      category: 'CHARACTER_APPEARANCE', name: '하린', content: '긴 은발', status: 'ACTIVE',
+    });
+    completeJson.mockResolvedValueOnce({ runId: 'corrected-image-tag-run', value: {
+      tags: ['1girl', 'long_silver_hair'],
+    } });
+    let attempts: unknown[] = [];
+    completeChat.mockImplementationOnce(async (request) => {
+      attempts = [
+        await request.readTool('generate_image_tags', JSON.stringify({
+          characterAppearanceIds: [character.id], locationId: null, additionalDescription: '',
+        })),
+        await request.readTool('generate_image_tags', JSON.stringify({
+          characterAppearanceIds: [appearance.id], locationId: null, additionalDescription: '',
+        })),
+      ];
+      return { runId: 'corrected-tool-run', value: request.resolveAfterTools() };
+    });
+
+    const history = await chat.send(projectId, { content: '하린 이미지 태그를 만들어 줘', clientMessageId: 'invalid-image-tags' });
+
+    expect(attempts).toEqual([
+      expect.objectContaining({ error: 'WRONG_CANON_CATEGORY' }),
+      {
+        tags: ['1girl', 'long_silver_hair'],
+        tagString: '1girl, long_silver_hair',
+        sourceCanonIds: [appearance.id],
+      },
+    ]);
+    expect(completeJson).toHaveBeenCalledTimes(1);
+    expect(history.messages.at(-1)).toMatchObject({
+      content: '1girl, long_silver_hair', proposals: [], status: 'COMPLETE',
+    });
+  });
+
+  it('stops image-tag argument correction after two invalid tool attempts', async () => {
+    const character = canon.persistCreate(projectId, canonFields);
+    const invalidArguments = JSON.stringify({
+      characterAppearanceIds: [character.id], locationId: null, additionalDescription: '',
+    });
+    let attempts: unknown[] = [];
+    completeChat.mockImplementationOnce(async (request) => {
+      attempts = [
+        await request.readTool('generate_image_tags', invalidArguments),
+        await request.readTool('generate_image_tags', invalidArguments),
+        await request.readTool('generate_image_tags', invalidArguments),
+      ];
+      return { runId: 'tool-attempt-limit-run', value: { reply: '확정된 인물 외형을 지정해 주세요.', proposals: [] } };
+    });
+
+    await chat.send(projectId, { content: '하린 이미지 태그를 만들어 줘', clientMessageId: 'limited-image-tags' });
+
+    expect(attempts).toEqual([
+      expect.objectContaining({ error: 'WRONG_CANON_CATEGORY' }),
+      expect.objectContaining({ error: 'WRONG_CANON_CATEGORY' }),
+      expect.objectContaining({ error: 'IMAGE_TAG_TOOL_ATTEMPT_LIMIT' }),
+    ]);
+    expect(completeJson).not.toHaveBeenCalled();
   });
 
   it('omits unsupported temperature on actual Luna gateway requests while requiring tools and structured output', async () => {
@@ -553,6 +669,104 @@ describe('chat model runner', () => {
     expect(second.messages).toContainEqual(expect.objectContaining({ role: 'tool', tool_call_id: 'read-1' }));
     expect((gateway.complete.mock.calls[2]![0] as CompletionRequest).tools).toBeUndefined();
     expect(database.connection.prepare('SELECT status, input_tokens, output_tokens, model FROM ai_runs').get()).toEqual({ status: 'SUCCEEDED', input_tokens: 9, output_tokens: 12, model: 'openai/gpt-5.6-luna' });
+  });
+
+  it('runs the image-tag tool as a separate Luna completion without exposing tools to the nested run', async () => {
+    vi.stubEnv('AI_IMAGE_TAG_MODEL', 'openai/gpt-5.6-luna');
+    let toolArguments = '';
+    const contaminatedOuterOutput = {
+      reply: '메인 모델이 태그 순서와 문장을 임의로 바꾸었습니다.',
+      proposals: [proposal('CANON', 'CREATE', canonFields)],
+    };
+    const gateway = { complete: vi.fn(async (request: CompletionRequest) => {
+      if (request.schema?.name === 'image_tags') {
+        return { content: '{"tags":["1girl","long_silver_hair","glasshouse","moonlight"]}', model: request.model, toolCalls: [], usage: { promptTokens: 3, completionTokens: 2 } };
+      }
+      if (request.messages.some((message) => message.role === 'tool') || request.schema?.name === 'project_chat_reply') {
+        return { content: JSON.stringify(contaminatedOuterOutput), model: request.model, toolCalls: [], usage: { promptTokens: 5, completionTokens: 3 } };
+      }
+      const toolCalls = [{
+        id: 'image-tags-1',
+        type: 'function' as const,
+        function: { name: 'generate_image_tags', arguments: toolArguments },
+      }, {
+        id: 'unneeded-read-1',
+        type: 'function' as const,
+        function: { name: 'read_project_record', arguments: JSON.stringify({ kind: 'PROJECT', id: null, episodeNumber: null, offset: 0 }) },
+      }];
+      return { content: '', model: request.model, toolCalls, usage: { promptTokens: 1, completionTokens: 1 }, assistantMessage: { role: 'assistant', content: null, tool_calls: toolCalls } };
+    }) };
+    const registry = new PromptRegistryService();
+    const runner = new AiRunnerService(database, registry, gateway as never, { isConfigured: () => false } as never);
+    const projects = new ProjectsService(database);
+    const memory = new MemoryService(database, { embeddings: vi.fn(async (texts: string[]) => texts.map(() => [0, 1, 0, 1])) } as never);
+    const canon = new CanonService(database, memory, runner);
+    const arcs = new ArcsService(database, memory, runner);
+    const improvements = new ImprovementsService(database, runner, memory);
+    const imageTags = new ImageTagToolService(projects, canon, runner);
+    const imageTagCall = vi.spyOn(imageTags, 'call');
+    const reads = new ChatReadToolsService(database, projects, canon, arcs, improvements, memory, { isConfigured: () => false } as never, imageTags);
+    const readCall = vi.spyOn(reads, 'call');
+    const chat = new ChatService(database, runner, projects, canon, arcs, improvements, memory, reads);
+    const projectId = projects.createInternal({ title: '달의 문', logline: '달빛 아래 기록관', genreTags: ['판타지'] }).id;
+    const appearance = canon.persistCreate(projectId, {
+      category: 'CHARACTER_APPEARANCE', name: '하린', content: '허리까지 오는 은발', status: 'ACTIVE',
+    });
+    const location = canon.persistCreate(projectId, {
+      category: 'LOCATION', name: '유리 온실', content: '높은 유리 천장과 흰 대리석 바닥', status: 'ACTIVE',
+    });
+    const canonBefore = canon.list(projectId);
+    toolArguments = JSON.stringify({
+      characterAppearanceIds: [appearance.id],
+      locationId: location.id,
+      additionalDescription: '달빛',
+    });
+    const requestContent = '하린이 유리 온실에 서 있는 달빛 이미지의 단부루 태그를 만들어 줘';
+
+    const history = await chat.send(projectId, { content: requestContent, clientMessageId: 'nested-image-tags' });
+
+    const expectedToolResult = {
+      tags: ['1girl', 'long_silver_hair', 'glasshouse', 'moonlight'],
+      tagString: '1girl, long_silver_hair, glasshouse, moonlight',
+      sourceCanonIds: [appearance.id, location.id],
+    };
+    expect(imageTagCall).toHaveBeenCalledTimes(1);
+    expect(readCall).toHaveBeenCalledTimes(1);
+    const nestedResult = await imageTagCall.mock.results[0]!.value;
+    expect(nestedResult).toEqual(expectedToolResult);
+    expect(JSON.stringify(nestedResult)).toBe(JSON.stringify(expectedToolResult));
+    expect(history.messages.at(-1)).toMatchObject({
+      role: 'assistant', content: expectedToolResult.tagString, proposals: [], status: 'COMPLETE',
+    });
+    expect(database.orm.select().from(chatProposals).all()).toEqual([]);
+    expect(canon.list(projectId)).toEqual(canonBefore);
+
+    expect(gateway.complete).toHaveBeenCalledTimes(2);
+    const requests = gateway.complete.mock.calls.map(([request]) => request as CompletionRequest);
+    expect(requests[0]).toMatchObject({ model: 'openai/gpt-5.6-luna', schema: undefined, maxTokens: 8_000 });
+    expect(requests[0]!.tools?.map((tool) => tool.function.name)).toContain(generateImageTagsTool.function.name);
+    expect(requests[0]!.messages.at(-1)).toEqual({ role: 'user', content: requestContent });
+    const renderedUser = requests[0]!.messages[1]!.content;
+    expect(typeof renderedUser).toBe('string');
+    const catalogPrefix = '조회 가능한 항목 목록(ID, 분류, revision, 상태): ';
+    const catalogStart = (renderedUser as string).indexOf(catalogPrefix);
+    expect(catalogStart).toBeGreaterThanOrEqual(0);
+    const catalogText = (renderedUser as string).slice(catalogStart + catalogPrefix.length).split('\n\n이후 대화')[0]!;
+    const catalog = JSON.parse(catalogText) as Array<Record<string, unknown>>;
+    expect(catalog).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'CANON', id: appearance.id, category: 'CHARACTER_APPEARANCE', status: 'ACTIVE' }),
+      expect.objectContaining({ kind: 'CANON', id: location.id, category: 'LOCATION', status: 'ACTIVE' }),
+    ]));
+    expect(requests[1]).toMatchObject({ model: 'openai/gpt-5.6-luna', schema: { name: 'image_tags' }, tools: undefined });
+    expect(requests.some((request) => request.schema?.name === 'project_chat_reply' || request.messages.some((message) => message.role === 'tool'))).toBe(false);
+    const runs = database.connection.prepare(
+      'SELECT id, task, model, status, input_tokens AS inputTokens, output_tokens AS outputTokens FROM ai_runs ORDER BY rowid',
+    ).all() as Array<Record<string, unknown>>;
+    expect(runs.map(({ id: _id, ...run }) => run)).toEqual([
+      { task: 'project_chat', model: 'openai/gpt-5.6-luna', status: 'SUCCEEDED', inputTokens: 1, outputTokens: 1 },
+      { task: 'image_tag_generation', model: 'openai/gpt-5.6-luna', status: 'SUCCEEDED', inputTokens: 3, outputTokens: 2 },
+    ]);
+    expect(new Set(runs.map((run) => run.id)).size).toBe(2);
   });
 
   it('bounds repeated reads and rejects episode-changing structured output after one retry', async () => {

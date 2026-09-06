@@ -29,6 +29,7 @@ export const REQUIRED_PROMPT_IDS = [
   'improvement-extract',
   'comparison-draft',
   'project-chat',
+  'image-tag-generation',
 ] as const;
 
 export type PromptId = (typeof REQUIRED_PROMPT_IDS)[number];

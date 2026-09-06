@@ -14,6 +14,7 @@ import { sanitizeLogText, serializeError } from '../shared/error-log';
 import { id, now, parseJson, stringifyJson } from '../shared/utils';
 import { ChatReadToolsService, type RecordSnapshot, type SnapshotMap } from './chat-read-tools.service';
 import { chatOutputSchema, chatOutputValidator, creationDefaults, editableFields, editableValidators, type ChatKind, type ChatOperation, type ChatOutput } from './chat.schemas';
+import { IMAGE_TAG_TOOL_NAME, isImageTagToolResult, type ImageTagToolResult } from './image-tag-tool.service';
 
 type ProposalRow = typeof chatProposals.$inferSelect;
 type IndexTarget = { kind: Exclude<ChatKind, 'PROJECT'>; id: string };
@@ -33,6 +34,7 @@ type ChatLogContext = {
 const messageInput = z.strictObject({ content: z.string().trim().min(1).max(20_000), clientMessageId: z.string().trim().min(1).max(200) });
 const threadInput = z.strictObject({ clientThreadId: z.string().trim().min(1).max(200).optional() });
 const GENERATION_ERROR = 'AI 답변을 만들지 못했습니다. 같은 메시지를 다시 시도해 주세요.';
+const MAX_IMAGE_TAG_TOOL_ATTEMPTS = 2;
 
 @Injectable()
 export class ChatService implements OnModuleInit {
@@ -174,9 +176,11 @@ export class ChatService implements OnModuleInit {
       context.stage = 'history';
       const history = this.modelHistory(projectId, turn.threadId, input.clientMessageId);
       context.stage = 'ai';
+      let imageTagAttempts = 0;
+      let imageTagResult: ImageTagToolResult | undefined;
       const result = await this.ai.completeChat({
         task: 'project_chat', promptId: 'project-chat', projectId, modelRole: 'CHAT',
-        history, signal, maxTokens: 12_000,
+        history, signal, maxTokens: 12_000, toolMaxTokens: 8_000,
         variables: {
           project_context: memory.projectContext, canon: memory.canon, current_arc: memory.currentArc,
           current_scene: memory.currentScene, recent_summaries: memory.recentSummaries,
@@ -185,7 +189,21 @@ export class ChatService implements OnModuleInit {
         },
         schema: { name: 'project_chat_reply', value: chatOutputSchema }, validator: chatOutputValidator,
         readTools: this.reads.definitions(),
-        readTool: (name, args) => this.reads.call(projectId, name, args, snapshots, signal),
+        resolveAfterTools: () => imageTagResult
+          ? { reply: imageTagResult.tagString, proposals: [] }
+          : undefined,
+        readTool: async (name, args) => {
+          if (name === IMAGE_TAG_TOOL_NAME) {
+            if (imageTagResult) return imageTagResult;
+            if (imageTagAttempts >= MAX_IMAGE_TAG_TOOL_ATTEMPTS) {
+              return { error: 'IMAGE_TAG_TOOL_ATTEMPT_LIMIT', message: '이미지 태그 생성 도구의 인자 교정 횟수를 초과했습니다.' };
+            }
+            imageTagAttempts += 1;
+          }
+          const toolResult = await this.reads.call(projectId, name, args, snapshots, signal);
+          if (name === IMAGE_TAG_TOOL_NAME && isImageTagToolResult(toolResult)) imageTagResult = toolResult;
+          return toolResult;
+        },
       }, (runId) => {
         context.runId = sanitizeLogText(runId);
         context.stage = 'run_link_persist';
@@ -195,12 +213,15 @@ export class ChatService implements OnModuleInit {
       context.runId = sanitizeLogText(result.runId);
       context.stage = 'abort_check';
       signal?.throwIfAborted();
+      const output: ChatOutput = imageTagResult
+        ? { reply: imageTagResult.tagString, proposals: [] }
+        : result.value;
       // No entity is changed while preparing proposals. Persist the complete turn atomically.
       context.stage = 'proposal_transaction';
       this.database.connection.transaction(() => {
         this.projects.get(projectId);
         const occupied = new Set<string>();
-        for (const [index, proposal] of result.value.proposals.entries()) {
+        for (const [index, proposal] of output.proposals.entries()) {
           context.stage = 'proposal_validate';
           context.proposal = { index, kind: proposal.kind, operation: proposal.operation,
             targetId: proposal.targetId === null ? null : sanitizeLogText(proposal.targetId) };
@@ -215,14 +236,14 @@ export class ChatService implements OnModuleInit {
         }
         delete context.proposal;
         context.stage = 'message_persist';
-        this.database.orm.update(chatMessages).set({ content: result.value.reply, status: 'COMPLETE', error: null, runId: result.runId })
+        this.database.orm.update(chatMessages).set({ content: output.reply, status: 'COMPLETE', error: null, runId: result.runId })
           .where(eq(chatMessages.id, turn.id)).run();
         this.database.orm.update(chatThreads).set({ updatedAt: now() }).where(eq(chatThreads.id, turn.threadId)).run();
       }).immediate();
       context.stage = 'history';
       const completed = this.history(projectId, turn.threadId);
       context.stage = 'complete';
-      this.logger.log({ event: 'chat_send_completed', ...logContext(), replayed: false, proposalCount: result.value.proposals.length });
+      this.logger.log({ event: 'chat_send_completed', ...logContext(), replayed: false, proposalCount: output.proposals.length });
       return completed;
     } catch (error) {
       // Record the original failure before touching a potentially failing database.

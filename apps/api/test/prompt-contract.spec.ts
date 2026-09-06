@@ -48,6 +48,7 @@ const variables: Record<string, unknown> = {
   draft_text: '삽입 후보',
   review_issues: '[]',
   task_context: '{"user":"조선 후기 한양을 배경으로 집필"}',
+  additional_description: '',
 };
 
 describe('expanded prompt contracts', () => {

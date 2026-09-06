@@ -59,7 +59,7 @@ export interface PromptRunInput {
   schema?: { name: string; value: JsonSchema };
   tools?: ToolDefinition[];
   toolChoice?: 'auto' | 'required' | 'none';
-  modelRole?: 'WRITING' | 'IMPROVEMENT' | 'CHAT';
+  modelRole?: 'WRITING' | 'IMPROVEMENT' | 'CHAT' | 'IMAGE_TAG';
   history?: ChatMessage[];
   temperature?: number;
   maxTokens?: number;

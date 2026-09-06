@@ -90,11 +90,16 @@ export class AiRunnerService {
     return process.env.AI_CHAT_MODEL ?? 'openai/gpt-5.6-luna';
   }
 
+  imageTagModel(): string {
+    return process.env.AI_IMAGE_TAG_MODEL?.trim() || 'openai/gpt-5.6-luna';
+  }
+
   async completeChat<T>(
     input: PromptRunInput & {
       validator: ZodType<T>;
       readTools: ToolDefinition[];
       readTool: (name: string, argumentsJson: string) => Promise<unknown>;
+      resolveAfterTools?: () => T | undefined;
       toolMaxTokens?: number;
     },
     onRunStarted?: (runId: string) => void,
@@ -137,6 +142,13 @@ export class AiRunnerService {
           }
           remainingCharacters = Math.max(0, remainingCharacters - content.length);
           messages.push({ role: 'tool', tool_call_id: call.id, content });
+          // A tool may produce the authoritative user-facing result. Finish
+          // immediately so later calls or model rounds cannot alter it.
+          const terminalValue = input.resolveAfterTools?.();
+          if (terminalValue !== undefined) {
+            value = input.validator.parse(terminalValue);
+            return { ...response, content: stringifyJson(value), toolCalls: [], usage };
+          }
         }
       }
       let lastError: unknown;
@@ -218,8 +230,9 @@ export class AiRunnerService {
       if (!promptRefs.some((existing) => existing.id === ref.id)) promptRefs.push(ref);
     }
     const model =
-      input.modelRole === 'CHAT' ? this.chatModel()
-        : input.modelRole === 'IMPROVEMENT' ? this.improvementModel() : this.writingModel();
+      input.modelRole === 'IMAGE_TAG' ? this.imageTagModel()
+        : input.modelRole === 'CHAT' ? this.chatModel()
+          : input.modelRole === 'IMPROVEMENT' ? this.improvementModel() : this.writingModel();
     const runId = id();
     const createdAt = now();
     const memoryVariables = Object.fromEntries(

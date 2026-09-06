@@ -11,6 +11,7 @@ import { ImprovementsService } from '../improvements/improvements.service';
 import { MemoryService } from '../memory/memory.service';
 import { ProjectsService } from '../projects/projects.service';
 import type { ChatKind } from './chat.schemas';
+import { generateImageTagsTool, ImageTagToolService } from './image-tag-tool.service';
 
 const kind = z.enum(['PROJECT', 'CANON', 'ARC', 'IMPROVEMENT', 'EPISODE']);
 const listArgs = z.strictObject({ kind, offset: z.number().int().min(0), limit: z.number().int().min(1).max(50) });
@@ -39,10 +40,12 @@ export class ChatReadToolsService {
     private readonly improvements: ImprovementsService,
     private readonly memory: MemoryService,
     private readonly tavily: TavilySearchService,
+    private readonly imageTags: ImageTagToolService,
   ) {}
 
   definitions(): ToolDefinition[] {
-    return this.tavily.isConfigured() ? [...readTools, tavilySearchTool] : [...readTools];
+    const projectTools = [...readTools, generateImageTagsTool];
+    return this.tavily.isConfigured() ? [...projectTools, tavilySearchTool] : projectTools;
   }
 
   getRecord(projectId: string, entityKind: ChatKind, recordId: string): RecordSnapshot {
@@ -81,6 +84,7 @@ export class ChatReadToolsService {
   async call(projectId: string, name: string, argumentsJson: string, snapshots: SnapshotMap, signal?: AbortSignal): Promise<unknown> {
     this.projects.get(projectId);
     signal?.throwIfAborted();
+    if (name === generateImageTagsTool.function.name) return this.imageTags.call(projectId, argumentsJson, signal);
     try {
       const raw: unknown = JSON.parse(argumentsJson);
       if (name === 'list_project_records') {
