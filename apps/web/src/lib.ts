@@ -50,7 +50,7 @@ export function formatRelativeDate(value?: string): string {
 }
 
 export function characterCount(text: string): string {
-  return new Intl.NumberFormat('ko-KR').format(text.length);
+  return new Intl.NumberFormat('ko-KR').format(text.replace(/\s/g, '').length);
 }
 
 export function createIdempotencyKey(): string {

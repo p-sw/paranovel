@@ -448,7 +448,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
         </div>
 
         <footer className="editor-actionbar">
-          <div className="hidden text-xs text-muted sm:block">{characterCount(draft.content)}자</div>
+          <div className="hidden text-xs text-muted sm:block">공백 제외 {characterCount(draft.content)}자</div>
           {selected ? (
             <Button
               className="editor-ai-action"
