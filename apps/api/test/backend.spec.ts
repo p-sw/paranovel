@@ -273,9 +273,9 @@ describe('backend core', () => {
             runId: 'warning-review',
             value: {
               issues: [{
-                category: 'STYLE', severity: 'WARNING', excerpt: '',
-                explanation: '문장 호흡을 확인해 보세요.', evidenceRefs: [],
-                repairInstruction: '필수 수정은 아닙니다.',
+                category: 'SCENE', severity: 'WARNING', excerpt: '서쪽 성문',
+                explanation: '성문 위치가 앞 문단의 동쪽과 다릅니다.', evidenceRefs: [],
+                repairInstruction: '성문 위치를 동쪽으로 맞춥니다.',
               }],
             },
           };

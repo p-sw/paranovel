@@ -257,7 +257,7 @@ export const improvementSchema = improvementCandidateSchema.extend({
 export type Improvement = z.infer<typeof improvementSchema>;
 
 export const continuityIssueSchema = z.object({
-  category: z.enum(['CANON', 'TIMELINE', 'CHARACTER', 'ARC', 'SCENE', 'FORESHADOWING', 'STYLE']),
+  category: z.enum(['CANON', 'TIMELINE', 'SCENE']),
   severity: z.enum(['WARNING', 'BLOCKING']),
   excerpt: z.string(),
   explanation: z.string(),

@@ -29,7 +29,7 @@ export const episodeDirectionValidator = z.object({
 export const continuityReviewValidator = z.object({
   issues: z.array(
     z.object({
-      category: z.enum(['CANON', 'TIMELINE', 'CHARACTER', 'ARC', 'SCENE', 'FORESHADOWING', 'STYLE']),
+      category: z.enum(['CANON', 'TIMELINE', 'SCENE']),
       severity: z.enum(['WARNING', 'BLOCKING']),
       excerpt: z.string(),
       explanation: z.string(),
@@ -157,7 +157,8 @@ export const continuityReviewSchema: JsonSchema = {
         properties: {
           category: {
             type: 'string',
-            enum: ['CANON', 'TIMELINE', 'CHARACTER', 'ARC', 'SCENE', 'FORESHADOWING', 'STYLE'],
+            enum: ['CANON', 'TIMELINE', 'SCENE'],
+            description: 'CANON: 확정 설정 모순, TIMELINE: 실제 사건의 시간·시간대 모순, SCENE: 장소·공간 모순. 시점·시제·회상·문체·구성은 검사하지 않는다.',
           },
           severity: { type: 'string', enum: ['WARNING', 'BLOCKING'] },
           excerpt: { type: 'string' },

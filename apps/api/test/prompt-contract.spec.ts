@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { continuityReviewValidator, continuityReviewSchema } from '../src/ai/ai.schemas';
 import {
   PromptRegistryService,
   REQUIRED_PROMPT_IDS,
@@ -97,5 +98,36 @@ describe('expanded prompt contracts', () => {
     expect(rendered.system).toContain('Canon을 최우선');
     expect(rendered.system).toContain('이전 화의 사건을 요약·복습하거나 마지막 장면을 재연하는 도입');
     expect(rendered.system).toContain('해당 부분의 기존 내용을 보존하고 충돌 이유를 conflicts에 표시');
+  });
+
+  it('reviews only factual contradictions without importing general writing guidance', () => {
+    const rendered = new PromptRegistryService().render('continuity-review', variables, { includeCore: false });
+    expect(rendered.refs.map((ref) => ref.id)).toEqual(['memory-contract', 'continuity-review']);
+    expect(rendered.system).toContain('설정·시간대·장소에 관한 사실 오류만');
+    expect(rendered.system).toContain('서술 순서와 실제 사건 순서를 구분');
+    expect(rendered.system).toContain('회상 속 시간·장소·인물 상태를 현재 장면과 직접 비교해 모순으로 만들지 않는다');
+    expect(rendered.system).toContain('이를 설정·시간대·장소 오류로 재분류하지 않는다');
+    expect(rendered.system).not.toContain('시점, 시제, 호칭, 말투, 공간 배치와 시간 흐름을 일관되게 유지');
+    expect(rendered.user).toContain('시점·회상 등 서술 기법과 문체·구성은 문제로 보고하지 말라');
+  });
+
+  it('repairs only selected factual issues without smoothing insertion boundaries', () => {
+    const rendered = new PromptRegistryService().render('continuity-repair', variables, { includeCore: false });
+    expect(rendered.refs.map((ref) => ref.id)).toEqual(['memory-contract', 'continuity-repair']);
+    expect(rendered.system).toContain('선택된 오류와 무관한 연결·전환·자연스러움을 다듬지 말고');
+    expect(rendered.user).toContain('선택된 오류를 고치는 데 직접 필요한 경우가 아니면 삽입 원고의 시작과 끝을 바꾸지 말고');
+    expect(rendered.user).not.toContain('자연스럽게 맞도록');
+  });
+
+  it('uses the same narrow issue categories for the AI output schema and runtime validation', () => {
+    const categories = ['CANON', 'TIMELINE', 'SCENE'];
+    const schema = continuityReviewSchema as { properties: { issues: { items: { properties: { category: { enum: string[] } } } } } };
+    expect(schema.properties.issues.items.properties.category.enum).toEqual(categories);
+    for (const category of [...categories, 'CHARACTER', 'ARC', 'FORESHADOWING', 'STYLE']) {
+      const parsed = continuityReviewValidator.safeParse({ issues: [{
+        category, severity: 'WARNING', excerpt: '원고', explanation: '검토 문제', evidenceRefs: [], repairInstruction: '수정 방향',
+      }] });
+      expect(parsed.success, category).toBe(categories.includes(category));
+    }
   });
 });

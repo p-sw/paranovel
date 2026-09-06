@@ -71,7 +71,7 @@ describe('selective episode continuity repair', () => {
 
     expect(ai.streamText).toHaveBeenCalledTimes(1);
     expect(ai.streamText).toHaveBeenCalledWith(expect.objectContaining({
-      task: 'continuity_repair', signal: controller.signal,
+      task: 'continuity_repair', includeCore: false, signal: controller.signal,
       variables: expect.objectContaining({
         candidate_text: draftInput.content, draft_text: draftInput.content,
         review_issues: JSON.stringify([warning]), issues: JSON.stringify([warning]),
@@ -138,6 +138,7 @@ describe('selective episode continuity repair', () => {
     { content: undefined }, { content: '' }, { content: ' \n' }, { content: 42 },
     { issue: undefined }, { issue: null }, { issue: [] }, { issue: {} },
     { issue: { ...warning, severity: 'INFO' } }, { issue: { ...warning, category: 'UNKNOWN' } },
+    ...['STYLE', 'ARC', 'CHARACTER', 'FORESHADOWING'].map((category) => ({ issue: { ...warning, category } })),
     { issue: { ...warning, evidenceRefs: 'scene:door' } },
     { issue: { ...warning, explanation: ' ', repairInstruction: '\n' } },
   ])('rejects unusable repair input before loading memory or invoking AI: %j', async (invalid) => {

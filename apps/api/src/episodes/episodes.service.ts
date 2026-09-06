@@ -830,6 +830,7 @@ export class EpisodesService {
     const repaired = await this.ai.streamText({
       task: 'continuity_repair',
       promptId: 'continuity-repair',
+      includeCore: false,
       projectId: input.projectId,
       episodeId: input.episodeId,
       variables: {
@@ -887,43 +888,14 @@ export class EpisodesService {
     signal?.throwIfAborted();
     this.assertGenerationCurrent(input);
     emit({ type: 'stage', stage: 'CHECKING' });
-    let review = await this.reviewContinuity(input, draft.result.content, signal);
-    this.assertGenerationCurrent(input);
-    let finalContent = draft.result.content;
-    if (review.some((issue) => issue.severity === 'BLOCKING')) {
-      emit({ type: 'stage', stage: 'REPAIRING' });
-      const repaired = await this.ai.streamText(
-        {
-          task: 'continuity_repair',
-          promptId: 'continuity-repair',
-          projectId: input.projectId,
-          episodeId: input.episodeId,
-          variables: {
-            ...input.reviewVariables,
-            candidate_text: draft.result.content,
-            draft_text: draft.result.content,
-            continuity_issues: stringifyJson(review),
-            issues: stringifyJson(review),
-            review_issues: stringifyJson(review),
-          },
-          signal,
-          maxTokens: 32_000,
-        },
-        // Keep the completed draft visible until the entire replacement and
-        // its review succeed. Failed or cancelled repairs never erase it.
-        () => undefined,
-      );
-      if (!repaired.result.content.trim()) throw new BadGatewayException('AI returned an empty continuity repair');
-      signal?.throwIfAborted();
-      finalContent = repaired.result.content;
-      emit({ type: 'stage', stage: 'CHECKING' });
-      review = await this.reviewContinuity(input, finalContent, signal);
-    }
+    // Review only reports issues. Every change requires a separate user-selected
+    // repair request, including when a blocking contradiction is found.
+    const review = await this.reviewContinuity(input, draft.result.content, signal);
     signal?.throwIfAborted();
     this.assertGenerationCurrent(input);
     emit({
       type: 'done',
-      content: finalContent,
+      content: draft.result.content,
       blocked: review.some((issue) => issue.severity === 'BLOCKING'),
       issues: review,
       baseRevision: input.baseRevision,
@@ -938,6 +910,9 @@ export class EpisodesService {
     const { value } = await this.ai.completeJson<{ issues: ContinuityIssue[] }>({
       task: 'continuity_review',
       promptId: 'continuity-review',
+      // General writing guidance includes POV, style and pacing rules that are
+      // outside the factual scope of continuity review.
+      includeCore: false,
       projectId: input.projectId,
       episodeId: input.episodeId,
       variables: {

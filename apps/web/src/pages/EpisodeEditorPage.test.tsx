@@ -15,12 +15,12 @@ const episode: Episode = {
 
 const warnings: ContinuityIssue[] = [
   {
-    category: 'STYLE', severity: 'WARNING', excerpt: '먼저 쓴 제안.',
-    explanation: '서술 시제가 앞 문장과 다릅니다.', evidenceRefs: [], repairInstruction: '과거 시제로 통일합니다.',
+    category: 'CANON', severity: 'WARNING', excerpt: '왼손의 흉터',
+    explanation: '오른손에 있던 흉터가 왼손에 있습니다.', evidenceRefs: ['canon:scar'], repairInstruction: '흉터의 위치를 오른손으로 맞춥니다.',
   },
   {
     category: 'TIMELINE', severity: 'WARNING', excerpt: '다음 날',
-    explanation: '장면 전환 시간이 불분명합니다.', evidenceRefs: ['scene:episode'], repairInstruction: '같은 날 저녁으로 명시합니다.',
+    explanation: '같은 사건의 날짜가 앞 문단과 다릅니다.', evidenceRefs: ['scene:episode'], repairInstruction: '같은 날 저녁으로 맞춥니다.',
   },
 ];
 
@@ -52,6 +52,35 @@ async function openContinuation() {
 }
 
 describe('continuation draft review', () => {
+  it.each([false, true])('keeps the streamed suggestion until the user selects a repair, including blocked=%s', async (blocked) => {
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
+      start(controller) { stream = controller; },
+    }))));
+    const issue: ContinuityIssue = { ...warnings[0], severity: blocked ? 'BLOCKING' : 'WARNING' };
+    const repair = vi.spyOn(api.episodes, 'repairContinuation').mockResolvedValue({ content: '선택해서 고친 제안.', issues: [], blocked: false });
+    const update = vi.spyOn(api.episodes, 'update');
+    const { user, dialog } = await openContinuation();
+    const textarea = dialog.getByLabelText('이어쓰기 제안 수정');
+    const chunks = ['\n  이어쓰기 ', '원문.\n\n회상 장면.  \n'];
+    const send = async (event: unknown) => act(async () => {
+      stream.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+    });
+    for (const text of chunks) await send({ type: 'delta', text });
+    await send({ type: 'stage', stage: 'CHECKING' });
+    expect(textarea).toHaveValue(chunks.join(''));
+    await send({ type: 'done', content: chunks.join(''), issues: [issue], blocked });
+
+    expect(textarea).toHaveValue(chunks.join(''));
+    expect(repair).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(dialog.getByText(`수정 방향: ${issue.repairInstruction}`)).toBeVisible();
+    await user.click(dialog.getByRole('button', { name: `자동 수정: ${issue.explanation}` }));
+    expect(repair).toHaveBeenCalledWith('story', 'episode', expect.objectContaining({ content: chunks.join(''), issue }), expect.any(Function), expect.any(AbortSignal));
+    expect(textarea).toHaveValue('선택해서 고친 제안.');
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it('repairs the selected warning using the edited suggestion and inserts the reviewed result at the original revision', async () => {
     const continuation = vi.spyOn(api.episodes, 'continue').mockResolvedValue({ content: '먼저 쓴 제안.', issues: warnings, blocked: false });
     let completeRepair!: (result: StreamResult) => void;

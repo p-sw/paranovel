@@ -66,6 +66,7 @@ async function ndjson(
   body: unknown,
   onEvent: (event: StreamEvent, accumulated: string) => void,
   signal?: AbortSignal,
+  options: { allowReplacement?: boolean } = {},
 ): Promise<StreamResult> {
   const response = await fetch(`/api${path}`, {
     method: 'POST',
@@ -94,7 +95,7 @@ async function ndjson(
   let blocked = false;
   let baseRevision: number | undefined;
   let completed = false;
-  let replacing = false;
+  let preservingDraft = false;
 
   const consume = (line: string) => {
     if (!line.trim() || completed) return;
@@ -108,13 +109,18 @@ async function ndjson(
       runId = event.runId;
       baseRevision = event.baseRevision;
     }
-    // A reset starts a replacement attempt. Keep the readable draft until
-    // its replacement is committed by a valid terminal event.
-    if (event.type === 'delta' && !replacing) content += event.text;
-    if (event.type === 'reset') replacing = true;
+    // The completed writing stream is immutable during post-processing.
+    // Only an explicit repair request may replace it at completion.
+    if (event.type === 'reset' || (event.type === 'stage' && ['CHECKING', 'REPAIRING'].includes(event.stage))) {
+      preservingDraft = true;
+    }
+    if (event.type === 'delta' && !preservingDraft) content += event.text;
     if (event.type === 'done') {
       if (!event.content.trim()) {
         throw new ApiError('AI가 빈 원고를 반환했습니다. 생성된 원고를 확인하고 다시 시도해 주세요.', 502);
+      }
+      if (!options.allowReplacement && event.content !== content) {
+        throw new ApiError('완료 응답의 본문이 생성된 초안과 달라 반영하지 않았습니다. 원래 초안을 확인해 주세요.', 502);
       }
       content = event.content;
       issues = event.issues;
@@ -242,7 +248,7 @@ export const api = {
       input: { title: string; direction: string; content: string; issue: ContinuityIssue; episodeId?: string; expectedRevision?: number },
       onEvent: (event: StreamEvent, content: string) => void,
       signal?: AbortSignal,
-    ) => ndjson(`/projects/${projectId}/episodes/repair`, input, onEvent, signal),
+    ) => ndjson(`/projects/${projectId}/episodes/repair`, input, onEvent, signal, { allowReplacement: true }),
     update: (
       projectId: string,
       episodeId: string,
@@ -278,7 +284,7 @@ export const api = {
       input: { expectedRevision: number; cursorOffset: number; content: string; issue: ContinuityIssue },
       onEvent: (event: StreamEvent, content: string) => void,
       signal?: AbortSignal,
-    ) => ndjson(`/projects/${projectId}/episodes/${episodeId}/repair`, input, onEvent, signal),
+    ) => ndjson(`/projects/${projectId}/episodes/${episodeId}/repair`, input, onEvent, signal, { allowReplacement: true }),
     replaceSelection: (
       projectId: string,
       episodeId: string,

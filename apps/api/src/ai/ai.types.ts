@@ -70,14 +70,7 @@ export interface PromptRunInput {
 }
 
 export interface ContinuityIssue {
-  category:
-    | 'CANON'
-    | 'TIMELINE'
-    | 'CHARACTER'
-    | 'ARC'
-    | 'SCENE'
-    | 'FORESHADOWING'
-    | 'STYLE';
+  category: 'CANON' | 'TIMELINE' | 'SCENE';
   severity: 'WARNING' | 'BLOCKING';
   excerpt: string;
   explanation: string;

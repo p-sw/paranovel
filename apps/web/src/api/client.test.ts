@@ -4,27 +4,25 @@ import { api } from './client';
 afterEach(() => vi.unstubAllGlobals());
 
 describe('NDJSON client', () => {
-  it('honors reset and exposes final continuity issues', async () => {
+  it('preserves the streamed draft and exposes final continuity issues', async () => {
     const payload = [
       { type: 'meta', runId: 'run-1' },
       { type: 'stage', stage: 'WRITING' },
-      { type: 'delta', text: '폐기할 초안' },
-      { type: 'reset' },
-      { type: 'stage', stage: 'REPAIRING' },
-      { type: 'delta', text: '수정된 ' },
+      { type: 'delta', text: '생성된 ' },
       { type: 'delta', text: '초안' },
+      { type: 'stage', stage: 'CHECKING' },
       {
         type: 'done',
-        content: '수정된 초안',
+        content: '생성된 초안',
         blocked: false,
         issues: [
           {
-            category: 'STYLE',
+            category: 'SCENE',
             severity: 'WARNING',
             excerpt: '초안',
-            explanation: '문체를 확인하세요.',
+            explanation: '성벽의 위치가 동쪽에서 서쪽으로 바뀌었습니다.',
             evidenceRefs: [],
-            repairInstruction: '문장을 다듬습니다.',
+            repairInstruction: '성벽의 위치를 동쪽으로 맞춥니다.',
           },
         ],
       },
@@ -35,18 +33,18 @@ describe('NDJSON client', () => {
     })));
     const snapshots: string[] = [];
 
-    const result = await api.comparisons.generate(
-      { brief: '비 오는 성벽', targetChars: 1000 },
+    const result = await api.episodes.generate(
+      'story', { title: '성벽', direction: '비 오는 성벽' },
       (_event, content) => snapshots.push(content),
     );
 
     expect(snapshots).toContain('');
-    expect(result.content).toBe('수정된 초안');
+    expect(result.content).toBe('생성된 초안');
     expect(result.blocked).toBe(false);
-    expect(result.issues[0].explanation).toBe('문체를 확인하세요.');
-    expect(fetch).toHaveBeenCalledWith('/api/comparisons/generate', expect.objectContaining({
+    expect(result.issues[0].explanation).toBe('성벽의 위치가 동쪽에서 서쪽으로 바뀌었습니다.');
+    expect(fetch).toHaveBeenCalledWith('/api/projects/story/episodes/generate', expect.objectContaining({
       method: 'POST',
-      body: JSON.stringify({ brief: '비 오는 성벽', targetChars: 1000 }),
+      body: JSON.stringify({ title: '성벽', direction: '비 오는 성벽' }),
     }));
   });
 });
