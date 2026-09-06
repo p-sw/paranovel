@@ -92,7 +92,8 @@ export class EditorAiService implements OnModuleInit {
         task: 'episode_editor', promptId: 'episode-editor', projectId, episodeId, modelRole: 'WRITING',
         signal, maxTokens: 12_000, toolMaxTokens: 16_000,
         variables: {
-          project_context: memory.projectContext, canon: memory.canon, current_arc: memory.currentArc,
+          project_context: memory.projectContext, writing_direction: memory.writingDirection,
+          canon: memory.canon, current_arc: memory.currentArc,
           current_scene: memory.currentScene, recent_summaries: memory.recentSummaries,
           open_foreshadowing: memory.openForeshadowing, retrieved_memories: memory.retrievedMemories,
           improvements: memory.improvements,

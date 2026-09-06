@@ -1,10 +1,11 @@
 ---
 id: episode-direction-refine
-version: 1
+version: 2
 task: episode_direction_refine
 responseMode: json
 requiredVariables:
   - project_context
+  - writing_direction
   - canon
   - current_arc
   - current_scene
@@ -28,6 +29,7 @@ requiredVariables:
 - 제목만 개선하라는 요청이면 direction 전체를 입력 그대로 반환한다. 전개 방향만 개선하라는 요청이면 title을 입력 그대로 반환한다. 두 항목 모두를 고쳐야 할 때에도 각각 요청 범위에 해당하는 부분만 수정한다.
 - 요청이 특정 장면, 인물의 행동, 감정, 결말 또는 훅을 지정하면 그 부분과 반드시 연결되는 최소한의 문맥만 수정한다. 나머지를 더 매끄럽게 바꾼다는 이유로 재작성하거나 요약하지 않는다.
 - 아래 작품 원칙은 요청 범위 내에서 적용한다. 요청하지 않은 부분에서 발견한 기존 문제를 임의로 수정하지 말고, 필요한 충돌만 conflicts에 알린다.
+- 수정 대상 부분에는 프로젝트 작문 디렉션을 적용한다. 다만 작문 디렉션에 맞춘다는 이유만으로 이번 요청과 관계없는 기존 제목이나 전개 방향까지 고쳐 요청 범위를 넓히지 않는다.
 - 수정 후에도 title과 direction은 각각 완전한 전체 문자열로 반환한다. 변경한 부분만 반환하거나 생략 표시로 원문을 대체하지 않는다. 제목은 200자 이내, 전개 방향은 20,000자 이내이며 둘 다 비어 있으면 안 된다.
 
 작품의 정합성과 흐름은 다음과 같이 지킨다.
@@ -48,6 +50,10 @@ requiredVariables:
 <project_context>
 {{project_context}}
 </project_context>
+
+<writing_direction>
+{{writing_direction}}
+</writing_direction>
 
 <improvements>
 {{improvements}}

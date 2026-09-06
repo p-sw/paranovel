@@ -130,7 +130,7 @@ describe('character appearance canon', () => {
     expect(worldbuildingValidator.parse({ suggestions: [appearance], conflicts: [] }).suggestions).toEqual([appearance]);
     expect(episodeMemoryValidator.parse(extractedMemory).canonCandidates).toEqual([appearance]);
     expect(projectBlueprintValidator.parse({
-      title: '기록의 문', logline: '기억을 읽는 기록관', genreTags: ['판타지'], details: '', defaultTargetChars: 5000,
+      title: '기록의 문', logline: '기억을 읽는 기록관', genreTags: ['판타지'], writingDirection: '', defaultTargetChars: 5000,
       targetEpisode: 8, targetEpisodeSource: 'USER', canon: [appearance],
       arcs: [{ title: '첫 기록', startEpisode: 1, endEpisode: 8, goal: '기록을 찾는다', conflict: '왕실의 방해', reversalPlan: [] }],
     }).canon).toEqual([appearance]);

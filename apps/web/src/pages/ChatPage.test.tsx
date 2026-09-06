@@ -38,6 +38,28 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('project AI chat', () => {
+  it('labels project writing-direction changes in proposal reviews', async () => {
+    const projectProposal: ChatProposal = {
+      ...proposal,
+      kind: 'PROJECT',
+      targetId: 'story',
+      title: '시점과 문체 변경',
+      before: { writingDirection: '3인칭 현재 시점', revision: 1 },
+      after: { writingDirection: '주인공 1인칭 과거 시점', revision: 2 },
+    };
+    vi.mocked(api.chat.history).mockResolvedValue({
+      thread,
+      messages: [{ ...assistantMessage, proposals: [projectProposal] }],
+    });
+
+    renderPage();
+
+    const card = within(await screen.findByRole('region', { name: '시점과 문체 변경 변경안' }));
+    expect(card.getByText('작문 디렉션')).toBeInTheDocument();
+    expect(card.getByText('3인칭 현재 시점')).toBeInTheDocument();
+    expect(card.getByText('주인공 1인칭 과거 시점')).toBeInTheDocument();
+  });
+
   it.each([['CHARACTER', '인물'], ['CHARACTER_APPEARANCE', '인물 외형']])('shows the %s label and exact free-text metadata in the proposal review', async (category, label) => {
     vi.mocked(api.chat.history).mockResolvedValue({ thread, messages: [{ ...assistantMessage, proposals: [{
       ...proposal, before: null, operation: 'CREATE', after: {

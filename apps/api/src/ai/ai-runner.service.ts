@@ -26,6 +26,7 @@ import type { ZodType } from 'zod';
 
 const MEMORY_VARIABLE_KEYS = [
   'project_context',
+  'writing_direction',
   'improvements',
   'canon',
   'current_arc',

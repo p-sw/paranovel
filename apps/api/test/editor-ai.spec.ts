@@ -41,7 +41,10 @@ describe('episode editing AI', () => {
     episodes = new EpisodesService(database, projects, memory, ai);
     editor = new EditorAiService(database, episodes, memory, ai);
     sideStories = new SideStoriesService(database, memory);
-    projectId = projects.createInternal({ title: '문 앞에서', logline: '기억을 읽는 기록관', genreTags: ['판타지'] }).id;
+    projectId = projects.createInternal({
+      title: '문 앞에서', logline: '기억을 읽는 기록관', genreTags: ['판타지'],
+      writingDirection: '하린의 1인칭 시점과 절제된 문체를 유지한다.',
+    }).id;
     episodeId = (await episodes.create(projectId, { title: '닫힌 문', direction: '비밀을 찾는다.', content: original })).id;
   });
 
@@ -104,6 +107,7 @@ describe('episode editing AI', () => {
     expect(message.edit).toMatchObject({ start: request().selection.start, end: request().selection.end, original: selected, replacement, status: 'PENDING', baseRevision: 1 });
     expect(episodes.get(projectId, episodeId).content).toBe(original);
     expect(completeChat.mock.calls[0]![0]).toMatchObject({ modelRole: 'WRITING', episodeId, promptId: 'episode-editor' });
+    expect(completeChat.mock.calls[0]![0].variables.writing_direction).toBe('하린의 1인칭 시점과 절제된 문체를 유지한다.');
     expect(completeChat.mock.calls[0]![0].variables.episode_context.selection).toEqual(request().selection);
     const applied = editor.apply(projectId, episodeId, message.id);
     expect(applied.episode.content).toBe(original.replace(selected, replacement));

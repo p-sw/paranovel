@@ -1,10 +1,11 @@
 ---
 id: episode-draft
-version: 2
+version: 3
 task: episode_draft
 responseMode: text
 requiredVariables:
   - project_context
+  - writing_direction
   - canon
   - current_arc
   - current_scene
@@ -25,6 +26,7 @@ requiredVariables:
 
 - Canon의 사실, 인물 성격과 관계, 세계 규칙, 연표를 어기지 않는다. 충돌 가능성이 있으면 새로운 사실을 단정하지 않는 방향으로 쓴다.
 - 현재 아크와 승인된 회차 방향을 따르되, 장면마다 인물의 목표와 방해 요소가 드러나게 한다.
+- 프로젝트 작문 디렉션의 시점, 시제, 문체, 분위기, 문장과 문단의 리듬, 대화와 묘사의 비중, 금기를 회차 전체의 모든 새 문장에 직접 적용한다.
 - 최근 사건의 결과와 현재 장면의 장소, 시간, 시점, 등장인물을 자연스럽게 이어 간다.
 - 이전 화가 있으면 그 마지막 장면을 이미 읽은 독자에게 이어 쓰듯 시작한다. `current_scene.previousParagraph`는 연결 기준이며 다시 출력할 문단이 아니다. 마지막 사건이나 대사를 재연하지 말고 그 다음 행동, 대사, 반응 또는 결과로 진행한다.
 - 회차 도입이나 중간에 이전 화의 줄거리, 인물 관계, 설정을 독자에게 상기시키기 위한 설명·회상·대사를 넣지 않는다. 장면이나 시간이 바뀌면 현재의 장소·시간과 필요한 전환 단서만 제시한다. 첫 회차는 주어진 설정과 방향에 맞는 도입을 쓴다.
@@ -42,6 +44,10 @@ requiredVariables:
 <project_context>
 {{project_context}}
 </project_context>
+
+<writing_direction>
+{{writing_direction}}
+</writing_direction>
 
 <improvements>
 {{improvements}}

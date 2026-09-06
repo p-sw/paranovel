@@ -4,13 +4,13 @@ All routes use the `/api` global prefix. JSON errors contain `statusCode`, `erro
 
 ## Projects and setup
 
-- `GET /projects`, `GET|PATCH|DELETE /projects/:projectId`; PATCH requires `expectedRevision`.
+- `GET /projects`, `GET|PATCH|DELETE /projects/:projectId`; project responses include `writingDirection`. PATCH requires `expectedRevision` and accepts `writingDirection` as an optional string of at most 20,000 characters. The legacy `details` PATCH field is accepted as an alias for existing clients.
 - `POST /project-sessions` — `{ logline, genreTags }`; title is deliberately rejected here. The AI's first question must provide an editable title recommendation.
 - `GET /project-sessions/:sessionId` — includes ordered `history` and opaque `stateToken` alongside the current step. Reading previous questions does not modify the session.
 - `POST /project-sessions/:sessionId/respond` — `{ questionId, answer }`, `{ questionId, otherAnswer }`, or `{ questionId, skipOptional: true }`; required questions cannot be skipped. The optional target-episode question always follows the title: a whole number from 5 through 2,000 records a user ending, while skipping delegates the ending length to AI. Choice answers must match the supplied options; nonempty `otherAnswer` is exclusive to choice questions and cannot accompany `answer`. New clients include zero-based `position` and `expectedState`; changing a previous answer invalidates later answers and the blueprint. An unchanged answer preserves them. Stale state returns 409.
 - `POST /project-sessions/:sessionId/turn` — answer alias using `{ questionId, answer }`.
 - `POST /project-sessions/:sessionId/skip` — skip the pending optional question; body `{ questionId? }`.
-- `POST /project-sessions/:sessionId/commit` — optional `{ blueprint, expectedState }`; an edited blueprint is strictly validated. It includes the reviewed title, detailed initial Canon, ending target/source, and one or more 5–20 episode arcs that cover episode 1 through the ending without gaps or overlaps. The first arc is committed as `ACTIVE`; later arcs are committed as `PLANNED`. Project, Canon, arcs, and the session transition commit atomically. Canon and the active arc are indexed afterward, and replaying a committed session retries that indexing safely.
+- `POST /project-sessions/:sessionId/commit` — optional `{ blueprint, expectedState }`; an edited blueprint is strictly validated. It includes the reviewed title, required `writingDirection`, detailed initial Canon, ending target/source, and one or more 5–20 episode arcs that cover episode 1 through the ending without gaps or overlaps. Stored pre-upgrade blueprints map `details` to `writingDirection` when resumed or committed. The first arc is committed as `ACTIVE`; later arcs are committed as `PLANNED`. Project, Canon, arcs, and the session transition commit atomically. Canon and the active arc are indexed afterward, and replaying a committed session retries that indexing safely.
 
 ## Project AI chat
 

@@ -1,10 +1,11 @@
 ---
 id: episode-direction
-version: 5
+version: 6
 task: episode_direction
 responseMode: json
 requiredVariables:
   - project_context
+  - writing_direction
   - canon
   - current_arc
   - current_scene
@@ -22,6 +23,7 @@ requiredVariables:
 다음 원칙을 지켜라.
 
 - 사실 관계는 Canon을 최우선으로 하고 현재 아크, 확정된 회차 요약, 검색 기억의 순서로 정합성을 확인한다.
+- 프로젝트 작문 디렉션의 시점, 시제, 문체, 분위기, 리듬과 금기를 이번 회차의 장면 선택과 전개 방향에 구체적으로 반영한다. 작문 디렉션은 작품의 사실을 확정하는 근거로 사용하지 않는다.
 - 직전 확정 장면이 있으면 그 장소, 시간, 시점, 등장인물과 마지막 결과에서 출발한다. 장면 전환이 필요하면 방향성에 전환 계기를 명시한다.
 - 독자는 이전 화를 방금 읽었다고 전제한다. 이전 화의 사건을 요약·복습하거나 마지막 장면을 재연하는 도입, 인물·관계·설정을 다시 소개하는 장면을 계획하지 않는다. 직전 결과에서 이어지는 새 행동, 선택, 갈등으로 이번 화를 시작한다.
 - 현재 아크를 실제로 한 단계 전진시키며 직전 회차의 결과를 무시하지 않는다.
@@ -41,6 +43,10 @@ requiredVariables:
 <project_context>
 {{project_context}}
 </project_context>
+
+<writing_direction>
+{{writing_direction}}
+</writing_direction>
 
 <improvements>
 {{improvements}}

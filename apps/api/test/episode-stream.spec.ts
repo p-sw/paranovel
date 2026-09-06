@@ -37,7 +37,8 @@ describe('episode draft review stream', () => {
   function serviceWith(ai: unknown) {
     return new EpisodesService(database, projects, {
       assemble: vi.fn(async () => ({
-        projectContext: '{}', canon: '[]', currentArc: 'null', currentScene: 'null',
+        projectContext: '{}', writingDirection: '주인공 1인칭 현재 시점을 유지한다.',
+        canon: '[]', currentArc: 'null', currentScene: 'null',
         recentSummaries: '[]', openForeshadowing: '[]', retrievedMemories: '[]', improvements: '[]',
       })),
     } as never, ai as never);
@@ -73,6 +74,9 @@ describe('episode draft review stream', () => {
       await generateCandidate(service, operation, (event) => events.push(event));
 
       expect(ai.streamText).toHaveBeenCalledTimes(1);
+      expect(ai.streamText.mock.calls[0]![0]).toMatchObject({
+        variables: { writing_direction: '주인공 1인칭 현재 시점을 유지한다.' },
+      });
       expect(ai.completeJson).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
         task: 'continuity_review', includeCore: false,
         variables: expect.objectContaining({ draft_text: draft }),

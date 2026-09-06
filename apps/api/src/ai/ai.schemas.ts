@@ -85,7 +85,7 @@ export const projectBlueprintValidator = z
     title: z.string().trim().min(1).max(200),
     logline: z.string().trim().min(1).max(2_000),
     genreTags: z.array(z.string().trim().min(1)).min(1),
-    details: z.string().max(20_000),
+    writingDirection: z.string().max(20_000),
     defaultTargetChars: z.number().int().min(500).max(30_000),
     targetEpisode: z.number().int().min(5).max(2_000),
     targetEpisodeSource: z.enum(['USER', 'AI']),
@@ -364,7 +364,11 @@ export const projectBlueprintSchema: JsonSchema = {
     title: { type: 'string', minLength: 1, maxLength: 200 },
     logline: { type: 'string', minLength: 1, maxLength: 2000 },
     genreTags: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } },
-    details: { type: 'string', maxLength: 20000 },
+    writingDirection: {
+      type: 'string',
+      maxLength: 20_000,
+      description: '시점, 시제, 문체, 분위기, 문장 호흡, 묘사와 대화 비중, 피할 표현처럼 모든 집필에 계속 적용할 지침',
+    },
     defaultTargetChars: { type: 'integer', minimum: 500, maximum: 30000 },
     targetEpisode: { type: 'integer', minimum: 5, maximum: 2000 },
     targetEpisodeSource: { type: 'string', enum: ['USER', 'AI'] },
@@ -402,7 +406,7 @@ export const projectBlueprintSchema: JsonSchema = {
     },
   },
   required: [
-    'title', 'logline', 'genreTags', 'details', 'defaultTargetChars',
+    'title', 'logline', 'genreTags', 'writingDirection', 'defaultTargetChars',
     'targetEpisode', 'targetEpisodeSource', 'canon', 'arcs',
   ],
 };

@@ -42,7 +42,7 @@ export interface Blueprint {
   title: string;
   logline: string;
   genreTags: string[];
-  details: string;
+  writingDirection: string;
   defaultTargetChars: number;
   targetEpisode: number;
   targetEpisodeSource: 'USER' | 'AI';
@@ -240,7 +240,7 @@ export class ProjectWizardService {
       ? (body as Record<string, unknown>).blueprint
       : undefined;
     if (submitted !== undefined) {
-      const normalized = this.normalizeLegacyBlueprint(submitted);
+      const normalized = this.normalizeBlueprintInput(submitted);
       const adjusted = normalized && typeof normalized === 'object' && !Array.isArray(normalized)
         ? {
             ...(normalized as Record<string, unknown>),
@@ -267,7 +267,7 @@ export class ProjectWizardService {
         title: blueprint.title,
         logline: blueprint.logline,
         genreTags: blueprint.genreTags,
-        details: blueprint.details,
+        writingDirection: blueprint.writingDirection,
         defaultTargetChars: blueprint.defaultTargetChars,
         targetEpisode: blueprint.targetEpisode,
         targetEpisodeSource: blueprint.targetEpisodeSource,
@@ -530,12 +530,16 @@ export class ProjectWizardService {
     return record ? (record.skipped ? 'AI' : 'USER') : null;
   }
 
-  private normalizeLegacyBlueprint(value: unknown): unknown {
+  private normalizeBlueprintInput(value: unknown): unknown {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
-    const record = value as Record<string, unknown>;
-    if (Array.isArray(record.arcs) || !record.arc || typeof record.arc !== 'object') return value;
-    const legacyArc = record.arc as Record<string, unknown>;
-    const { arc: _legacyArc, ...rest } = record;
+    const normalized = { ...(value as Record<string, unknown>) };
+    if (normalized.writingDirection === undefined && typeof normalized.details === 'string') {
+      normalized.writingDirection = normalized.details;
+    }
+    delete normalized.details;
+    if (Array.isArray(normalized.arcs) || !normalized.arc || typeof normalized.arc !== 'object') return normalized;
+    const legacyArc = normalized.arc as Record<string, unknown>;
+    const { arc: _legacyArc, ...rest } = normalized;
     return {
       ...rest,
       targetEpisode: legacyArc.endEpisode,
@@ -545,7 +549,7 @@ export class ProjectWizardService {
   }
 
   private parseStoredBlueprint(json: string | null): Blueprint | null {
-    const raw = this.normalizeLegacyBlueprint(parseJson<unknown>(json, null));
+    const raw = this.normalizeBlueprintInput(parseJson<unknown>(json, null));
     const parsed = projectBlueprintValidator.safeParse(raw);
     return parsed.success ? parsed.data : null;
   }

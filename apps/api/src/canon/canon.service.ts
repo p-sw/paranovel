@@ -179,6 +179,7 @@ export class CanonService {
       projectId,
       variables: {
         project_context: memory.projectContext,
+        writing_direction: memory.writingDirection,
         improvements: memory.improvements,
         canon: memory.canon,
         current_arc: memory.currentArc,

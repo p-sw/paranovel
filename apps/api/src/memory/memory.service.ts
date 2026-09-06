@@ -40,6 +40,7 @@ export interface MemorySearchResult {
 
 export interface AssembledMemory {
   projectContext: string;
+  writingDirection: string;
   canon: string;
   currentArc: string;
   currentScene: string;
@@ -480,6 +481,10 @@ export class MemoryService {
       ledger.flatMap((row) => parseJson<string[]>(row.foreshadowing_resolved_json, [])),
     );
 
+    const storedWritingDirection = parseJson<unknown>(
+      project.writingDirectionJson,
+      project.writingDirectionJson,
+    );
     const assembled: AssembledMemory = {
       projectContext: stringifyJson(
         project
@@ -487,12 +492,13 @@ export class MemoryService {
               title: project.title,
               logline: project.logline,
               genreTags: parseJson(project.genreTagsJson, []),
-              details: parseJson(project.detailsJson, project.detailsJson),
               targetEpisode: project.targetEpisode,
               targetEpisodeSource: project.targetEpisodeSource,
             }
           : {},
       ),
+      writingDirection:
+        typeof storedWritingDirection === 'string' ? storedWritingDirection : '',
       canon: stringifyJson(
         canon.map((entry) => ({
           ref: `canon:${entry.id}`,
@@ -545,6 +551,7 @@ export class MemoryService {
     };
     const mandatoryCharacters = [
       assembled.projectContext,
+      assembled.writingDirection,
       assembled.canon,
       assembled.currentArc,
       assembled.currentScene,
@@ -556,7 +563,7 @@ export class MemoryService {
     );
     if (mandatoryCharacters > maximum) {
       throw new PayloadTooLargeException(
-        `Mandatory Canon/arc/scene/improvement context is ${mandatoryCharacters} characters, exceeding ${maximum}; no required memory was silently dropped`,
+        `Mandatory project/writing-direction/Canon/arc/scene/improvement context is ${mandatoryCharacters} characters, exceeding ${maximum}; no required memory was silently dropped`,
       );
     }
     return assembled;

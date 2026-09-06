@@ -118,6 +118,7 @@ export class ArcsService {
       projectId,
       variables: {
         project_context: memory.projectContext,
+        writing_direction: memory.writingDirection,
         improvements: memory.improvements,
         canon: memory.canon,
         previous_arcs: stringifyJson(allArcs.filter((arc) => arc.status === 'COMPLETE')),

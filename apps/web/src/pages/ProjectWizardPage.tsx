@@ -12,6 +12,22 @@ type AnswerDraft = { answer: string | string[]; otherSelected: boolean; otherTex
 const emptyDraft = (): AnswerDraft => ({ answer: '', otherSelected: false, otherText: '' });
 const isOtherOption = (value: string) => /^(기타(?:\s*\(직접\s*입력\))?|직접\s*입력|other)$/i.test(value.trim());
 
+function normalizeSessionResult(result: ProjectSessionResult): ProjectSessionResult {
+  if (result.step.type !== 'ready') return result;
+  const legacyBlueprint = result.step.blueprint as ProjectBlueprint & { details?: string };
+  const { details, ...blueprint } = legacyBlueprint;
+  return {
+    ...result,
+    step: {
+      ...result.step,
+      blueprint: {
+        ...blueprint,
+        writingDirection: legacyBlueprint.writingDirection ?? details ?? '',
+      },
+    },
+  };
+}
+
 function draftFromRecord(record?: SetupAnswerRecord): AnswerDraft {
   if (!record || record.skipped) return emptyDraft();
   const choice = ['single', 'multi'].includes(record.question.inputType);
@@ -29,7 +45,7 @@ function loadSession(): ProjectSessionResult | null {
   try {
     const raw = sessionStorage.getItem(SESSION_KEY);
     if (!raw) return null;
-    const result = JSON.parse(raw) as ProjectSessionResult;
+    const result = normalizeSessionResult(JSON.parse(raw) as ProjectSessionResult);
     if (result.step?.type !== 'ready') return result;
     const stored = result.step.blueprint as ProjectBlueprint & {
       arc?: ProjectBlueprint['arcs'][number];
@@ -90,13 +106,14 @@ export default function ProjectWizardPage() {
   }, [sessionResult]);
 
   const persistResult = (result: ProjectSessionResult) => {
-    setSessionResult(result);
+    const normalized = normalizeSessionResult(result);
+    setSessionResult(normalized);
     drafts.current = {};
     setCursor(null);
     setAnswer(result.step.type === 'question' ? result.step.question.suggestedAnswer ?? '' : '');
     setOtherSelected(false);
     setOtherText('');
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify(result));
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(normalized));
   };
 
   useEffect(() => {
@@ -493,7 +510,7 @@ export default function ProjectWizardPage() {
                   <div><label className="field-label" htmlFor="review-title">소설 제목</label><input id="review-title" className="input" maxLength={200} value={blueprint.title} onChange={(event) => setBlueprint({ ...blueprint, title: event.target.value })} /></div>
                   <div><label className="field-label" htmlFor="review-logline">로그라인</label><textarea id="review-logline" className="input" maxLength={2_000} value={blueprint.logline} onChange={(event) => setBlueprint({ ...blueprint, logline: event.target.value })} /></div>
                   <div><label className="field-label" htmlFor="review-genres">장르 태그</label><input id="review-genres" className="input" value={reviewGenres} onChange={(event) => setReviewGenres(event.target.value)} /><p className="field-hint">쉼표로 구분해 주세요.</p></div>
-                  <div><label className="field-label" htmlFor="review-details">세계의 핵심</label><textarea id="review-details" className="input" maxLength={20_000} value={blueprint.details} onChange={(event) => setBlueprint({ ...blueprint, details: event.target.value })} /></div>
+                  <div><label className="field-label" htmlFor="review-writing-direction">작문 디렉션</label><textarea id="review-writing-direction" className="input" rows={8} maxLength={20000} value={blueprint.writingDirection} onChange={(event) => setBlueprint({ ...blueprint, writingDirection: event.target.value })} /><p className="field-hint">시점·시제·문체·호흡, 묘사와 대화 방식처럼 AI가 계속 지켜야 할 집필 원칙을 적어 주세요.</p></div>
                   <div><label className="field-label" htmlFor="review-target-chars">회차 기본 목표 글자 수</label><input id="review-target-chars" type="number" min={500} max={30000} step={100} className="input" value={blueprint.defaultTargetChars} onChange={(event) => setBlueprint({ ...blueprint, defaultTargetChars: Number(event.target.value) })} /></div>
                   <div><label className="field-label" htmlFor="review-target-episode">목표 완결 회차</label><input id="review-target-episode" type="number" className="input" value={blueprint.targetEpisode} readOnly /><p className="field-hint">{blueprint.targetEpisodeSource === 'AI' ? '목표를 비워 두어 AI가 작품 규모에 맞춰 제안한 회차예요.' : '인터뷰에서 정한 목표예요.'} 마지막 아크도 이 회차에 끝납니다.</p>{targetQuestionPosition >= 0 ? <Button type="button" className="mt-2" variant="ghost" size="sm" onClick={() => showPosition(targetQuestionPosition)}>목표 회차 다시 정하기</Button> : null}</div>
                 </div>
@@ -564,7 +581,7 @@ function validateBlueprintReview(blueprint: ProjectBlueprint, genres: string): s
   if (!blueprint.title.trim() || !blueprint.logline.trim() || !genreTags.length) return '제목, 로그라인과 장르를 입력해 주세요.';
   if (blueprint.title.trim().length > 200) return '제목은 200자 이하여야 합니다.';
   if (blueprint.logline.trim().length > 2_000) return '로그라인은 2,000자 이하여야 합니다.';
-  if (blueprint.details.length > 20_000) return '세계의 핵심 설정은 20,000자 이하여야 합니다.';
+  if (blueprint.writingDirection.length > 20_000) return '작문 디렉션은 20,000자 이하여야 합니다.';
   if (!Number.isInteger(blueprint.defaultTargetChars) || blueprint.defaultTargetChars < 500 || blueprint.defaultTargetChars > 30_000) {
     return '회차 기본 목표 글자 수는 500자에서 30,000자 사이여야 합니다.';
   }

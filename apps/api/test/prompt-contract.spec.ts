@@ -8,6 +8,7 @@ import {
 
 const variables: Record<string, unknown> = {
   project_context: '{"title":"기억의 문"}',
+  writing_direction: '하린의 1인칭 현재 시점과 절제된 문체를 유지한다.',
   improvements: '[]',
   canon: '[]',
   previous_arcs: '[]',
@@ -105,6 +106,25 @@ describe('expanded prompt contracts', () => {
     expect(rendered.system).toContain('해당 부분의 기존 내용을 보존하고 충돌 이유를 conflicts에 표시');
   });
 
+  it.each([
+    'worldbuilding-generate',
+    'arc-plan',
+    'project-chat',
+    'episode-direction',
+    'episode-direction-refine',
+    'episode-draft',
+    'episode-continue',
+    'episode-editor',
+    'continuity-repair',
+  ] as PromptId[])('passes the persistent writing direction directly to %s', (promptId) => {
+    const rendered = new PromptRegistryService().render(promptId, variables);
+
+    expect(rendered.user).toContain(
+      `<writing_direction>\n${variables.writing_direction}\n</writing_direction>`,
+    );
+    expect(rendered.system).toContain('작문 디렉션');
+  });
+
   it('reviews only factual contradictions without importing general writing guidance', () => {
     const rendered = new PromptRegistryService().render('continuity-review', variables, { includeCore: false });
     expect(rendered.refs.map((ref) => ref.id)).toEqual(['memory-contract', 'continuity-review']);
@@ -113,6 +133,7 @@ describe('expanded prompt contracts', () => {
     expect(rendered.system).toContain('회상 속 시간·장소·인물 상태를 현재 장면과 직접 비교해 모순으로 만들지 않는다');
     expect(rendered.system).toContain('이를 설정·시간대·장소 오류로 재분류하지 않는다');
     expect(rendered.system).not.toContain('시점, 시제, 호칭, 말투, 공간 배치와 시간 흐름을 일관되게 유지');
+    expect(rendered.user).not.toContain(String(variables.writing_direction));
     expect(rendered.user).toContain('시점·회상 등 서술 기법과 문체·구성은 문제로 보고하지 말라');
   });
 
@@ -120,7 +141,12 @@ describe('expanded prompt contracts', () => {
     const rendered = new PromptRegistryService().render('continuity-repair', variables, { includeCore: false });
     expect(rendered.refs.map((ref) => ref.id)).toEqual(['memory-contract', 'continuity-repair']);
     expect(rendered.system).toContain('선택된 오류와 무관한 연결·전환·자연스러움을 다듬지 말고');
+    expect(rendered.system).toContain('선택된 오류를 고치기 위해 실제로 바꾸는 부분의 표현을 정할 때만');
+    expect(rendered.system).toContain('작문 디렉션을 이유로 수정 범위를 넓히거나 무관한 문장');
     expect(rendered.user).toContain('선택된 오류를 고치는 데 직접 필요한 경우가 아니면 삽입 원고의 시작과 끝을 바꾸지 말고');
+    expect(rendered.user).toContain(
+      `<writing_direction>\n${variables.writing_direction}\n</writing_direction>`,
+    );
     expect(rendered.user).not.toContain('자연스럽게 맞도록');
   });
 

@@ -182,7 +182,8 @@ export class ChatService implements OnModuleInit {
         task: 'project_chat', promptId: 'project-chat', projectId, modelRole: 'CHAT',
         history, signal, maxTokens: 12_000, toolMaxTokens: 8_000,
         variables: {
-          project_context: memory.projectContext, canon: memory.canon, current_arc: memory.currentArc,
+          project_context: memory.projectContext, writing_direction: memory.writingDirection,
+          canon: memory.canon, current_arc: memory.currentArc,
           current_scene: memory.currentScene, recent_summaries: memory.recentSummaries,
           open_foreshadowing: memory.openForeshadowing, retrieved_memories: memory.retrievedMemories,
           improvements: memory.improvements, record_catalog: catalog,

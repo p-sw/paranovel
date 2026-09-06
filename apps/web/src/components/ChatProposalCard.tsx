@@ -9,7 +9,7 @@ const operationLabels: Record<ChatProposal['operation'], string> = {
   CREATE: '추가', UPDATE: '수정', DELETE: '삭제',
 };
 const fieldLabels: Record<string, string> = {
-  title: '제목', name: '이름', logline: '로그라인', genreTags: '장르', details: '상세 설정',
+  title: '제목', name: '이름', logline: '로그라인', genreTags: '장르', writingDirection: '작문 디렉션', details: '작문 디렉션',
   defaultTargetChars: '목표 글자 수', category: '분류', aliases: '다른 이름', content: '내용',
   metadata: '추가 정보', status: '상태', startEpisodeNumber: '시작 회차', endEpisodeNumber: '마지막 회차',
   startEpisode: '시작 회차', endEpisode: '마지막 회차', goal: '목표', conflict: '갈등',

@@ -31,7 +31,7 @@ export default function ImprovementsPage() {
   return (
     <div className="page-container">
       <header className="page-heading-row">
-        <div><p className="eyebrow">계속 나아지는 집필 습관</p><h1 className="section-title">개선점</h1><p className="page-lead">저장된 규칙은 이후 AI 집필에 빠짐없이 반영됩니다.</p></div>
+        <div><p className="eyebrow">계속 나아지는 집필 습관</p><h1 className="section-title">개선점</h1><p className="page-lead">저장된 규칙은 프로젝트 설정의 작문 디렉션을 보완하며 이후 AI 집필에 빠짐없이 반영됩니다.</p></div>
         <div className="page-actions"><Link to="/compare" className="button button-secondary button-md"><Scale className="size-4" /> 두 원고 비교</Link><Button onClick={() => setEditing('new')}><Plus className="size-4" /> 직접 추가</Button></div>
       </header>
 

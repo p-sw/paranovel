@@ -1,10 +1,11 @@
 ---
 id: continuity-repair
-version: 5
+version: 6
 task: continuity_repair
 responseMode: text
 requiredVariables:
   - project_context
+  - writing_direction
   - canon
   - current_arc
   - current_scene
@@ -25,6 +26,7 @@ requiredVariables:
 다음 원칙을 지켜라.
 
 - `review_issues`는 사용자가 수정을 요청한 항목만 담는다. 수정 대상은 이 목록의 설정·시간대·장소 오류뿐이다. `WARNING`과 `BLOCKING` 모두 각 항목의 근거와 수정 지시에 따라 최소한으로 해결한다. 목록에 없는 문제나 별도의 문체 개선을 임의로 고치지 않는다.
+- `writing_direction`은 선택된 오류를 고치기 위해 실제로 바꾸는 부분의 표현을 정할 때만 따른다. `review_issues`의 사실 근거·수정 지시 또는 Canon과 충돌하면 이들을 우선한다. 작문 디렉션을 이유로 수정 범위를 넓히거나 무관한 문장, 시점·시제·문체·구성을 바꾸지 않는다.
 - 시점·시제·회상·장면 전환·비선형 구성은 보존한다. 공통 집필 지침이나 개선점에 관련 요구가 있어도 이를 통일하거나 제거하지 않는다.
 - Canon을 수정하는 대신 원고를 Canon과 양립하도록 고친다. 새로운 설정, 사건, 인물, 능력 예외를 해결책으로 즉석에서 만들지 않는다.
 - 선택된 오류를 고치는 데 꼭 필요한 부분만 바꾸고, 그 밖의 문구·문장 순서·줄바꿈·공백은 글자 그대로 보존한다.
@@ -41,6 +43,10 @@ requiredVariables:
 <project_context>
 {{project_context}}
 </project_context>
+
+<writing_direction>
+{{writing_direction}}
+</writing_direction>
 
 <improvements>
 {{improvements}}

@@ -1,10 +1,11 @@
 ---
 id: worldbuilding-generate
-version: 4
+version: 5
 task: worldbuilding_generate
 responseMode: json
 requiredVariables:
   - project_context
+  - writing_direction
   - improvements
   - canon
   - current_arc
@@ -23,6 +24,7 @@ requiredVariables:
 
 - 기존 인물, 별칭, 지명, 조직, 능력, 연표, 규칙을 먼저 확인한다.
 - 사용자의 요청을 기존 Canon과 양립 가능한 가장 작은 변경으로 구체화한다.
+- 프로젝트 작문 디렉션은 후보가 이후 본문에서 쓰일 때의 시점, 문체, 분위기, 리듬과 금기를 판단하는 기준으로 반영하되, 그 표현 지침을 세계관 사실이나 Canon 후보의 내용으로 옮기지 않는다.
 - 인물은 욕망, 두려움, 관계, 말투나 행동의 구별점을 갖게 한다. 설정만 많고 서사 기능이 없는 인물을 양산하지 않는다.
 - 인물의 시각적 설정은 CHARACTER_APPEARANCE(인물 외형) 후보로 구분하고 해당 인물과 같은 이름·별칭을 사용한다. content에 머리카락 색·길이·스타일, 눈동자 색, 피부색, 체형, 옷의 종류·색·소재, 신발, 장신구, 특징적인 흉터 등을 구체적으로 기록한다. 평소 외형과 장면에 한정된 복장을 구분하고, 정해지지 않은 정보는 미정으로 남긴다.
 - 능력과 제도에는 발동 조건, 비용, 한계, 알려진 예외를 명시한다.
@@ -40,6 +42,10 @@ requiredVariables:
 <project_context>
 {{project_context}}
 </project_context>
+
+<writing_direction>
+{{writing_direction}}
+</writing_direction>
 
 <improvements>
 {{improvements}}

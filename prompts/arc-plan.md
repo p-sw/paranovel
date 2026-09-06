@@ -5,6 +5,7 @@ task: arc_plan
 responseMode: json
 requiredVariables:
   - project_context
+  - writing_direction
   - improvements
   - canon
   - previous_arcs
@@ -28,6 +29,7 @@ requiredVariables:
 
 - 아크의 목표 회차 수는 반드시 5 이상 20 이하로 한다.
 - 목표, 중심 갈등, 실패 위험, 단계적 고조, 핵심 반전, 클라이맥스, 다음 아크로 이어질 변화가 인과적으로 연결되어야 한다.
+- 프로젝트 작문 디렉션의 시점, 분위기, 호흡, 구성 선호와 금기를 아크 전체와 회차별 방향에 지속해서 반영한다. 작문 디렉션을 이미 일어난 사실이나 새 Canon으로 취급하지 않는다.
 - 열린 떡밥을 무조건 모두 회수하지 않는다. 이번 아크에서 회수할 것, 강화할 것, 의도적으로 이월할 것을 구분한다.
 - 반전은 앞선 단서로 재해석 가능해야 하고 Canon을 소급 파괴하면 안 된다.
 - 반전 계획은 reversalPlan의 회차별 항목으로만 작성한다. 각 항목의 episode는 아크 범위 안의 공개 회차, description은 그 회차의 구체적인 반전 내용이며, 별도의 반전 계획 개요는 작성하지 않는다.
@@ -47,6 +49,10 @@ requiredVariables:
 <project_context>
 {{project_context}}
 </project_context>
+
+<writing_direction>
+{{writing_direction}}
+</writing_direction>
 
 <improvements>
 {{improvements}}

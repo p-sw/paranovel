@@ -206,7 +206,7 @@ export const api = {
     get: (projectId: string) => json<Project>(`/projects/${projectId}`),
     update: (
       projectId: string,
-      input: Partial<Pick<Project, 'title' | 'logline' | 'genreTags' | 'details' | 'defaultTargetChars'>> & {
+      input: Partial<Pick<Project, 'title' | 'logline' | 'genreTags' | 'writingDirection' | 'defaultTargetChars'>> & {
         expectedRevision: number;
       },
     ) =>

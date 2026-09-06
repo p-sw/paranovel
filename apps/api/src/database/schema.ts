@@ -6,7 +6,8 @@ export const projects = sqliteTable('projects', {
   title: text('title').notNull(),
   logline: text('logline').notNull(),
   genreTagsJson: text('genre_tags_json').notNull(),
-  detailsJson: text('details_json').notNull(),
+  // Keep the legacy physical name so existing project data needs no migration.
+  writingDirectionJson: text('details_json').notNull(),
   defaultTargetChars: integer('default_target_chars').notNull(),
   targetEpisode: integer('target_episode'),
   targetEpisodeSource: text('target_episode_source'),

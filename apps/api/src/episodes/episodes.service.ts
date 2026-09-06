@@ -1163,6 +1163,7 @@ export class EpisodesService {
   private promptMemory(memory: Awaited<ReturnType<MemoryService['assemble']>>, extra: Record<string, unknown>) {
     return {
       project_context: memory.projectContext,
+      writing_direction: memory.writingDirection,
       canon: memory.canon,
       current_arc: memory.currentArc,
       current_scene: memory.currentScene,

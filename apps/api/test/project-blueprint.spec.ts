@@ -10,7 +10,7 @@ const validBlueprint = {
   title: '달 없는 밤',
   logline: '기록관이 사라진 달을 되찾는다.',
   genreTags: ['판타지'],
-  details: '달빛이 기억을 보관하는 세계',
+  writingDirection: '3인칭 제한 시점과 차분한 문체를 유지한다.',
   defaultTargetChars: 5000,
   targetEpisode: 10,
   targetEpisodeSource: 'USER' as const,
@@ -25,6 +25,8 @@ describe('full project arc blueprint contract', () => {
   it('accepts one contiguous plan from episode 1 through the target ending', () => {
     expect(projectBlueprintValidator.parse(validBlueprint).arcs).toHaveLength(2);
     expect(sharedProjectBlueprintSchema.parse(validBlueprint).targetEpisode).toBe(10);
+    expect(projectBlueprintValidator.parse(validBlueprint).writingDirection).toBe(validBlueprint.writingDirection);
+    expect(sharedProjectBlueprintSchema.parse(validBlueprint).writingDirection).toBe(validBlueprint.writingDirection);
   });
 
   it.each([

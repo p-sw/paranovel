@@ -23,7 +23,7 @@ function readySession(history: SetupAnswerRecord[] = [titleRecord, toneRecord]):
   return {
     session: { id: 'session-1' }, history, stateToken: 'ready-state',
     step: { type: 'ready', blueprint: {
-      title: '달 없는 밤', logline: '잃어버린 달을 찾는다.', genreTags: ['판타지'], details: '', defaultTargetChars: 5000, canon: [],
+      title: '달 없는 밤', logline: '잃어버린 달을 찾는다.', genreTags: ['판타지'], writingDirection: '', defaultTargetChars: 5000, canon: [],
       targetEpisode: 10, targetEpisodeSource: 'AI',
       arcs: [
         { title: '달의 흔적', startEpisode: 1, endEpisode: 5, goal: '달 찾기', conflict: '추격자', reversalPlan: [] },
@@ -231,6 +231,32 @@ describe('project interview input and navigation', () => {
     expect(respond).not.toHaveBeenCalled();
   });
 
+  it('restores a legacy details value as the project writing direction', async () => {
+    const current = readySession();
+    if (current.step.type !== 'ready') throw new Error('ready session expected');
+    const { writingDirection: _writingDirection, ...blueprint } = current.step.blueprint;
+    const legacy = {
+      ...current,
+      step: {
+        ...current.step,
+        blueprint: { ...blueprint, details: '1인칭 현재 시점과 짧은 호흡을 유지한다.' },
+      },
+    } as unknown as ProjectSessionResult;
+
+    await renderSession(legacy);
+
+    expect(screen.getByRole('textbox', { name: '작문 디렉션' }))
+      .toHaveValue('1인칭 현재 시점과 짧은 호흡을 유지한다.');
+    expect(screen.queryByRole('textbox', { name: '세계의 핵심' })).not.toBeInTheDocument();
+    await waitFor(() => {
+      const stored = JSON.parse(sessionStorage.getItem('paranovel.project-session') ?? '{}');
+      expect(stored.step.blueprint).toMatchObject({
+        writingDirection: '1인칭 현재 시점과 짧은 호흡을 유지한다.',
+      });
+      expect(stored.step.blueprint).not.toHaveProperty('details');
+    });
+  });
+
   it('can traverse a skipped historical answer without creating a new answer', async () => {
     const { user, respond } = await renderSession(readySession([titleRecord, { question: tone, answer: null, skipped: true }]));
     await user.click(screen.getByRole('button', { name: '이전 질문' }));
@@ -274,7 +300,7 @@ describe('project interview input and navigation', () => {
         type: 'ready',
         blueprint: {
           title: '달 없는 밤', logline: '잃어버린 달을 찾는다.', genreTags: ['판타지'],
-          details: '', defaultTargetChars: 5000, canon: [],
+          details: '3인칭 과거 시제를 유지한다.', defaultTargetChars: 5000, canon: [],
           arc: { title: '달의 흔적', startEpisode: 1, endEpisode: 5, goal: '달 찾기', conflict: '추격자', reversalPlan: [] },
         },
       },
@@ -287,6 +313,7 @@ describe('project interview input and navigation', () => {
 
     expect(await screen.findByRole('heading', { name: '이 세계로 시작할까요?' })).toBeVisible();
     expect(screen.getByText('현재 아크').closest('summary')).toHaveTextContent('1–5화 · 달의 흔적');
+    expect(screen.getByRole('textbox', { name: '작문 디렉션' })).toHaveValue('3인칭 과거 시제를 유지한다.');
     expect(screen.getByText(/저장된 인터뷰를 복구하지 못했습니다/)).toBeVisible();
   });
 });

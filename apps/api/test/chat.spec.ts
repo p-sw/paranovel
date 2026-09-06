@@ -387,12 +387,43 @@ describe('project chat', () => {
 
   it('supports project updates and creates project-scoped improvements with defaults', async () => {
     const history = await ask([
-      proposal('PROJECT', 'UPDATE', { title: '새 작품명' }, projectId),
+      proposal('PROJECT', 'UPDATE', {
+        title: '새 작품명',
+        writingDirection: '주인공의 1인칭 현재 시점과 빠른 대화 호흡을 유지한다.',
+      }, projectId),
       proposal('IMPROVEMENT', 'CREATE', { title: '간결성', rule: '문장을 간결하게 쓴다' }),
     ]);
     for (const item of history.messages[1]!.proposals) await chat.apply(projectId, item.id);
-    expect(projects.get(projectId).title).toBe('새 작품명');
+    expect(projects.get(projectId)).toMatchObject({
+      title: '새 작품명',
+      writingDirection: '주인공의 1인칭 현재 시점과 빠른 대화 호흡을 유지한다.',
+    });
     expect(improvements.list(projectId)[0]).toMatchObject({ scope: 'PROJECT', projectId, rule: '문장을 간결하게 쓴다', active: true });
+  });
+
+  it('applies a pending project proposal saved with the legacy details field', async () => {
+    const history = await ask([
+      proposal('PROJECT', 'UPDATE', {
+        writingDirection: '3인칭 제한 시점과 묵직한 문체를 유지한다.',
+      }, projectId),
+    ]);
+    const proposalId = history.messages[1]!.proposals[0]!.id;
+    const stored = database.orm.select().from(chatProposals).where(eq(chatProposals.id, proposalId)).get()!;
+    const legacy = (value: string) => {
+      const parsed = JSON.parse(value) as Record<string, unknown>;
+      parsed.details = parsed.writingDirection;
+      delete parsed.writingDirection;
+      return JSON.stringify(parsed);
+    };
+    database.orm.update(chatProposals).set({
+      beforeJson: legacy(stored.beforeJson),
+      afterJson: legacy(stored.afterJson),
+    }).where(eq(chatProposals.id, proposalId)).run();
+
+    await chat.apply(projectId, proposalId);
+
+    expect(projects.get(projectId).writingDirection)
+      .toBe('3인칭 제한 시점과 묵직한 문체를 유지한다.');
   });
 
   it('shows arc archival effects and applies the activation with those effects atomically', async () => {

@@ -43,7 +43,8 @@ describe('selective episode continuity repair', () => {
   function fixture() {
     const memory = {
       assemble: vi.fn(async () => ({
-        projectContext: '{"title":"검토"}', canon: '["오른손 부상"]', currentArc: 'null',
+        projectContext: '{"title":"검토"}', writingDirection: '1인칭 현재 시점',
+        canon: '["오른손 부상"]', currentArc: 'null',
         currentScene: '{"location":"문 앞"}', recentSummaries: '["닫힌 문에 도착했다."]',
         openForeshadowing: '[]', retrievedMemories: '[]', improvements: '[]',
       })),
@@ -76,6 +77,7 @@ describe('selective episode continuity repair', () => {
         candidate_text: draftInput.content, draft_text: draftInput.content,
         review_issues: JSON.stringify([warning]), issues: JSON.stringify([warning]),
         continuity_issues: JSON.stringify([warning]), canon: '["오른손 부상"]',
+        writing_direction: '1인칭 현재 시점',
         boundary_context: '새 회차 전체 초안',
       }),
     }), expect.any(Function), expect.any(Function));

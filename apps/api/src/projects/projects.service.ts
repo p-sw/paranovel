@@ -22,7 +22,7 @@ export interface ProjectView {
   title: string;
   logline: string;
   genreTags: string[];
-  details: string;
+  writingDirection: string;
   defaultTargetChars: number;
   targetEpisode: number | null;
   targetEpisodeSource: 'USER' | 'AI' | null;
@@ -61,7 +61,7 @@ export class ProjectsService {
     title: string;
     logline: string;
     genreTags: string[];
-    details?: string;
+    writingDirection?: string;
     defaultTargetChars?: number;
     targetEpisode?: number;
     targetEpisodeSource?: 'USER' | 'AI';
@@ -79,7 +79,9 @@ export class ProjectsService {
       title: requireString(input.title, 'title', { max: 200 }),
       logline: requireString(input.logline, 'logline', { max: 2_000 }),
       genreTagsJson: stringifyJson(input.genreTags),
-      detailsJson: stringifyJson(input.details ?? ''),
+      writingDirectionJson: stringifyJson(
+        optionalString(input.writingDirection, 'writingDirection', 20_000) ?? '',
+      ),
       defaultTargetChars: input.defaultTargetChars ?? 5_000,
       targetEpisode: input.targetEpisode ?? null,
       targetEpisodeSource: input.targetEpisodeSource ?? null,
@@ -112,8 +114,11 @@ export class ProjectsService {
       if (tags.length === 0) throw new BadRequestException('At least one genre tag is required');
       changes.genreTagsJson = stringifyJson(tags);
     }
-    if ('details' in input) {
-      changes.detailsJson = stringifyJson(optionalString(input.details, 'details', 20_000) ?? '');
+    if ('writingDirection' in input || 'details' in input) {
+      const value = 'writingDirection' in input ? input.writingDirection : input.details;
+      changes.writingDirectionJson = stringifyJson(
+        optionalString(value, 'writingDirection', 20_000) ?? '',
+      );
     }
     if ('defaultTargetChars' in input) {
       const value = Number(input.defaultTargetChars);
@@ -169,7 +174,7 @@ export class ProjectsService {
       title: row.title,
       logline: row.logline,
       genreTags: parseJson(row.genreTagsJson, []),
-      details: parseJson(row.detailsJson, row.detailsJson),
+      writingDirection: this.parseWritingDirection(row.writingDirectionJson),
       defaultTargetChars: row.defaultTargetChars,
       targetEpisode: row.targetEpisode,
       targetEpisodeSource: row.targetEpisodeSource as 'USER' | 'AI' | null,
@@ -180,5 +185,10 @@ export class ProjectsService {
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };
+  }
+
+  private parseWritingDirection(stored: string): string {
+    const parsed = parseJson<unknown>(stored, stored);
+    return typeof parsed === 'string' ? parsed : '';
   }
 }

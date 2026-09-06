@@ -1,10 +1,11 @@
 ---
 id: episode-continue
-version: 3
+version: 4
 task: episode_continue
 responseMode: text
 requiredVariables:
   - project_context
+  - writing_direction
   - canon
   - current_arc
   - current_scene
@@ -27,6 +28,7 @@ requiredVariables:
 다음 원칙을 지켜라.
 
 - Canon, 현재 아크, 현재 장면과 확정된 과거 사건을 지킨다.
+- 프로젝트 작문 디렉션의 시점, 시제, 문체, 분위기, 문장과 문단의 리듬, 대화와 묘사의 비중, 금기를 삽입할 모든 새 문장에 직접 적용한다.
 - 커서 직전의 시점, 시제, 화자, 인물별 말투, 문단 길이와 리듬을 이어 간다.
 - 승인된 전역 및 프로젝트 개선점을 모두 반영한다. 사실 관계와 충돌하면 Canon을 우선한다.
 - 커서 앞 문장을 반복하거나 요약하지 않는다. 이미 존재하는 커서 뒤 문장을 출력에 복사하지 않는다.
@@ -42,6 +44,10 @@ requiredVariables:
 <project_context>
 {{project_context}}
 </project_context>
+
+<writing_direction>
+{{writing_direction}}
+</writing_direction>
 
 <improvements>
 {{improvements}}

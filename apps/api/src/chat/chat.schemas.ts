@@ -25,7 +25,7 @@ export const editableValidators = {
     title: short,
     logline: z.string().trim().min(1).max(2_000),
     genreTags: z.array(z.string().trim().min(1)).min(1),
-    details: z.string().max(20_000),
+    writingDirection: z.string().max(20_000),
     defaultTargetChars: z.number().int().min(500).max(30_000),
   }),
   CANON: z.strictObject({
@@ -69,6 +69,9 @@ export const creationDefaults: Record<ChatKind, Record<string, unknown>> = {
 };
 
 export function editableFields(kind: ChatKind, value: Record<string, unknown>): Record<string, unknown> {
+  const normalized = kind === 'PROJECT' && value.writingDirection === undefined && typeof value.details === 'string'
+    ? { ...value, writingDirection: value.details }
+    : value;
   return Object.fromEntries(Object.keys(editableValidators[kind].shape)
-    .filter((key) => value[key] !== undefined).map((key) => [key, value[key]]));
+    .filter((key) => normalized[key] !== undefined).map((key) => [key, normalized[key]]));
 }

@@ -63,7 +63,9 @@ describe('project interview history and custom answers', () => {
       const targetEpisode = request.variables.target_episode_answer ? Number(request.variables.target_episode_answer) : 25;
       const value = {
         title: request.variables.project_title,
-        logline: '잃어버린 달을 찾는다.', genreTags: ['판타지'], details: '', defaultTargetChars: 5000, canon: [],
+        logline: '잃어버린 달을 찾는다.', genreTags: ['판타지'],
+        writingDirection: '주인공 1인칭 현재 시점과 서늘한 문체를 유지한다.',
+        defaultTargetChars: 5000, canon: [],
         targetEpisode,
         targetEpisodeSource: request.variables.target_episode_answer ? 'USER' : 'AI',
         arcs: plannedArcs(targetEpisode),
@@ -294,6 +296,7 @@ describe('project interview history and custom answers', () => {
     expect(committed.project).toMatchObject({ title: '달 없는 밤', targetEpisode: 25, targetEpisodeSource: 'AI' });
     expect(database.orm.select().from(arcs).where(eq(arcs.projectId, committed.project.id)).all().map((arc) => arc.status))
       .toEqual(['ACTIVE', 'PLANNED']);
+    expect(committed.project.writingDirection).toBe('주인공 1인칭 현재 시점과 서늘한 문체를 유지한다.');
     expect((await wizard.commit(ready.session.id)).project.id).toBe(committed.project.id);
     await expect(wizard.respond(ready.session.id, {
       questionId: 'shared', answer: '새 제목', position: 0, expectedState: ready.stateToken,
@@ -334,14 +337,16 @@ describe('project interview history and custom answers', () => {
     const target = await answerTitle();
     const legacy = {
       title: '달 없는 밤', logline: '잃어버린 달을 찾는다.', genreTags: ['판타지'],
-      details: '', defaultTargetChars: 5000, canon: [],
+      details: '주인공 1인칭 현재 시점과 서늘한 문체를 유지한다.', defaultTargetChars: 5000, canon: [],
       arc: { title: '달의 흔적', startEpisode: 1, endEpisode: 5, goal: '달 찾기', conflict: '추격자', reversalPlan: [] },
     };
     database.orm.update(projectCreationSessions).set({
       status: 'READY', pendingQuestionJson: null, blueprintJson: JSON.stringify(legacy),
     }).where(eq(projectCreationSessions.id, target.session.id)).run();
     expect((await wizard.get(target.session.id)).step).toMatchObject({
-      type: 'ready', blueprint: { targetEpisode: 5, targetEpisodeSource: 'AI', arcs: [legacy.arc] },
+      type: 'ready', blueprint: {
+        writingDirection: legacy.details, targetEpisode: 5, targetEpisodeSource: 'AI', arcs: [legacy.arc],
+      },
     });
   });
 
@@ -375,5 +380,26 @@ describe('project interview history and custom answers', () => {
     const row = database.orm.select().from(projectCreationSessions)
       .where(eq(projectCreationSessions.id, target.session.id)).get()!;
     expect(row).toMatchObject({ status: 'ACTIVE', blueprintJson: null });
+  });
+
+  it('normalizes a READY blueprint saved with the legacy details field before committing it', async () => {
+    const ready = await finish();
+    const row = database.orm.select().from(projectCreationSessions)
+      .where(eq(projectCreationSessions.id, ready.session.id)).get()!;
+    const { writingDirection: _writingDirection, ...legacyBlueprint } = JSON.parse(row.blueprintJson!) as Record<string, unknown>;
+    database.orm.update(projectCreationSessions).set({
+      blueprintJson: JSON.stringify({
+        ...legacyBlueprint,
+        details: '3인칭 관찰자 시점과 고전적인 문체를 유지한다.',
+      }),
+    }).where(eq(projectCreationSessions.id, ready.session.id)).run();
+
+    const restored = await wizard.get(ready.session.id);
+    expect(restored.step).toMatchObject({
+      type: 'ready',
+      blueprint: { writingDirection: '3인칭 관찰자 시점과 고전적인 문체를 유지한다.' },
+    });
+    expect((await wizard.commit(ready.session.id)).project.writingDirection)
+      .toBe('3인칭 관찰자 시점과 고전적인 문체를 유지한다.');
   });
 });

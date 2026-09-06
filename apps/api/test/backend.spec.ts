@@ -1,4 +1,4 @@
-import { ConflictException, UnprocessableEntityException } from '@nestjs/common';
+import { BadRequestException, ConflictException, UnprocessableEntityException } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AiRunnerService } from '../src/ai/ai-runner.service';
 import { AiRunnerService as ConcreteAiRunnerService } from '../src/ai/ai-runner.service';
@@ -54,11 +54,70 @@ describe('backend core', () => {
     vi.clearAllMocks();
   });
 
+  it('preserves an existing details_json value and accepts the legacy details PATCH alias', async () => {
+    const project = projects.createInternal({
+      title: '시점의 문',
+      logline: '기록관이 잃어버린 문장을 찾는다.',
+      genreTags: ['판타지'],
+      writingDirection: '하린의 1인칭 현재 시점으로 간결하게 쓴다.',
+    });
+
+    expect(project.writingDirection).toBe('하린의 1인칭 현재 시점으로 간결하게 쓴다.');
+    expect(
+      database.connection.prepare('SELECT details_json FROM projects WHERE id = ?').get(project.id),
+    ).toEqual({ details_json: JSON.stringify(project.writingDirection) });
+    expect((await memory.assemble(project.id, '')).writingDirection).toBe(project.writingDirection);
+
+    const legacyStoredDetails = '3인칭 관찰자 시점과 긴 문장 호흡을 유지한다.';
+    database.connection.prepare('UPDATE projects SET details_json = ? WHERE id = ?')
+      .run(JSON.stringify(legacyStoredDetails), project.id);
+    expect(projects.get(project.id).writingDirection).toBe(legacyStoredDetails);
+    expect((await memory.assemble(project.id, '')).writingDirection).toBe(legacyStoredDetails);
+
+    const updated = projects.update(project.id, {
+      expectedRevision: project.revision,
+      details: '3인칭 제한 시점. 짧은 문장과 건조한 문체를 유지한다.',
+    });
+    expect(updated).toMatchObject({
+      writingDirection: '3인칭 제한 시점. 짧은 문장과 건조한 문체를 유지한다.',
+      revision: project.revision + 1,
+    });
+    expect((await memory.assemble(project.id, '')).writingDirection).toBe(updated.writingDirection);
+
+    const cleared = projects.update(project.id, {
+      expectedRevision: updated.revision,
+      writingDirection: '',
+    });
+    expect(cleared.writingDirection).toBe('');
+    expect(() => projects.update(project.id, {
+      expectedRevision: cleared.revision,
+      writingDirection: '가'.repeat(20_001),
+    })).toThrow(BadRequestException);
+  });
+
+  it('enforces the writing-direction length limit during internal project creation', () => {
+    const boundary = '가'.repeat(20_000);
+    expect(projects.createInternal({
+      title: '경계의 문',
+      logline: '집필 지침의 경계를 시험한다.',
+      genreTags: ['판타지'],
+      writingDirection: boundary,
+    }).writingDirection).toBe(boundary);
+
+    expect(() => projects.createInternal({
+      title: '넘친 문',
+      logline: '집필 지침의 초과를 시험한다.',
+      genreTags: ['판타지'],
+      writingDirection: `${boundary}가`,
+    })).toThrow(BadRequestException);
+  });
+
   it('loads all runtime prompt files and renders task plus shared prompts', () => {
     const registry = new PromptRegistryService();
     registry.validateAll();
     const prompt = registry.render('episode-direction', {
       project_context: '{}',
+      writing_direction: '',
       canon: '[]',
       current_arc: 'null',
       current_scene: 'null',
@@ -93,7 +152,7 @@ describe('backend core', () => {
         task: 'episode_direction',
         promptId: 'episode-direction',
         variables: {
-          project_context: '{}', canon: '[]', current_arc: 'null', current_scene: 'null', recent_summaries: '[]',
+          project_context: '{}', writing_direction: '', canon: '[]', current_arc: 'null', current_scene: 'null', recent_summaries: '[]',
           open_foreshadowing: '[]', retrieved_memories: '[]', improvements: '[]', user_request: '다음 회차',
         },
         schema: { name: 'episode_direction', value: episodeDirectionSchema },
@@ -131,7 +190,7 @@ describe('backend core', () => {
       task: 'episode_direction',
       promptId: 'episode-direction',
       variables: {
-        project_context: '{}', canon: '[]', current_arc: 'null', current_scene: 'null', recent_summaries: '[]',
+        project_context: '{}', writing_direction: '', canon: '[]', current_arc: 'null', current_scene: 'null', recent_summaries: '[]',
         open_foreshadowing: '[]', retrieved_memories: '[]', improvements: '[]', user_request: '다음 회차',
       },
       schema: { name: 'episode_direction', value: episodeDirectionSchema },
@@ -146,6 +205,7 @@ describe('backend core', () => {
       title: '밤의 기록',
       logline: '기억을 잃는 탐정이 황궁의 비밀을 추적한다.',
       genreTags: ['판타지'],
+      writingDirection: '주인공의 1인칭 과거 시점을 유지한다.',
     });
     const proposal = { title: '첫 단서', direction: '탐정이 황궁에서 사라진 기록을 발견한다.', conflicts: [] };
     const completeJson = vi.fn().mockResolvedValue({ value: proposal });
@@ -158,6 +218,7 @@ describe('backend core', () => {
       variables: expect.objectContaining({
         user_request: '',
         project_context: expect.stringContaining(project.logline),
+        writing_direction: project.writingDirection,
       }),
     }));
     expect(service.list(project.id)).toEqual([]);
@@ -483,7 +544,7 @@ describe('backend core', () => {
           title: '달 없는 밤',
           logline: '잃어버린 달을 찾는다.',
           genreTags: ['판타지'],
-          details: '',
+          writingDirection: '',
           defaultTargetChars: 5000,
           targetEpisode: 5,
           targetEpisodeSource: 'AI',

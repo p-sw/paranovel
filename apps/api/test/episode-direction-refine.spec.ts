@@ -39,7 +39,8 @@ describe('iterative episode direction refinement', () => {
   function fixture() {
     const memory = {
       assemble: vi.fn(async () => ({
-        projectContext: '{"title":"기록관"}', canon: '["오른손 부상"]',
+        projectContext: '{"title":"기록관"}',
+        writingDirection: '주인공의 1인칭 현재 시점과 짧은 호흡을 유지한다.', canon: '["오른손 부상"]',
         currentArc: '{"goal":"닫힌 문의 비밀을 밝힌다."}',
         currentScene: '{"location":"문 앞"}', recentSummaries: '["닫힌 문에 도착했다."]',
         openForeshadowing: '["문의 문양"]', retrievedMemories: '["오랜 동료"]',
@@ -62,7 +63,8 @@ describe('iterative episode direction refinement', () => {
     expect(ai.completeJson).toHaveBeenCalledWith(expect.objectContaining({
       task: 'episode_direction_refine', promptId: 'episode-direction-refine', projectId,
       variables: {
-        project_context: '{"title":"기록관"}', canon: '["오른손 부상"]',
+        project_context: '{"title":"기록관"}',
+        writing_direction: '주인공의 1인칭 현재 시점과 짧은 호흡을 유지한다.', canon: '["오른손 부상"]',
         current_arc: '{"goal":"닫힌 문의 비밀을 밝힌다."}',
         current_scene: '{"location":"문 앞"}', recent_summaries: '["닫힌 문에 도착했다."]',
         open_foreshadowing: '["문의 문양"]', retrieved_memories: '["오랜 동료"]',
