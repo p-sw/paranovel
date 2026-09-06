@@ -1,15 +1,16 @@
 import { BadGatewayException, BadRequestException, ConflictException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, getTableColumns, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { AiRunnerService } from '../ai/ai-runner.service';
 import type { ChatMessage as ModelMessage } from '../ai/ai.types';
 import { ArcsService } from '../arcs/arcs.service';
 import { CanonService } from '../canon/canon.service';
 import { DatabaseService } from '../database/database.service';
-import { chatMessages, chatProposals } from '../database/schema';
+import { chatMessages, chatProposals, chatThreads } from '../database/schema';
 import { ImprovementsService } from '../improvements/improvements.service';
 import { MemoryService } from '../memory/memory.service';
 import { ProjectsService } from '../projects/projects.service';
+import { sanitizeLogText, serializeError } from '../shared/error-log';
 import { id, now, parseJson, stringifyJson } from '../shared/utils';
 import { ChatReadToolsService, type RecordSnapshot, type SnapshotMap } from './chat-read-tools.service';
 import { chatOutputSchema, chatOutputValidator, creationDefaults, editableFields, editableValidators, type ChatKind, type ChatOperation, type ChatOutput } from './chat.schemas';
@@ -17,7 +18,20 @@ import { chatOutputSchema, chatOutputValidator, creationDefaults, editableFields
 type ProposalRow = typeof chatProposals.$inferSelect;
 type IndexTarget = { kind: Exclude<ChatKind, 'PROJECT'>; id: string };
 type Effect = { label: string; before: RecordSnapshot; after: Record<string, unknown> };
+type ChatLogStage = 'turn_persist' | 'memory' | 'snapshot' | 'history' | 'ai' | 'run_link_persist'
+  | 'abort_check' | 'proposal_transaction' | 'proposal_validate' | 'proposal_persist' | 'message_persist' | 'complete';
+type ChatLogContext = {
+  stage: ChatLogStage;
+  projectId: string;
+  threadId: string | null;
+  clientMessageId: string;
+  assistantMessageId: string | null;
+  runId: string | null;
+  model: string;
+  proposal?: { index: number; kind: ChatKind; operation: ChatOperation; targetId: string | null };
+};
 const messageInput = z.strictObject({ content: z.string().trim().min(1).max(20_000), clientMessageId: z.string().trim().min(1).max(200) });
+const threadInput = z.strictObject({ clientThreadId: z.string().trim().min(1).max(200).optional() });
 const GENERATION_ERROR = 'AI 답변을 만들지 못했습니다. 같은 메시지를 다시 시도해 주세요.';
 
 @Injectable()
@@ -45,11 +59,49 @@ export class ChatService implements OnModuleInit {
     }
   }
 
-  history(projectId: string) {
+  threads(projectId: string) {
     this.projects.get(projectId);
-    const proposals = this.database.orm.select().from(chatProposals).where(eq(chatProposals.projectId, projectId)).all();
-    const messages = this.database.orm.select().from(chatMessages).where(eq(chatMessages.projectId, projectId)).orderBy(sql`rowid`).all();
-    return { messages: messages.map((message) => ({
+    return this.database.orm.select({
+      ...getTableColumns(chatThreads),
+      // Keep the outer table qualified inside these correlated subqueries.
+      preview: sql<string>`COALESCE((SELECT substr(content, 1, 180) FROM chat_messages
+        WHERE thread_id = chat_threads.id AND content != '' ORDER BY rowid DESC LIMIT 1), '')`,
+      messageCount: sql<number>`(SELECT count(*) FROM chat_messages WHERE thread_id = chat_threads.id)`,
+      status: sql<'PENDING' | 'COMPLETE' | 'FAILED' | null>`CASE
+        WHEN EXISTS (SELECT 1 FROM chat_messages WHERE thread_id = chat_threads.id AND status = 'PENDING') THEN 'PENDING'
+        ELSE (SELECT status FROM chat_messages WHERE thread_id = chat_threads.id ORDER BY rowid DESC LIMIT 1) END`,
+    }).from(chatThreads).where(eq(chatThreads.projectId, projectId))
+      .orderBy(desc(chatThreads.updatedAt), sql`rowid DESC`).all();
+  }
+
+  createThread(projectId: string, body: unknown = {}) {
+    const parsed = threadInput.safeParse(body ?? {});
+    if (!parsed.success) throw new BadRequestException('채팅방 ID를 올바르게 입력해 주세요.');
+    return this.database.connection.transaction(() => {
+      this.projects.get(projectId);
+      const threadId = parsed.data.clientThreadId ?? id();
+      const existing = this.database.orm.select().from(chatThreads).where(eq(chatThreads.id, threadId)).get();
+      if (existing) {
+        if (existing.projectId !== projectId) throw new ConflictException('이미 사용 중인 채팅방 ID입니다.');
+        return existing;
+      }
+      const stamp = now();
+      const thread = { id: threadId, projectId, title: '새 채팅', createdAt: stamp, updatedAt: stamp };
+      this.database.orm.insert(chatThreads).values(thread).run();
+      return thread;
+    }).immediate();
+  }
+
+  history(projectId: string, threadId?: string) {
+    this.projects.get(projectId);
+    const thread = threadId ? this.requireThread(projectId, threadId) : this.latestThread(projectId);
+    if (!thread) return { thread: null, messages: [] };
+    const proposals = this.database.orm.select({ proposal: chatProposals }).from(chatProposals)
+      .innerJoin(chatMessages, eq(chatMessages.id, chatProposals.messageId))
+      .where(and(eq(chatProposals.projectId, projectId), eq(chatMessages.threadId, thread.id))).all().map((row) => row.proposal);
+    const messages = this.database.orm.select().from(chatMessages)
+      .where(and(eq(chatMessages.projectId, projectId), eq(chatMessages.threadId, thread.id))).orderBy(sql`rowid`).all();
+    return { thread, messages: messages.map((message) => ({
       id: message.id, projectId: message.projectId, clientMessageId: message.clientMessageId,
       role: message.role as 'user' | 'assistant', content: message.content,
       status: message.status as 'PENDING' | 'COMPLETE' | 'FAILED', createdAt: message.createdAt,
@@ -58,38 +110,70 @@ export class ChatService implements OnModuleInit {
     })) };
   }
 
-  async send(projectId: string, body: unknown, signal?: AbortSignal) {
+  async send(projectId: string, body: unknown, signal?: AbortSignal, threadId?: string) {
     const parsed = messageInput.safeParse(body);
     if (!parsed.success) throw new BadRequestException('content와 clientMessageId를 올바르게 입력해 주세요.');
     const input = parsed.data;
-    const turn = this.database.connection.transaction(() => {
-      this.projects.get(projectId);
-      const rows = this.database.orm.select().from(chatMessages).where(and(eq(chatMessages.projectId, projectId), eq(chatMessages.clientMessageId, input.clientMessageId))).all();
-      const user = rows.find((row) => row.role === 'user');
-      const assistant = rows.find((row) => row.role === 'assistant');
-      if (user && user.content !== input.content) throw new ConflictException('같은 메시지 ID에 다른 내용을 사용할 수 없습니다.');
-      if (assistant?.status === 'COMPLETE') return { id: assistant.id, replay: true };
-      const pending = this.database.orm.select({ id: chatMessages.id }).from(chatMessages)
-        .where(and(eq(chatMessages.projectId, projectId), eq(chatMessages.status, 'PENDING'))).get();
-      if (pending) throw new ConflictException('이 작품의 AI가 답변 중입니다. 완료된 뒤 다시 시도해 주세요.');
-      if (assistant) {
-        this.database.orm.update(chatMessages).set({ status: 'PENDING', content: '', error: null, runId: null }).where(eq(chatMessages.id, assistant.id)).run();
-        return { id: assistant.id, replay: false };
-      }
-      const stamp = now();
-      const assistantId = id();
-      this.database.orm.insert(chatMessages).values([
-        { id: id(), projectId, clientMessageId: input.clientMessageId, role: 'user', content: input.content, status: 'COMPLETE', createdAt: stamp },
-        { id: assistantId, projectId, clientMessageId: input.clientMessageId, role: 'assistant', content: '', status: 'PENDING', createdAt: stamp },
-      ]).run();
-      return { id: assistantId, replay: false };
-    }).immediate();
-    if (turn.replay) return this.history(projectId);
-
+    const startedAt = Date.now();
+    const context: ChatLogContext = {
+      stage: 'turn_persist', projectId: sanitizeLogText(projectId), threadId: threadId ? sanitizeLogText(threadId) : null,
+      clientMessageId: sanitizeLogText(input.clientMessageId),
+      assistantMessageId: null, runId: null, model: sanitizeLogText(this.ai.chatModel()),
+    };
+    const logContext = () => ({ ...context, elapsedMs: Date.now() - startedAt });
+    // Only a newly started/retried turn may be marked failed by this request.
+    let activeAssistantId: string | undefined;
+    let activeThreadId: string | undefined;
+    this.logger.log({ event: 'chat_send_started', ...logContext() });
     try {
+      const turn = this.database.connection.transaction(() => {
+        this.projects.get(projectId);
+        const rows = this.database.orm.select().from(chatMessages).where(and(eq(chatMessages.projectId, projectId), eq(chatMessages.clientMessageId, input.clientMessageId))).all();
+        const user = rows.find((row) => row.role === 'user');
+        const assistant = rows.find((row) => row.role === 'assistant');
+        const thread = threadId ? this.requireThread(projectId, threadId)
+          : user?.threadId ? this.requireThread(projectId, user.threadId) : this.latestThread(projectId) ?? this.createThread(projectId);
+        context.threadId = sanitizeLogText(thread.id);
+        if (user && user.threadId !== thread.id) throw new ConflictException('다른 채팅방에서 사용한 메시지 ID입니다.');
+        if (user && user.content !== input.content) throw new ConflictException('같은 메시지 ID에 다른 내용을 사용할 수 없습니다.');
+        if (assistant?.status === 'COMPLETE') return { id: assistant.id, threadId: thread.id, replay: true, runId: assistant.runId };
+        const pending = this.database.orm.select({ id: chatMessages.id }).from(chatMessages)
+          .where(and(eq(chatMessages.threadId, thread.id), eq(chatMessages.status, 'PENDING'))).get();
+        if (pending) throw new ConflictException('이 채팅방의 AI가 답변 중입니다. 완료된 뒤 다시 시도해 주세요.');
+        const stamp = now();
+        const hasMessages = this.database.orm.select({ id: chatMessages.id }).from(chatMessages).where(eq(chatMessages.threadId, thread.id)).get();
+        this.database.orm.update(chatThreads).set({ updatedAt: stamp,
+          ...(!hasMessages ? { title: Array.from(input.content.replace(/\s+/g, ' ')).slice(0, 80).join('') } : {}),
+        }).where(eq(chatThreads.id, thread.id)).run();
+        if (assistant) {
+          this.database.orm.update(chatMessages).set({ status: 'PENDING', content: '', error: null, runId: null }).where(eq(chatMessages.id, assistant.id)).run();
+          return { id: assistant.id, threadId: thread.id, replay: false };
+        }
+        const assistantId = id();
+        this.database.orm.insert(chatMessages).values([
+          { id: id(), projectId, threadId: thread.id, clientMessageId: input.clientMessageId, role: 'user', content: input.content, status: 'COMPLETE', createdAt: stamp },
+          { id: assistantId, projectId, threadId: thread.id, clientMessageId: input.clientMessageId, role: 'assistant', content: '', status: 'PENDING', createdAt: stamp },
+        ]).run();
+        return { id: assistantId, threadId: thread.id, replay: false };
+      }).immediate();
+      context.assistantMessageId = sanitizeLogText(turn.id);
+      if (turn.replay) {
+        context.runId = turn.runId ? sanitizeLogText(turn.runId) : null;
+        context.stage = 'history';
+        const history = this.history(projectId, turn.threadId);
+        context.stage = 'complete';
+        this.logger.log({ event: 'chat_send_completed', ...logContext(), replayed: true });
+        return history;
+      }
+      activeAssistantId = turn.id;
+      activeThreadId = turn.threadId;
+      context.stage = 'memory';
       const memory = await this.memory.assemble(projectId, input.content);
+      context.stage = 'snapshot';
       const { snapshots, catalog } = this.reads.snapshot(projectId);
-      const history = this.modelHistory(projectId, input.clientMessageId);
+      context.stage = 'history';
+      const history = this.modelHistory(projectId, turn.threadId, input.clientMessageId);
+      context.stage = 'ai';
       const result = await this.ai.completeChat({
         task: 'project_chat', promptId: 'project-chat', projectId, modelRole: 'CHAT',
         history, signal, maxTokens: 12_000,
@@ -103,30 +187,57 @@ export class ChatService implements OnModuleInit {
         readTools: this.reads.definitions(),
         readTool: (name, args) => this.reads.call(projectId, name, args, snapshots, signal),
       }, (runId) => {
+        context.runId = sanitizeLogText(runId);
+        context.stage = 'run_link_persist';
         this.database.orm.update(chatMessages).set({ runId }).where(eq(chatMessages.id, turn.id)).run();
+        context.stage = 'ai';
       });
+      context.runId = sanitizeLogText(result.runId);
+      context.stage = 'abort_check';
       signal?.throwIfAborted();
       // No entity is changed while preparing proposals. Persist the complete turn atomically.
+      context.stage = 'proposal_transaction';
       this.database.connection.transaction(() => {
         this.projects.get(projectId);
         const occupied = new Set<string>();
-        for (const proposal of result.value.proposals) {
+        for (const [index, proposal] of result.value.proposals.entries()) {
+          context.stage = 'proposal_validate';
+          context.proposal = { index, kind: proposal.kind, operation: proposal.operation,
+            targetId: proposal.targetId === null ? null : sanitizeLogText(proposal.targetId) };
           if (proposal.targetId) {
             const key = `${proposal.kind}:${proposal.targetId}`;
             if (occupied.has(key)) throw new BadGatewayException('AI가 같은 항목에 중복 변경을 제안했습니다. 다시 시도해 주세요.');
             occupied.add(key);
           }
-          this.database.orm.insert(chatProposals).values(this.prepareProposal(projectId, turn.id, proposal, snapshots)).run();
+          const prepared = this.prepareProposal(projectId, turn.id, proposal, snapshots);
+          context.stage = 'proposal_persist';
+          this.database.orm.insert(chatProposals).values(prepared).run();
         }
+        delete context.proposal;
+        context.stage = 'message_persist';
         this.database.orm.update(chatMessages).set({ content: result.value.reply, status: 'COMPLETE', error: null, runId: result.runId })
           .where(eq(chatMessages.id, turn.id)).run();
+        this.database.orm.update(chatThreads).set({ updatedAt: now() }).where(eq(chatThreads.id, turn.threadId)).run();
       }).immediate();
-      return this.history(projectId);
+      context.stage = 'history';
+      const completed = this.history(projectId, turn.threadId);
+      context.stage = 'complete';
+      this.logger.log({ event: 'chat_send_completed', ...logContext(), replayed: false, proposalCount: result.value.proposals.length });
+      return completed;
     } catch (error) {
-      this.database.orm.update(chatMessages).set({ status: 'FAILED', error: GENERATION_ERROR })
-        .where(eq(chatMessages.id, turn.id)).run();
+      // Record the original failure before touching a potentially failing database.
+      this.logger.error({ event: 'chat_send_failed', ...logContext(), error: serializeError(error) });
+      if (!activeAssistantId) throw error;
+      try {
+        this.database.orm.update(chatMessages).set({ status: 'FAILED', error: GENERATION_ERROR })
+          .where(eq(chatMessages.id, activeAssistantId)).run();
+        if (activeThreadId) this.database.orm.update(chatThreads).set({ updatedAt: now() }).where(eq(chatThreads.id, activeThreadId)).run();
+      } catch (persistenceError) {
+        this.logger.error({ event: 'chat_failure_status_write_failed', ...logContext(),
+          failedStage: context.stage, stage: 'failure_persist', error: serializeError(persistenceError) });
+      }
       if (error instanceof NotFoundException || error instanceof ConflictException) throw error;
-      throw new BadGatewayException(GENERATION_ERROR);
+      throw new BadGatewayException(GENERATION_ERROR, { cause: error });
     }
   }
 
@@ -191,7 +302,7 @@ export class ChatService implements OnModuleInit {
     if (kind === 'PROJECT' && operation !== 'UPDATE') throw new BadGatewayException('프로젝트는 수정만 제안할 수 있습니다.');
     if ((operation === 'CREATE') !== (input.targetId === null)) throw new BadGatewayException('AI 변경 대상이 올바르지 않습니다.');
     let raw: unknown;
-    try { raw = JSON.parse(input.changesJson); } catch { throw new BadGatewayException('AI 변경 필드가 올바르지 않습니다.'); }
+    try { raw = JSON.parse(input.changesJson); } catch (error) { throw new BadGatewayException('AI 변경 필드가 올바르지 않습니다.', { cause: error }); }
     const changes = editableValidators[kind].partial().parse(raw) as Record<string, unknown>;
     if (operation === 'DELETE' && Object.keys(changes).length) throw new BadGatewayException('삭제 제안에는 변경 필드를 넣을 수 없습니다.');
     if (operation === 'UPDATE' && !Object.keys(changes).length) throw new BadGatewayException('수정할 필드가 없습니다.');
@@ -248,8 +359,20 @@ export class ChatService implements OnModuleInit {
       .map((arc) => ({ id: arc.id, revision: arc.revision })).sort((a, b) => a.id.localeCompare(b.id));
   }
 
-  private modelHistory(projectId: string, currentClientId: string): ModelMessage[] {
-    const stored = this.history(projectId).messages;
+  private latestThread(projectId: string) {
+    return this.database.orm.select().from(chatThreads).where(eq(chatThreads.projectId, projectId))
+      .orderBy(desc(chatThreads.updatedAt), sql`rowid DESC`).get();
+  }
+
+  private requireThread(projectId: string, threadId: string) {
+    const thread = this.database.orm.select().from(chatThreads)
+      .where(and(eq(chatThreads.id, threadId), eq(chatThreads.projectId, projectId))).get();
+    if (!thread) throw new NotFoundException('채팅방을 찾을 수 없습니다.');
+    return thread;
+  }
+
+  private modelHistory(projectId: string, threadId: string, currentClientId: string): ModelMessage[] {
+    const stored = this.history(projectId, threadId).messages;
     // A retried turn stays at its original position and must not see later turns.
     const currentIndex = stored.findIndex((message) => message.role === 'user' && message.clientMessageId === currentClientId);
     const all = currentIndex >= 0 ? stored.slice(0, currentIndex + 1) : stored;

@@ -4,17 +4,36 @@ import {
   ExceptionFilter,
   HttpException,
   HttpStatus,
+  Logger,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
+import { sanitizeLogText, serializeError } from './error-log';
 
 @Catch()
 export class ApiExceptionFilter implements ExceptionFilter {
+  private readonly logger = new Logger(ApiExceptionFilter.name);
+
   catch(exception: unknown, host: ArgumentsHost): void {
-    const response = host.switchToHttp().getResponse<Response>();
+    const http = host.switchToHttp();
+    const response = http.getResponse<Response>();
     const status =
       exception instanceof HttpException
         ? exception.getStatus()
         : HttpStatus.INTERNAL_SERVER_ERROR;
+    if (status >= HttpStatus.INTERNAL_SERVER_ERROR) {
+      const request = typeof http.getRequest === 'function'
+        ? http.getRequest<Request | undefined>()
+        : undefined;
+      const pathname = (request?.path ?? request?.originalUrl ?? request?.url ?? '')
+        .split(/[?#]/, 1)[0] ?? '';
+      this.logger.error({
+        event: 'http_request_failed',
+        method: sanitizeLogText(request?.method ?? 'UNKNOWN'),
+        pathname: sanitizeLogText(pathname),
+        status,
+        error: serializeError(exception),
+      });
+    }
     const raw =
       exception instanceof HttpException ? exception.getResponse() : undefined;
     const message =

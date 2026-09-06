@@ -13,13 +13,13 @@ const fieldLabels: Record<string, string> = {
   defaultTargetChars: '목표 글자 수', category: '분류', aliases: '다른 이름', content: '내용',
   metadata: '추가 정보', status: '상태', startEpisodeNumber: '시작 회차', endEpisodeNumber: '마지막 회차',
   startEpisode: '시작 회차', endEpisode: '마지막 회차', goal: '목표', conflict: '갈등',
-  twistPlan: '반전 계획', reversalPlan: '주요 전개', rule: '규칙', rationale: '이유',
+  reversalPlan: '회차별 반전', rule: '규칙', rationale: '이유',
   tags: '태그', beforeExample: '수정 전 예시', afterExample: '수정 후 예시', active: '사용 여부',
 };
 const ignoredFields = new Set([
   'id', 'projectId', 'revision', 'expectedRevision', 'createdAt', 'updatedAt', 'deletedAt',
   'sourceEpisodeId', 'duplicateOfId', 'conflictsWithIds', 'source', 'scope', 'confidence',
-  'nextEpisodeNumber', 'lastEpisodeNumber',
+  'nextEpisodeNumber', 'lastEpisodeNumber', 'twistPlan',
 ]);
 const valueLabels: Record<string, string> = {
   ACTIVE: '사용 중', PENDING: '검토 대기', ACCEPTED: '확정', REJECTED: '제외',

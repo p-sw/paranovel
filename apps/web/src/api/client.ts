@@ -1,10 +1,11 @@
 import { aiStreamEventSchema } from '@paranovel/contracts';
-import type { ChatHistory, ChatProposal } from '@paranovel/contracts';
+import type { ChatHistory, ChatProposal, ChatThread, ChatThreadSummary, EditorAiHistory, EditorAiInput, EditorAiMessage, EpisodeOrder, UpdateEpisodeOrderInput } from '@paranovel/contracts';
 import type {
   Arc,
   ArcPlanProposal,
   CanonEntry,
   CanonCategory,
+  ContinuityIssue,
   CurrentScene,
   Episode,
   Improvement,
@@ -151,10 +152,22 @@ async function ndjson(
 }
 
 export const api = {
+  editorAi: {
+    history: (projectId: string, episodeId: string) =>
+      json<EditorAiHistory>(`/projects/${projectId}/episodes/${episodeId}/editor-ai/messages`),
+    send: (projectId: string, episodeId: string, input: EditorAiInput) =>
+      json<EditorAiHistory>(`/projects/${projectId}/episodes/${episodeId}/editor-ai/messages`, { method: 'POST', body: input }),
+    apply: (projectId: string, episodeId: string, messageId: string) =>
+      json<{ episode: Episode; message: EditorAiMessage }>(`/projects/${projectId}/episodes/${episodeId}/editor-ai/messages/${encodeURIComponent(messageId)}/apply`, { method: 'POST' }),
+  },
   chat: {
-    history: (projectId: string) => json<ChatHistory>(`/projects/${projectId}/chat/messages`),
-    send: (projectId: string, input: { content: string; clientMessageId: string }) =>
-      json<ChatHistory>(`/projects/${projectId}/chat/messages`, { method: 'POST', body: input }),
+    threads: (projectId: string) => json<ChatThreadSummary[]>(`/projects/${projectId}/chat/threads`),
+    createThread: (projectId: string, clientThreadId: string) =>
+      json<ChatThread>(`/projects/${projectId}/chat/threads`, { method: 'POST', body: { clientThreadId } }),
+    history: (projectId: string, threadId?: string) =>
+      json<ChatHistory>(`/projects/${projectId}/chat/${threadId ? `threads/${encodeURIComponent(threadId)}/` : ''}messages`),
+    send: (projectId: string, input: { content: string; clientMessageId: string }, threadId?: string) =>
+      json<ChatHistory>(`/projects/${projectId}/chat/${threadId ? `threads/${encodeURIComponent(threadId)}/` : ''}messages`, { method: 'POST', body: input }),
     apply: (projectId: string, proposalId: string) =>
       json<{ proposal: ChatProposal }>(`/projects/${projectId}/chat/proposals/${proposalId}/apply`, { method: 'POST' }),
   },
@@ -186,6 +199,9 @@ export const api = {
       }),
   },
   episodes: {
+    order: (projectId: string) => json<EpisodeOrder>(`/projects/${projectId}/episodes/order`),
+    updateOrder: (projectId: string, input: UpdateEpisodeOrderInput) =>
+      json<EpisodeOrder>(`/projects/${projectId}/episodes/order`, { method: 'PUT', body: input }),
     list: (projectId: string) => json<Episode[]>(`/projects/${projectId}/episodes`),
     get: (projectId: string, episodeId: string) =>
       json<Episode>(`/projects/${projectId}/episodes/${episodeId}`),
@@ -205,12 +221,28 @@ export const api = {
         body: hint ? { hint } : {},
         signal,
       }),
+    refine: (
+      projectId: string,
+      input: { title: string; direction: string; instruction: string },
+      signal?: AbortSignal,
+    ) =>
+      json<{ title: string; direction: string; conflicts: string[] }>(`/projects/${projectId}/episodes/refine`, {
+        method: 'POST',
+        body: input,
+        signal,
+      }),
     generate: (
       projectId: string,
       input: { title: string; direction: string },
       onEvent: (event: StreamEvent, content: string) => void,
       signal?: AbortSignal,
     ) => ndjson(`/projects/${projectId}/episodes/generate`, input, onEvent, signal),
+    repair: (
+      projectId: string,
+      input: { title: string; direction: string; content: string; issue: ContinuityIssue },
+      onEvent: (event: StreamEvent, content: string) => void,
+      signal?: AbortSignal,
+    ) => ndjson(`/projects/${projectId}/episodes/repair`, input, onEvent, signal),
     update: (
       projectId: string,
       episodeId: string,
@@ -239,6 +271,13 @@ export const api = {
       onEvent: (event: StreamEvent, content: string) => void,
       signal?: AbortSignal,
     ) => ndjson(`/projects/${projectId}/episodes/${episodeId}/continue`, input, onEvent, signal),
+    repairContinuation: (
+      projectId: string,
+      episodeId: string,
+      input: { expectedRevision: number; cursorOffset: number; content: string; issue: ContinuityIssue },
+      onEvent: (event: StreamEvent, content: string) => void,
+      signal?: AbortSignal,
+    ) => ndjson(`/projects/${projectId}/episodes/${episodeId}/repair`, input, onEvent, signal),
     replaceSelection: (
       projectId: string,
       episodeId: string,
@@ -313,7 +352,6 @@ export const api = {
       conflict: string;
       reversalPlan: Array<{ id?: string; episode: number; description: string }>;
       status?: Arc['status'];
-      twistPlan?: string;
     }) =>
       json<Arc>(`/projects/${projectId}/arcs`, {
         method: 'POST',

@@ -21,8 +21,8 @@ const canonDraftValidator = z.object({
 });
 
 export const episodeDirectionValidator = z.object({
-  title: z.string().min(1),
-  direction: z.string().min(1),
+  title: z.string().min(1).max(200).regex(/\S/),
+  direction: z.string().min(1).max(20_000).regex(/\S/),
   conflicts: z.array(z.string()),
 });
 
@@ -114,7 +114,6 @@ export const arcPlanValidator = z
     endEpisodeNumber: z.number().int().positive(),
     goal: z.string().min(1),
     conflict: z.string().min(1),
-    twistPlan: z.string(),
     reversalPlan: z.array(
       z.object({ episode: z.number().int().positive(), description: z.string().min(1) }),
     ),
@@ -139,8 +138,8 @@ export const episodeDirectionSchema: JsonSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    title: { type: 'string' },
-    direction: { type: 'string' },
+    title: { type: 'string', minLength: 1, maxLength: 200 },
+    direction: { type: 'string', minLength: 1, maxLength: 20_000 },
     conflicts: stringArray,
   },
   required: ['title', 'direction', 'conflicts'],
@@ -370,7 +369,6 @@ export const arcPlanSchema: JsonSchema = {
     endEpisodeNumber: { type: 'integer', minimum: 1 },
     goal: { type: 'string' },
     conflict: { type: 'string' },
-    twistPlan: { type: 'string' },
     reversalPlan: {
       type: 'array',
       items: {
@@ -404,7 +402,6 @@ export const arcPlanSchema: JsonSchema = {
     'endEpisodeNumber',
     'goal',
     'conflict',
-    'twistPlan',
     'reversalPlan',
     'episodeDirections',
     'conflicts',

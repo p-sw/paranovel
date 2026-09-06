@@ -9,6 +9,7 @@ import { AiRunnerService } from '../ai/ai-runner.service';
 import { arcPlanSchema, arcPlanValidator } from '../ai/ai.schemas';
 import { DatabaseService } from '../database/database.service';
 import { arcs, projects } from '../database/schema';
+import { formatArcMemory } from '../memory/arc-memory';
 import { MemoryService } from '../memory/memory.service';
 import {
   assertEnum,
@@ -108,7 +109,6 @@ export class ArcsService {
       endEpisodeNumber: end,
       goal: requireString(input.goal, 'goal', { max: 10_000 }),
       conflict: requireString(input.conflict, 'conflict', { max: 10_000 }),
-      twistPlan: requireString(input.twistPlan ?? '', 'twistPlan', { min: 0, max: 20_000 }),
       reversalPlanJson: stringifyJson(Array.isArray(input.reversalPlan) ? input.reversalPlan : []),
       status,
       revision: 1,
@@ -168,7 +168,6 @@ export class ArcsService {
     if ('title' in input) changes.title = requireString(input.title, 'title', { max: 200 });
     if ('goal' in input) changes.goal = requireString(input.goal, 'goal', { max: 10_000 });
     if ('conflict' in input) changes.conflict = requireString(input.conflict, 'conflict', { max: 10_000 });
-    if ('twistPlan' in input) changes.twistPlan = requireString(input.twistPlan, 'twistPlan', { min: 0, max: 20_000 });
     if ('reversalPlan' in input) changes.reversalPlanJson = stringifyJson(input.reversalPlan);
     if ('status' in input) changes.status = assertEnum(input.status, 'status', STATUSES);
     this.database.connection.transaction(() => {
@@ -238,7 +237,7 @@ export class ArcsService {
       projectId: row.projectId,
       sourceType: 'ARC',
       sourceId: row.id,
-      text: `${row.title}\n목표: ${row.goal}\n갈등: ${row.conflict}\n반전: ${row.twistPlan}`,
+      text: formatArcMemory(row),
     });
   }
 
@@ -253,7 +252,6 @@ export class ArcsService {
       endEpisode: row.endEpisodeNumber,
       goal: row.goal,
       conflict: row.conflict,
-      twistPlan: row.twistPlan,
       reversalPlan: parseJson(row.reversalPlanJson, []),
       status: row.status,
       revision: row.revision,

@@ -13,7 +13,6 @@ interface ArcDraft {
   endEpisode: number;
   goal: string;
   conflict: string;
-  twistPlan: string;
   reversalPlan: Arc['reversalPlan'];
   status: Arc['status'];
 }
@@ -24,7 +23,6 @@ const blankArc: ArcDraft = {
   endEpisode: 10,
   goal: '',
   conflict: '',
-  twistPlan: '',
   reversalPlan: [],
   status: 'ACTIVE',
 };
@@ -52,7 +50,6 @@ export default function ArcPage() {
       endEpisode: arc.endEpisode,
       goal: arc.goal,
       conflict: arc.conflict,
-      twistPlan: arc.twistPlan ?? '',
       reversalPlan: arc.reversalPlan,
       status: arc.status,
     });
@@ -91,7 +88,6 @@ export default function ArcPage() {
       endEpisode: proposal.endEpisodeNumber,
       goal: proposal.goal,
       conflict: proposal.conflict,
-      twistPlan: proposal.twistPlan,
       reversalPlan: proposal.reversalPlan,
       status: 'ACTIVE',
     });
@@ -185,7 +181,7 @@ export default function ArcPage() {
           <div className="arc-sections">
             <section><div className="arc-section-icon"><Target className="size-5" /></div><div><span>아크 목표</span><p>{arc.goal}</p></div></section>
             <section><div className="arc-section-icon conflict"><GitBranch className="size-5" /></div><div><span>핵심 갈등</span><p>{arc.conflict}</p></div></section>
-            <section><div className="arc-section-icon twist"><Sparkles className="size-5" /></div><div><span>반전 계획</span><p className="whitespace-pre-wrap">{[arc.twistPlan, ...(arc.reversalPlan.length ? arc.reversalPlan.map((beat) => `${beat.episode}화 — ${beat.description}`) : [])].filter(Boolean).join('\n') || '아직 정한 반전이 없습니다.'}</p></div></section>
+            <section><div className="arc-section-icon twist"><Sparkles className="size-5" /></div><div><span>회차별 반전</span><p className="whitespace-pre-wrap">{arc.reversalPlan.map((beat) => `${beat.episode}화 — ${beat.description}`).join('\n') || '아직 정한 반전이 없습니다.'}</p></div></section>
           </div>
         </article>
       ) : null}
@@ -202,7 +198,6 @@ export default function ArcPage() {
             </div>
             <div><label className="field-label" htmlFor="arc-goal">목표</label><textarea id="arc-goal" className="input" value={form.goal} onChange={(event) => setForm({ ...form, goal: event.target.value })} placeholder="아크가 끝날 때 주인공과 세계가 어떻게 달라져야 하나요?" /></div>
             <div><label className="field-label" htmlFor="arc-conflict">핵심 갈등</label><textarea id="arc-conflict" className="input" value={form.conflict} onChange={(event) => setForm({ ...form, conflict: event.target.value })} placeholder="무엇이 목표 달성을 가로막나요?" /></div>
-            <div><label className="field-label" htmlFor="arc-twist-summary">반전 계획 개요</label><textarea id="arc-twist-summary" className="input" value={form.twistPlan} onChange={(event) => setForm({ ...form, twistPlan: event.target.value })} placeholder="독자가 믿게 될 것과 뒤집힐 진실을 적어 주세요" /></div>
             <div><label className="field-label" htmlFor="arc-twist">회차별 반전</label><textarea id="arc-twist" className="input" value={reversalText} onChange={(event) => setReversalText(event.target.value)} placeholder={'예: 8화 — 조력자의 정체가 드러난다\n10화 — 적의 목적이 복수였음이 밝혀진다'} /><p className="field-hint">각 줄을 ‘8화 — 반전 내용’ 형식으로 적어 주세요.</p></div>
           </div>
           <FieldError>{error}</FieldError>
@@ -259,7 +254,7 @@ export default function ArcPage() {
           <div className="space-y-5">
             <section className="proposal-box">
               <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-story text-xl font-bold">{proposal.title}</h3><Badge tone="plum">{proposal.startEpisodeNumber}–{proposal.endEpisodeNumber}화</Badge></div>
-              <dl className="mt-4 space-y-3 text-sm"><div><dt className="font-bold">목표</dt><dd className="mt-1 leading-6 text-muted">{proposal.goal}</dd></div><div><dt className="font-bold">갈등</dt><dd className="mt-1 leading-6 text-muted">{proposal.conflict}</dd></div><div><dt className="font-bold">반전</dt><dd className="mt-1 whitespace-pre-wrap leading-6 text-muted">{proposal.twistPlan || '개요 없음'}</dd></div></dl>
+              <dl className="mt-4 space-y-3 text-sm"><div><dt className="font-bold">목표</dt><dd className="mt-1 leading-6 text-muted">{proposal.goal}</dd></div><div><dt className="font-bold">갈등</dt><dd className="mt-1 leading-6 text-muted">{proposal.conflict}</dd></div><div><dt className="font-bold">회차별 반전</dt><dd className="mt-1 whitespace-pre-wrap leading-6 text-muted">{proposal.reversalPlan.map((beat) => `${beat.episode}화 — ${beat.description}`).join('\n') || '아직 정한 반전이 없습니다.'}</dd></div></dl>
             </section>
             {proposal.conflicts.length ? <div className="warning-box" role="alert"><strong className="flex items-center gap-2"><AlertTriangle className="size-4" /> 기존 설정과 확인할 충돌</strong><ul>{proposal.conflicts.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul></div> : null}
             <section><h3 className="field-label">회차별 방향 제안</h3><div className="mt-2 space-y-2">{proposal.episodeDirections.map((item) => <article className="rounded-xl border border-line bg-paper p-3" key={item.episode}><div className="flex gap-2 text-sm font-bold"><span className="text-plum-600">{item.episode}화</span><span>{item.title}</span></div><p className="mt-1 text-sm leading-6 text-muted">{item.direction}</p></article>)}</div></section>

@@ -38,7 +38,7 @@ export default function AppShell() {
   const projectsQuery = useQuery({ queryKey: ['projects'], queryFn: api.projects.list });
   const isEditor = /\/episodes\/[^/]+/.test(location.pathname);
   const isComparison = location.pathname.endsWith('/compare');
-  const isChat = location.pathname.endsWith('/chat');
+  const isChat = /\/chat(?:\/[^/]+)?\/?$/.test(location.pathname) && !/\/chat\/history\/?$/.test(location.pathname);
   const focused = isEditor || isComparison;
 
   if (projectQuery.isPending) return <Spinner label="프로젝트를 여는 중" />;

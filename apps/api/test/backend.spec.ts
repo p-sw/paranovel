@@ -144,7 +144,7 @@ describe('backend core', () => {
     expect(service.list(project.id)).toEqual([]);
   });
 
-  it('keeps episode numbers monotonic, hard deletes, and protects revisions', async () => {
+  it('reuses a deleted final episode number, hard deletes, and protects revisions', async () => {
     const project = projects.createInternal({
       title: '밤의 기록',
       logline: '기억을 잃는 탐정이 황궁의 비밀을 추적한다.',
@@ -189,7 +189,7 @@ describe('backend core', () => {
 
     service.remove(project.id, second.id, { expectedRevision: second.revision });
     const third = await service.create(project.id, { title: '세 번째 단서', direction: '' });
-    expect(third.number).toBe(3);
+    expect(third.number).toBe(2);
     const idempotent = await service.create(
       project.id,
       { title: '중복 방지', direction: '' },
@@ -204,7 +204,7 @@ describe('backend core', () => {
     await expect(
       service.create(project.id, { title: '다른 요청', direction: '' }, 'generation-run-1'),
     ).rejects.toBeInstanceOf(ConflictException);
-    expect(database.orm.select().from(episodes).all().map((row) => row.number)).toEqual([1, 3, 4]);
+    expect(database.orm.select().from(episodes).all().map((row) => row.number)).toEqual([1, 2, 3]);
   });
 
   it('blocks NEEDS_REVIEW finalization without changing the manuscript or memory', async () => {

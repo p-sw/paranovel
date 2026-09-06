@@ -5,18 +5,19 @@ import { ArrowDown, MessageCircle, RotateCcw, Send, Sparkles } from 'lucide-reac
 import type { ChatHistory, ChatMessage } from '@paranovel/contracts';
 import { api, isConflict, messageOf } from '../api/client';
 import { createIdempotencyKey } from '../lib';
-import { Badge, Button, ErrorState, Spinner } from '../components/Ui';
+import { Button, ErrorState, Spinner } from '../components/Ui';
 import { ChatProposalCard } from '../components/ChatProposalCard';
+import { ChatHeading } from '../components/ChatHeading';
 
 type Turn = { content: string; clientMessageId: string };
 const suggestions = ['현재 설정에서 모순되는 부분을 찾아줘', '다음 아크를 계획해 줘', '최근 회차를 분석하고 개선점을 제안해 줘'];
 
 export default function ChatPage() {
-  const { projectId = '' } = useParams();
-  return <ProjectChat key={projectId} projectId={projectId} />;
+  const { projectId = '', threadId = '' } = useParams();
+  return <ProjectChat key={`${projectId}:${threadId}`} projectId={projectId} threadId={threadId} />;
 }
 
-function ProjectChat({ projectId }: { projectId: string }) {
+function ProjectChat({ projectId, threadId }: { projectId: string; threadId: string }) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState('');
   const [localTurn, setLocalTurn] = useState<Turn | null>(null);
@@ -28,15 +29,16 @@ function ProjectChat({ projectId }: { projectId: string }) {
   const followRef = useRef(true);
   const sendingRef = useRef(false);
   const applyingRef = useRef(false);
-  const queryKey = ['chat', projectId];
+  const queryKey = ['chat', projectId, threadId];
   const historyQuery = useQuery({
     queryKey,
-    queryFn: () => api.chat.history(projectId),
+    queryFn: () => api.chat.history(projectId, threadId),
+    staleTime: 0,
     refetchInterval: (query) => query.state.data?.messages.some((message) => message.status === 'PENDING') ? 2_000 : false,
   });
   const messages = historyQuery.data?.messages ?? [];
   const sendMutation = useMutation({
-    mutationFn: (turn: Turn) => api.chat.send(projectId, turn),
+    mutationFn: (turn: Turn) => api.chat.send(projectId, turn, threadId),
     onSuccess: async (history) => {
       await queryClient.cancelQueries({ queryKey, exact: true });
       queryClient.setQueryData(queryKey, history);
@@ -47,7 +49,10 @@ function ProjectChat({ projectId }: { projectId: string }) {
       setSendError(messageOf(error));
       void queryClient.invalidateQueries({ queryKey });
     },
-    onSettled: () => { sendingRef.current = false; },
+    onSettled: () => {
+      sendingRef.current = false;
+      void queryClient.invalidateQueries({ queryKey: ['chat-threads', projectId] });
+    },
   });
   const applyMutation = useMutation({
     mutationFn: (proposalId: string) => api.chat.apply(projectId, proposalId),
@@ -106,15 +111,14 @@ function ProjectChat({ projectId }: { projectId: string }) {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   };
 
-  if (historyQuery.isPending) return <Spinner label="대화를 불러오는 중" />;
-  if (historyQuery.isError && !historyQuery.data) return <ErrorState message={messageOf(historyQuery.error)} onRetry={() => { void historyQuery.refetch(); }} />;
+  if (historyQuery.isPending || (historyQuery.isError && !historyQuery.data)) return <div className="chat-page">
+    <ChatHeading projectId={projectId} />
+    {historyQuery.isPending ? <Spinner label="대화를 불러오는 중" />
+      : <ErrorState message={messageOf(historyQuery.error)} onRetry={() => { void historyQuery.refetch(); }} />}
+  </div>;
 
   return <div className="chat-page">
-    <header className="chat-heading">
-      <div><p className="eyebrow">이야기를 함께 설계하기</p><h1 className="section-title">AI 채팅</h1></div>
-      <Badge tone="plum">GPT-5.6-Luna</Badge>
-      <p className="text-sm leading-6 text-muted">설정, 아크와 개선점을 이야기해 보세요. 제안은 적용 버튼을 눌러야 작품에 반영됩니다.</p>
-    </header>
+    <ChatHeading projectId={projectId} title={historyQuery.data?.thread?.title} />
     <div className="chat-history-wrap">
       <div ref={logRef} className="chat-history" role="log" aria-label="프로젝트 AI 대화" aria-live="polite" aria-relevant="additions text"
         onScroll={() => {
@@ -177,7 +181,7 @@ function ProjectChat({ projectId }: { projectId: string }) {
           }
         }} />
       <div className="mt-2 flex items-center justify-between gap-3">
-        <p className="text-xs leading-5 text-muted">회차 본문 작성은 회차 화면에서 진행해 주세요.</p>
+        <p className="text-xs leading-5 text-muted">Enter로 전송 · Shift+Enter로 줄바꿈</p>
         <Button type="submit" disabled={!draft.trim() || pending || applyMutation.isPending || unsavedFailure || draft.trim().length > 20_000} busy={sendMutation.isPending}><Send className="size-4" />보내기</Button>
       </div>
     </form>

@@ -88,10 +88,10 @@
   .mobile-tab { @apply flex min-h-16 flex-col items-center justify-center gap-1 text-[11px] font-semibold text-muted; }
   .mobile-tab.active { @apply text-plum-700; }
   .shell-main-chat { height: 100dvh; min-height: 0; padding-bottom: calc(4rem + env(safe-area-inset-bottom)); }
-  .chat-page { @apply mx-auto flex h-full min-h-0 w-full max-w-5xl flex-col px-3 sm:px-6; }
-  .chat-heading { @apply flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-line py-4 sm:py-5; }
-  .chat-heading > p { @apply w-full; }
-  .chat-heading .section-title { @apply text-2xl; }
+  .chat-page { @apply mx-auto flex h-full min-h-0 w-full flex-col px-3 sm:px-6; }
+  .chat-heading { @apply flex min-h-14 shrink-0 items-center justify-between gap-2 border-b border-line py-1; }
+  .chat-thread-card { @apply flex min-w-0 items-start gap-3 rounded-2xl border border-line bg-surface p-4 shadow-sm transition-colors hover:border-plum-500 hover:bg-plum-50/40 sm:gap-4 sm:p-5; }
+  .chat-thread-card p { overflow-wrap: anywhere; }
   .chat-history-wrap { @apply relative flex min-h-0 flex-1 flex-col; }
   .chat-history { @apply min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain py-5; overflow-anchor: none; }
   .chat-welcome { @apply mx-auto flex max-w-lg flex-col items-center gap-4 px-3 py-8 text-center; }
@@ -114,6 +114,25 @@
   .chat-latest { @apply absolute bottom-3 left-1/2 -translate-x-1/2 whitespace-nowrap shadow-lift; }
   .chat-composer { @apply shrink-0 border-t border-line bg-paper pb-3 pt-3; }
   .chat-composer textarea.input { @apply min-h-20 resize-none text-base; max-height: 25dvh; }
+  .editor-ai-panel { @apply flex min-h-0 min-w-0 flex-col overflow-hidden border-t border-line bg-paper; }
+  .editor-ai-heading { @apply flex h-12 shrink-0 items-center justify-between border-b border-line bg-surface px-4; }
+  .editor-ai-history { @apply min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-4 py-4; overflow-anchor: none; }
+  .editor-ai-welcome { @apply flex flex-col items-center gap-3 py-5 text-center; }
+  .editor-ai-welcome > p { @apply text-sm leading-6 text-muted; }
+  .editor-ai-message { @apply min-w-0; overflow-wrap: anywhere; }
+  .editor-ai-message-user { @apply ml-5 rounded-xl border border-plum-100 bg-plum-50 px-3 py-3; }
+  .editor-ai-message-text { @apply whitespace-pre-wrap text-sm leading-7; }
+  .editor-ai-source { @apply my-2 text-xs text-muted; }
+  .editor-ai-source summary { @apply cursor-pointer py-1; }
+  .editor-ai-source p { @apply mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap leading-6; }
+  .editor-ai-edit { @apply mt-3 rounded-xl border border-line bg-surface p-3; }
+  .editor-ai-replacement { @apply mt-3 max-h-80 overflow-y-auto whitespace-pre-wrap border-l-2 border-plum-500 pl-3 font-story text-sm leading-7; }
+  .editor-ai-composer { @apply shrink-0 border-t border-line bg-surface px-3 pb-3; }
+  .editor-ai-selection { @apply flex min-h-10 items-center justify-between gap-2 text-xs font-semibold text-plum-700; }
+  .editor-ai-selection-text { @apply mb-2 line-clamp-2 whitespace-pre-wrap border-l-2 border-plum-100 pl-2 text-xs leading-5 text-muted; overflow-wrap: anywhere; }
+  .editor-ai-input-wrap { @apply flex items-end rounded-xl border border-line bg-paper p-1 focus-within:border-plum-500 focus-within:ring-2 focus-within:ring-plum-100; }
+  .editor-ai-input-wrap textarea { @apply min-h-16 min-w-0 flex-1 resize-none border-0 bg-transparent px-2 py-2 text-base leading-6 outline-none; max-height: 20dvh; }
+  .editor-ai-input-wrap .icon-button { @apply text-plum-700; }
   .focused-shell .shell-main { @apply pb-0; }
   .dropdown-content { @apply z-50 min-w-52 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-line bg-surface p-1.5 shadow-lift; max-height: var(--radix-dropdown-menu-content-available-height); }
   .dropdown-item { @apply flex min-h-11 cursor-pointer items-center gap-2 break-words rounded-lg px-3 py-2 text-sm text-ink outline-none data-[highlighted]:bg-plum-50 data-[highlighted]:text-plum-700; overflow-wrap: anywhere; }
@@ -157,6 +176,19 @@
   .episode-list { @apply overflow-hidden rounded-2xl border border-line bg-surface shadow-sm; }
   .episode-row { @apply flex items-center border-b border-line px-2 last:border-0 sm:px-4; }
   .episode-row-link { @apply flex min-w-0 flex-1 items-center gap-4 rounded-xl px-2 py-4 transition hover:bg-paper sm:gap-6; }
+  .episode-row-content { @apply flex min-w-0 flex-1 items-center gap-4 px-2 py-4 sm:gap-6; }
+  .episode-placeholder { @apply bg-paper/60 text-muted; }
+  .episode-placeholder .episode-number { @apply bg-line/40 text-muted; }
+  .episode-placeholder h2 { @apply font-normal; }
+  .episode-list-editing { @apply overflow-visible; }
+  .episode-row-editing { @apply relative bg-surface; touch-action: pan-y; }
+  .episode-row-editing:first-child { @apply rounded-t-2xl; }
+  .episode-row-editing:last-child { @apply rounded-b-2xl; }
+  .episode-row-editing.episode-placeholder { @apply bg-paper; }
+  .episode-row-dragging { @apply z-10 rounded-xl shadow-lg ring-2 ring-plum-500; }
+  .episode-drag-handle { @apply shrink-0 cursor-grab text-muted active:cursor-grabbing; touch-action: none; }
+  .episode-drag-handle:disabled { @apply cursor-default opacity-40; }
+  .episode-order-error { @apply mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800; }
   .episode-number { @apply flex size-12 shrink-0 items-baseline justify-center rounded-xl bg-paper pt-3 font-story text-lg font-bold text-plum-700; }
   .episode-number small { @apply ml-0.5 text-[10px] font-semibold; }
   .episode-row h2 { @apply truncate font-story text-lg font-bold; }
@@ -382,6 +414,28 @@
   .editor-context-panel, .episode-rail { display: block; }
   .editor-page { display: grid; height: 100dvh; grid-template-columns: 200px minmax(0, 1fr) 320px; }
   .editor-context-toggle { display: none; }
+}
+
+.editor-page.editor-ai-open { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(180px, 1fr) minmax(260px, 1.2fr); }
+.editor-ai-open > .episode-rail, .editor-ai-open > .editor-context-panel { display: none !important; }
+.editor-ai-open .editor-context-toggle { display: inline-flex; }
+
+@media (max-width: 899px) {
+  .editor-ai-open .editor-title-input { margin-top: .75rem; padding-bottom: .5rem; font-size: 1.25rem; }
+  .editor-ai-open .story-editor { padding-top: .75rem; padding-bottom: .75rem; }
+  .editor-ai-open .editor-actionbar { display: none; }
+  .editor-ai-open .editor-ai-composer { padding-bottom: max(.75rem, env(safe-area-inset-bottom)); }
+}
+
+@media (max-width: 379px) {
+  .editor-toolbar { gap: 2px; }
+  .editor-toolbar > .button { padding-left: 8px; padding-right: 8px; font-size: 12px; }
+  .editor-toolbar > .button > svg { display: none; }
+}
+
+@media (min-width: 900px) {
+  .editor-page.editor-ai-open { grid-template-columns: minmax(0, 1fr) clamp(360px, 38%, 480px); grid-template-rows: minmax(0, 1fr); }
+  .editor-ai-panel { border-top: 0; border-left: 1px solid #e2ded5; }
 }
 
 @media (prefers-reduced-motion: reduce) {

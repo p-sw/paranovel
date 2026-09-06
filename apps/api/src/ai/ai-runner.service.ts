@@ -1,4 +1,4 @@
-import { BadGatewayException, Injectable } from '@nestjs/common';
+import { BadGatewayException, Injectable, Logger } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import { DatabaseService } from '../database/database.service';
 import { aiRuns } from '../database/schema';
@@ -6,6 +6,7 @@ import {
   PromptRegistryService,
   type PromptId,
 } from '../prompts/prompt-registry.service';
+import { sanitizeLogText, serializeError } from '../shared/error-log';
 import { id, now, sha256, stringifyJson } from '../shared/utils';
 import type {
   ChatMessage,
@@ -68,6 +69,8 @@ function stableJson(value: unknown): string {
 
 @Injectable()
 export class AiRunnerService {
+  private readonly logger = new Logger(AiRunnerService.name);
+
   constructor(
     private readonly database: DatabaseService,
     private readonly prompts: PromptRegistryService,
@@ -92,11 +95,12 @@ export class AiRunnerService {
       validator: ZodType<T>;
       readTools: ToolDefinition[];
       readTool: (name: string, argumentsJson: string) => Promise<unknown>;
+      toolMaxTokens?: number;
     },
     onRunStarted?: (runId: string) => void,
   ): Promise<{ runId: string; value: T }> {
     let value: T | undefined;
-    const { runId } = await this.execute({ ...input, modelRole: 'CHAT', includeReferenceTools: input.readTools.some((tool) => tool.function.name === tavilySearchTool.function.name) }, async (request) => {
+    const { runId } = await this.execute({ ...input, modelRole: input.modelRole ?? 'CHAT', includeReferenceTools: input.readTools.some((tool) => tool.function.name === tavilySearchTool.function.name) }, async (request) => {
       const messages = [...request.messages];
       let usage: CompletionUsage = {};
       let calls = 0;
@@ -106,7 +110,7 @@ export class AiRunnerService {
         input.signal?.throwIfAborted();
         const response = await this.gateway.complete({
           ...request, messages: [...messages], schema: undefined,
-          tools: input.readTools, toolChoice: 'auto', maxTokens: 2_000,
+          tools: input.readTools, toolChoice: 'auto', maxTokens: input.toolMaxTokens ?? 2_000,
         });
         usage = addUsage(usage, response.usage);
         if (!response.toolCalls.length) break;
@@ -146,7 +150,7 @@ export class AiRunnerService {
           return { ...response, usage };
         } catch (error) { lastError = error; }
       }
-      throw new BadGatewayException(`AI returned invalid chat output after one retry: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+      throw new BadGatewayException(`AI returned invalid chat output after one retry: ${lastError instanceof Error ? lastError.message : String(lastError)}`, { cause: lastError });
     }, onRunStarted);
     return { runId, value: value as T };
   }
@@ -175,6 +179,7 @@ export class AiRunnerService {
       }
       throw new BadGatewayException(
         `AI returned invalid structured output for ${input.task} after one retry: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+        { cause: lastError },
       );
     });
     return { runId, value: value as T };
@@ -295,16 +300,28 @@ export class AiRunnerService {
         .run();
       return { runId, result };
     } catch (error) {
-      this.database.orm
-        .update(aiRuns)
-        .set({
-          status: input.signal?.aborted ? 'CANCELLED' : 'FAILED',
-          error: error instanceof Error ? error.message.slice(0, 2_000) : String(error),
-          latencyMs: Date.now() - startedAt,
-          completedAt: now(),
-        })
-        .where(eq(aiRuns.id, runId))
-        .run();
+      const context = {
+        runId: sanitizeLogText(runId), task: sanitizeLogText(input.task), model: sanitizeLogText(model),
+        projectId: input.projectId === undefined ? null : sanitizeLogText(input.projectId),
+        episodeId: input.episodeId === undefined ? null : sanitizeLogText(input.episodeId),
+      };
+      this.logger.error({ event: 'ai_run_failed', ...context,
+        elapsedMs: Date.now() - startedAt, error: serializeError(error) });
+      try {
+        this.database.orm
+          .update(aiRuns)
+          .set({
+            status: input.signal?.aborted ? 'CANCELLED' : 'FAILED',
+            error: error instanceof Error ? error.message.slice(0, 2_000) : String(error),
+            latencyMs: Date.now() - startedAt,
+            completedAt: now(),
+          })
+          .where(eq(aiRuns.id, runId))
+          .run();
+      } catch (persistenceError) {
+        this.logger.error({ event: 'ai_run_failure_status_write_failed', ...context,
+          elapsedMs: Date.now() - startedAt, error: serializeError(persistenceError) });
+      }
       throw error;
     }
   }

@@ -39,7 +39,6 @@ export type CanonEntry = ContractCanonEntry & {
 export type Arc = ContractArc & {
   startEpisodeNumber?: number;
   endEpisodeNumber?: number;
-  twistPlan?: string;
   revision?: number;
 };
 
@@ -52,7 +51,6 @@ export interface ArcPlanProposal {
   endEpisodeNumber: number;
   goal: string;
   conflict: string;
-  twistPlan: string;
   reversalPlan: Array<{ episode: number; description: string }>;
   episodeDirections: Array<{ episode: number; title: string; direction: string }>;
   conflicts: string[];

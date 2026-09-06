@@ -5,6 +5,8 @@ const AppShell = lazy(() => import('./components/AppShell'));
 const ArcPage = lazy(() => import('./pages/ArcPage'));
 const CanonPage = lazy(() => import('./pages/CanonPage'));
 const ChatPage = lazy(() => import('./pages/ChatPage'));
+const ChatIndexPage = lazy(() => import('./pages/ChatIndexPage'));
+const ChatHistoryPage = lazy(() => import('./pages/ChatHistoryPage'));
 const ComparePage = lazy(() => import('./pages/ComparePage'));
 const EpisodeEditorPage = lazy(() => import('./pages/EpisodeEditorPage'));
 const EpisodesPage = lazy(() => import('./pages/EpisodesPage'));
@@ -26,7 +28,9 @@ export default function App() {
           <Route path="episodes" element={<EpisodesPage />} />
           <Route path="episodes/:episodeId" element={<EpisodeEditorPage />} />
           <Route path="canon" element={<CanonPage />} />
-          <Route path="chat" element={<ChatPage />} />
+          <Route path="chat" element={<ChatIndexPage />} />
+          <Route path="chat/history" element={<ChatHistoryPage />} />
+          <Route path="chat/:threadId" element={<ChatPage />} />
           <Route path="arc" element={<ArcPage />} />
           <Route path="improvements" element={<ImprovementsPage />} />
           <Route path="settings" element={<ProjectSettingsPage />} />

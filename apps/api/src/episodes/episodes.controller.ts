@@ -8,6 +8,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Req,
   Res,
 } from '@nestjs/common';
@@ -22,6 +23,14 @@ export class EpisodesController {
   @Get()
   list(@Param('projectId') projectId: string) { return this.episodes.list(projectId); }
 
+  @Get('order')
+  order(@Param('projectId') projectId: string) { return this.episodes.order(projectId); }
+
+  @Put('order')
+  updateOrder(@Param('projectId') projectId: string, @Body() body: unknown) {
+    return this.episodes.updateOrder(projectId, body);
+  }
+
   @Post()
   create(
     @Param('projectId') projectId: string,
@@ -34,6 +43,11 @@ export class EpisodesController {
   @Post('propose')
   propose(@Param('projectId') projectId: string, @Body() body: unknown) {
     return this.episodes.propose(projectId, body);
+  }
+
+  @Post('refine')
+  refine(@Param('projectId') projectId: string, @Body() body: unknown) {
+    return this.episodes.refine(projectId, body);
   }
 
   @Post('generate')
@@ -51,6 +65,18 @@ export class EpisodesController {
   @Get(':episodeId')
   get(@Param('projectId') projectId: string, @Param('episodeId') episodeId: string) {
     return this.episodes.get(projectId, episodeId);
+  }
+
+  @Post('repair')
+  repairDraft(
+    @Param('projectId') projectId: string,
+    @Body() body: unknown,
+    @Req() request: Request,
+    @Res() response: Response,
+  ) {
+    return sendNdjson<StreamEvent>(request, response, (emit, signal) =>
+      this.episodes.repairDraft(projectId, body, emit, signal),
+    );
   }
 
   @Patch(':episodeId')
@@ -92,6 +118,19 @@ export class EpisodesController {
     @Body() body: unknown,
   ) {
     return this.episodes.finalize(projectId, episodeId, body);
+  }
+
+  @Post(':episodeId/repair')
+  repairContinuation(
+    @Param('projectId') projectId: string,
+    @Param('episodeId') episodeId: string,
+    @Body() body: unknown,
+    @Req() request: Request,
+    @Res() response: Response,
+  ) {
+    return sendNdjson<StreamEvent>(request, response, (emit, signal) =>
+      this.episodes.repairContinuation(projectId, episodeId, body, emit, signal),
+    );
   }
 
   @Post(':episodeId/selection-replacements')

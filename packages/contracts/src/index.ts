@@ -1,5 +1,38 @@
 import { z } from 'zod';
 
+export interface EditorAiInput {
+  content: string;
+  clientMessageId: string;
+  expectedRevision: number;
+  selection: { start: number; end: number; text: string };
+}
+
+export interface EditorAiEdit {
+  title: string;
+  start: number;
+  end: number;
+  original: string;
+  replacement: string;
+  baseRevision: number;
+  status: 'PENDING' | 'APPLIED';
+}
+
+export interface EditorAiMessage {
+  id: string;
+  projectId: string;
+  episodeId: string;
+  clientMessageId: string;
+  role: 'user' | 'assistant';
+  content: string;
+  status: 'PENDING' | 'COMPLETE' | 'FAILED';
+  request: EditorAiInput | null;
+  edit: EditorAiEdit | null;
+  error: string | null;
+  createdAt: string;
+}
+
+export interface EditorAiHistory { messages: EditorAiMessage[] }
+
 export const idSchema = z.string().min(1);
 export const isoDateSchema = z.string().datetime({ offset: true }).or(z.string().datetime());
 
@@ -145,6 +178,19 @@ export const episodeSchema = z.object({
   updatedAt: isoDateSchema,
 });
 export type Episode = z.infer<typeof episodeSchema>;
+
+export const episodeOrderSchema = z.object({
+  episodes: z.array(episodeSchema),
+  slots: z.array(idSchema.nullable()),
+  revision: z.string().min(1),
+});
+export type EpisodeOrder = z.infer<typeof episodeOrderSchema>;
+
+export const updateEpisodeOrderSchema = z.object({
+  slots: z.array(idSchema.nullable()),
+  expectedRevision: z.string().min(1),
+}).strict();
+export type UpdateEpisodeOrderInput = z.infer<typeof updateEpisodeOrderSchema>;
 
 export const canonEntrySchema = canonDraftSchema.extend({
   id: idSchema,
@@ -311,5 +357,19 @@ export const chatMessageSchema = z.object({
   error: z.string().optional(),
 });
 export type ChatMessage = z.infer<typeof chatMessageSchema>;
-export const chatHistorySchema = z.object({ messages: z.array(chatMessageSchema) });
+export const chatThreadSchema = z.object({
+  id: idSchema,
+  projectId: idSchema,
+  title: z.string(),
+  createdAt: isoDateSchema,
+  updatedAt: isoDateSchema,
+});
+export type ChatThread = z.infer<typeof chatThreadSchema>;
+export const chatThreadSummarySchema = chatThreadSchema.extend({
+  preview: z.string(),
+  messageCount: z.number().int().nonnegative(),
+  status: z.enum(['PENDING', 'COMPLETE', 'FAILED']).nullable(),
+});
+export type ChatThreadSummary = z.infer<typeof chatThreadSummarySchema>;
+export const chatHistorySchema = z.object({ thread: chatThreadSchema.nullable(), messages: z.array(chatMessageSchema) });
 export type ChatHistory = z.infer<typeof chatHistorySchema>;

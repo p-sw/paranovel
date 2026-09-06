@@ -86,7 +86,8 @@ export const arcs = sqliteTable('arcs', {
   endEpisodeNumber: integer('end_episode_number').notNull(),
   goal: text('goal').notNull(),
   conflict: text('conflict').notNull(),
-  twistPlan: text('twist_plan').notNull(),
+  // Retained for existing databases; arc planning uses reversalPlanJson only.
+  twistPlan: text('twist_plan').notNull().default(''),
   reversalPlanJson: text('reversal_plan_json').notNull(),
   status: text('status').notNull(),
   revision: integer('revision').notNull(),
@@ -169,9 +170,18 @@ export const aiRuns = sqliteTable('ai_runs', {
   completedAt: text('completed_at'),
 });
 
+export const chatThreads = sqliteTable('chat_threads', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  title: text('title').notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const chatMessages = sqliteTable('chat_messages', {
   id: text('id').primaryKey(),
   projectId: text('project_id').notNull(),
+  threadId: text('thread_id'),
   clientMessageId: text('client_message_id').notNull(),
   role: text('role').notNull(),
   content: text('content').notNull(),
@@ -200,7 +210,25 @@ export const chatProposals = sqliteTable('chat_proposals', {
   appliedAt: text('applied_at'),
 });
 
+export const editorAiMessages = sqliteTable('editor_ai_messages', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  episodeId: text('episode_id').notNull(),
+  clientMessageId: text('client_message_id').notNull(),
+  role: text('role').notNull(),
+  content: text('content').notNull(),
+  status: text('status').notNull(),
+  requestJson: text('request_json'),
+  editJson: text('edit_json'),
+  appliedAt: text('applied_at'),
+  error: text('error'),
+  runId: text('run_id'),
+  createdAt: text('created_at').notNull(),
+});
+
 export const schema = {
+  editorAiMessages,
+  chatThreads,
   chatMessages,
   chatProposals,
   projects,

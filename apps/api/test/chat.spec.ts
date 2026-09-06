@@ -1,4 +1,4 @@
-import { BadGatewayException, ConflictException, NotFoundException } from '@nestjs/common';
+import { BadGatewayException, ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { AiRunnerService } from '../src/ai/ai-runner.service';
@@ -10,7 +10,7 @@ import { ChatReadToolsService } from '../src/chat/chat-read-tools.service';
 import { ChatService } from '../src/chat/chat.service';
 import { chatOutputSchema, chatOutputValidator, type ChatOutput } from '../src/chat/chat.schemas';
 import { DatabaseService } from '../src/database/database.service';
-import { chatMessages, chatProposals, episodes } from '../src/database/schema';
+import { chatMessages, chatProposals, chatThreads, episodes } from '../src/database/schema';
 import { ImprovementsService } from '../src/improvements/improvements.service';
 import { MemoryService } from '../src/memory/memory.service';
 import { ProjectsService } from '../src/projects/projects.service';
@@ -33,15 +33,21 @@ describe('project chat', () => {
   let chat: ChatService;
   let projectId: string;
   const completeChat = vi.fn();
+  const infoLog = vi.fn();
+  const errorLog = vi.fn();
   const embeddings = vi.fn(async (texts: string[]) => texts.map(() => [0, 1, 0, 1]));
 
   beforeEach(() => {
     vi.stubEnv('DB_PATH', ':memory:');
     vi.stubEnv('OPENROUTER_EMBEDDING_DIMENSIONS', '4');
+    infoLog.mockReset();
+    errorLog.mockReset();
+    vi.spyOn(Logger.prototype, 'log').mockImplementation(infoLog);
+    vi.spyOn(Logger.prototype, 'error').mockImplementation(errorLog);
     database = new DatabaseService();
     memory = new MemoryService(database, { embeddings } as never);
     projects = new ProjectsService(database);
-    const ai = { completeChat } as unknown as AiRunnerService;
+    const ai = { completeChat, chatModel: () => 'test-chat-model' } as unknown as AiRunnerService;
     canon = new CanonService(database, memory, ai);
     arcs = new ArcsService(database, memory, ai);
     improvements = new ImprovementsService(database, ai, memory);
@@ -52,12 +58,105 @@ describe('project chat', () => {
     embeddings.mockClear();
   });
 
-  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.unstubAllGlobals(); database.onApplicationShutdown(); });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.unstubAllGlobals(); database.onApplicationShutdown(); });
 
-  async function ask(proposals: ChatOutput['proposals'], clientMessageId = 'turn-1', content = '작품을 개선해 줘') {
+  async function ask(proposals: ChatOutput['proposals'], clientMessageId = 'turn-1', content = '작품을 개선해 줘', threadId?: string) {
     completeChat.mockResolvedValueOnce({ runId: 'chat-run', value: { reply: '검토할 내용을 준비했습니다.', proposals } });
-    return chat.send(projectId, { content, clientMessageId });
+    return chat.send(projectId, { content, clientMessageId }, undefined, threadId);
   }
+
+  it('creates empty rooms idempotently without creating rooms when reading empty history', () => {
+    expect(chat.history(projectId)).toEqual({ thread: null, messages: [] });
+    expect(chat.threads(projectId)).toEqual([]);
+    const thread = chat.createThread(projectId, { clientThreadId: 'new-room' });
+    expect(chat.createThread(projectId, { clientThreadId: 'new-room' })).toEqual(thread);
+    expect(chat.threads(projectId)).toEqual([{ ...thread, preview: '', messageCount: 0, status: null }]);
+    expect(chat.history(projectId, thread.id)).toEqual({ thread, messages: [] });
+    expect(completeChat).not.toHaveBeenCalled();
+  });
+
+  it('isolates conversation context and proposals by room and sorts history by most recent activity', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-06T00:00:00.000Z'));
+    const first = await ask([proposal('CANON', 'CREATE', canonFields)], 'first-turn', '  첫 번째\n 설정  ');
+    expect(first.thread?.title).toBe('첫 번째 설정');
+    const firstId = first.thread!.id;
+    vi.setSystemTime(new Date('2026-09-06T01:00:00.000Z'));
+    const second = chat.createThread(projectId);
+    expect(chat.history(projectId, second.id).messages).toEqual([]);
+    expect(chat.history(projectId, firstId)).toEqual(first);
+    expect(chat.history(projectId).thread?.id).toBe(second.id);
+    const secondHistory = await ask([], 'second-turn', '다음 아크를 계획해 줘', second.id);
+    expect(completeChat.mock.calls.at(-1)![0].history).toEqual([{ role: 'user', content: '다음 아크를 계획해 줘' }]);
+    expect(secondHistory.messages).toHaveLength(2);
+    expect(secondHistory.messages[1]!.proposals).toEqual([]);
+    expect(chat.threads(projectId).map((thread) => thread.id)).toEqual([second.id, firstId]);
+    expect(chat.threads(projectId)[0]).toMatchObject({ title: '다음 아크를 계획해 줘', messageCount: 2, preview: '검토할 내용을 준비했습니다.', status: 'COMPLETE' });
+
+    await chat.apply(projectId, first.messages[1]!.proposals[0]!.id);
+    vi.setSystemTime(new Date('2026-09-06T02:00:00.000Z'));
+    await ask([], 'first-followup', '이 설정을 이어서 정리해 줘', firstId);
+    const context = completeChat.mock.calls.at(-1)![0].history;
+    expect(context).toHaveLength(3);
+    expect(context[1].content).toContain('APPLIED');
+    expect(JSON.stringify(context)).not.toContain('다음 아크를 계획해 줘');
+    expect(chat.threads(projectId).map((thread) => thread.id)).toEqual([firstId, second.id]);
+    expect(chat.history(projectId, firstId).thread?.title).toBe('첫 번째 설정');
+    expect(chat.history(projectId, second.id)).toEqual(secondHistory);
+  });
+
+  it('rejects foreign and missing rooms and prevents replaying a turn into another room', async () => {
+    const first = await ask([]);
+    const second = chat.createThread(projectId);
+    const other = projects.createInternal({ title: '다른 작품', logline: '다른 세계', genreTags: ['SF'] });
+    const foreign = chat.createThread(other.id);
+    expect(chat.threads(projectId).map((thread) => thread.id)).not.toContain(foreign.id);
+    expect(chat.threads(other.id).map((thread) => thread.id)).toEqual([foreign.id]);
+    for (const threadId of [foreign.id, 'missing-room']) {
+      expect(() => chat.history(projectId, threadId)).toThrow(NotFoundException);
+      await expect(chat.send(projectId, { content: 'question', clientMessageId: 'foreign-turn' }, undefined, threadId)).rejects.toBeInstanceOf(NotFoundException);
+    }
+    expect(() => chat.createThread(other.id, { clientThreadId: second.id })).toThrow(ConflictException);
+    await expect(chat.send(projectId, { content: '작품을 개선해 줘', clientMessageId: 'turn-1' }, undefined, second.id)).rejects.toBeInstanceOf(ConflictException);
+    expect(chat.history(projectId, first.thread!.id)).toEqual(first);
+    expect(chat.history(projectId, second.id).messages).toEqual([]);
+    expect(completeChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a pending reply in its original room while allowing a new room to send', async () => {
+    const first = chat.createThread(projectId);
+    let finish!: (value: unknown) => void;
+    completeChat.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const pending = chat.send(projectId, { content: '이전 방 질문', clientMessageId: 'pending-turn' }, undefined, first.id);
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    expect(chat.threads(projectId)[0]).toMatchObject({ id: first.id, status: 'PENDING' });
+    await expect(chat.send(projectId, { content: '중복 질문', clientMessageId: 'duplicate' }, undefined, first.id)).rejects.toBeInstanceOf(ConflictException);
+    const second = chat.createThread(projectId);
+    const secondHistory = await ask([], 'new-turn', '새 방 질문', second.id);
+    finish({ runId: 'old-run', value: { reply: '이전 방 답변', proposals: [] } });
+    const result = await pending;
+    expect(result.thread?.id).toBe(first.id);
+    expect(result.messages.map((message) => message.content)).toEqual(['이전 방 질문', '이전 방 답변']);
+    expect(chat.history(projectId, second.id)).toEqual(secondHistory);
+  });
+
+  it('retries and replays an older failed room without changing the newer room', async () => {
+    const first = chat.createThread(projectId);
+    completeChat.mockRejectedValueOnce(new Error('temporary failure'));
+    const turn = { content: '첫 방 질문', clientMessageId: 'failed-turn' };
+    await expect(chat.send(projectId, turn, undefined, first.id)).rejects.toBeInstanceOf(BadGatewayException);
+    expect(chat.threads(projectId)[0]).toMatchObject({ status: 'FAILED' });
+    const second = chat.createThread(projectId);
+    const newer = await ask([], 'new-turn', '새 방 질문', second.id);
+    completeChat.mockResolvedValueOnce({ runId: 'retried', value: { reply: '첫 방 답변', proposals: [] } });
+    const retried = await chat.send(projectId, turn);
+    expect(retried.thread?.id).toBe(first.id);
+    expect(retried.messages).toHaveLength(2);
+    expect(completeChat.mock.calls.at(-1)![0].history).toEqual([{ role: 'user', content: turn.content }]);
+    expect(await chat.send(projectId, turn, undefined, first.id)).toEqual(retried);
+    expect(chat.history(projectId, second.id)).toEqual(newer);
+    expect(completeChat).toHaveBeenCalledTimes(3);
+  });
 
   it('keeps questions and proposals in persistent project history without applying changes', async () => {
     const history = await ask([proposal('CANON', 'CREATE', canonFields)]);
@@ -238,6 +337,128 @@ describe('project chat', () => {
     await expect(chat.send(projectId, { ...input, content: '다른 내용' })).rejects.toBeInstanceOf(ConflictException);
   });
 
+  it('logs start and completion with correlation IDs without logging the conversation', async () => {
+    const history = await ask([], 'logged-turn', 'private conversation text');
+    expect(infoLog).toHaveBeenCalledWith(expect.objectContaining({ event: 'chat_send_started', projectId,
+      clientMessageId: 'logged-turn', model: 'test-chat-model', elapsedMs: expect.any(Number) }));
+    expect(infoLog).toHaveBeenCalledWith(expect.objectContaining({ event: 'chat_send_completed', stage: 'complete',
+      assistantMessageId: history.messages[1]!.id, runId: 'chat-run', proposalCount: 0, replayed: false }));
+    await chat.send(projectId, { content: 'private conversation text', clientMessageId: 'logged-turn' });
+    expect(infoLog).toHaveBeenLastCalledWith(expect.objectContaining({ event: 'chat_send_completed', runId: 'chat-run', replayed: true }));
+    expect(errorLog).not.toHaveBeenCalled();
+    expect(JSON.stringify(infoLog.mock.calls)).not.toContain('private conversation text');
+    expect(JSON.stringify(infoLog.mock.calls)).not.toContain('검토할 내용을 준비했습니다.');
+  });
+
+  it('logs the offending proposal and Zod field diagnostics after successful AI output', async () => {
+    await expect(ask([
+      proposal('CANON', 'CREATE', canonFields),
+      proposal('IMPROVEMENT', 'CREATE', { title: 'private proposal title', rule: 'private rule text', scope: 'GLOBAL' }),
+    ], 'invalid-proposal')).rejects.toBeInstanceOf(BadGatewayException);
+    expect(errorLog).toHaveBeenCalledWith(expect.objectContaining({ event: 'chat_send_failed', stage: 'proposal_validate',
+      projectId, clientMessageId: 'invalid-proposal', assistantMessageId: expect.any(String), runId: 'chat-run',
+      proposal: { index: 1, kind: 'IMPROVEMENT', operation: 'CREATE', targetId: null },
+      error: expect.objectContaining({ name: 'ZodError', issues: expect.arrayContaining([
+        expect.objectContaining({ code: 'unrecognized_keys', keys: ['scope'] }),
+      ]) }),
+    }));
+    expect(chat.history(projectId).messages[1]).toMatchObject({ status: 'FAILED', content: '', proposals: [] });
+    expect(database.orm.select().from(chatProposals).all()).toHaveLength(0);
+    const logs = JSON.stringify(errorLog.mock.calls);
+    expect(logs).not.toContain('private proposal title');
+    expect(logs).not.toContain('private rule text');
+  });
+
+  it('logs the path and expected type of an invalid change field', async () => {
+    await expect(ask([proposal('CANON', 'CREATE', { ...canonFields, aliases: 42 })])).rejects.toBeInstanceOf(BadGatewayException);
+    expect(errorLog).toHaveBeenCalledWith(expect.objectContaining({ stage: 'proposal_validate', error: expect.objectContaining({
+      issues: expect.arrayContaining([expect.objectContaining({ path: ['aliases'], code: 'invalid_type', expected: 'array' })]),
+    }) }));
+  });
+
+  it('retains the JSON parsing cause without logging the malformed output', async () => {
+    const invalid = { ...proposal('CANON', 'CREATE'), changesJson: 'private-model-output-that-is-not-json' };
+    await expect(ask([invalid])).rejects.toBeInstanceOf(BadGatewayException);
+    expect(errorLog).toHaveBeenCalledWith(expect.objectContaining({ stage: 'proposal_validate', error: expect.objectContaining({
+      name: 'BadGatewayException', cause: expect.objectContaining({ name: 'SyntaxError' }),
+    }) }));
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain('private-model-output');
+  });
+
+  it('logs OpenRouter failures with the run ID and leaves the public error unchanged', async () => {
+    vi.stubEnv('OPENROUTER_API_KEY', 'private-router-key');
+    vi.stubEnv('AI_CHAT_MODEL', 'openai/gpt-5.6-luna');
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: { message: 'Provider rejected this request' } }, { status: 401 })));
+    const runner = new AiRunnerService(database, new PromptRegistryService(), new OpenRouterGateway(), { isConfigured: () => false } as never);
+    const service = new ChatService(database, runner, projects, canon, arcs, improvements, memory, reads);
+    await expect(service.send(projectId, { content: 'private request', clientMessageId: 'upstream-failure' }))
+      .rejects.toThrow('AI 답변을 만들지 못했습니다. 같은 메시지를 다시 시도해 주세요.');
+    const message = service.history(projectId).messages[1]!;
+    const run = database.connection.prepare("SELECT id, status FROM ai_runs WHERE task = 'project_chat'").get() as { id: string; status: string };
+    expect(run.status).toBe('FAILED');
+    expect(errorLog).toHaveBeenCalledWith(expect.objectContaining({ stage: 'ai', runId: run.id, assistantMessageId: message.id,
+      model: 'openai/gpt-5.6-luna', error: expect.objectContaining({ name: 'ServiceUnavailableException', message: 'Provider rejected this request' }),
+    }));
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain('private-router-key');
+  });
+
+  it('logs memory failures before an AI run exists', async () => {
+    vi.spyOn(memory, 'assemble').mockRejectedValueOnce(new Error('Context assembly failed'));
+    await expect(chat.send(projectId, { content: 'question', clientMessageId: 'memory-failure' })).rejects.toBeInstanceOf(BadGatewayException);
+    expect(errorLog).toHaveBeenCalledWith(expect.objectContaining({ stage: 'memory', runId: null,
+      assistantMessageId: expect.any(String), error: expect.objectContaining({ message: 'Context assembly failed' }),
+    }));
+    expect(completeChat).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes proposal persistence from validation failures and rolls back proposals', async () => {
+    database.connection.exec("CREATE TEMP TRIGGER reject_proposal BEFORE INSERT ON chat_proposals BEGIN SELECT RAISE(FAIL, 'Synthetic proposal storage failure'); END");
+    await expect(ask([proposal('CANON', 'CREATE', canonFields)])).rejects.toBeInstanceOf(BadGatewayException);
+    expect(errorLog).toHaveBeenCalledWith(expect.objectContaining({ stage: 'proposal_persist', runId: 'chat-run',
+      proposal: { index: 0, kind: 'CANON', operation: 'CREATE', targetId: null },
+    }));
+    expect(JSON.stringify(errorLog.mock.calls)).toContain('Synthetic proposal storage failure');
+    expect(database.orm.select().from(chatProposals).all()).toHaveLength(0);
+    expect(chat.history(projectId).messages[1]!.status).toBe('FAILED');
+  });
+
+  it('logs final answer persistence failures separately', async () => {
+    database.connection.exec("CREATE TEMP TRIGGER reject_answer BEFORE UPDATE ON chat_messages WHEN NEW.status = 'COMPLETE' BEGIN SELECT RAISE(FAIL, 'Synthetic answer storage failure'); END");
+    await expect(ask([proposal('CANON', 'CREATE', canonFields)])).rejects.toBeInstanceOf(BadGatewayException);
+    expect(errorLog).toHaveBeenCalledWith(expect.objectContaining({ stage: 'message_persist', runId: 'chat-run' }));
+    expect(errorLog.mock.calls[0]![0]).not.toHaveProperty('proposal');
+    expect(database.orm.select().from(chatProposals).all()).toHaveLength(0);
+    expect(chat.history(projectId).messages[1]!.status).toBe('FAILED');
+  });
+
+  it('captures the run ID even when linking it to the message fails', async () => {
+    database.connection.exec("CREATE TEMP TRIGGER reject_run_link BEFORE UPDATE ON chat_messages WHEN NEW.run_id IS NOT NULL BEGIN SELECT RAISE(FAIL, 'Synthetic run link failure'); END");
+    completeChat.mockImplementationOnce(async (_input, onRunStarted) => { onRunStarted('unlinked-run'); });
+    await expect(chat.send(projectId, { content: 'question', clientMessageId: 'run-link-failure' })).rejects.toBeInstanceOf(BadGatewayException);
+    expect(errorLog).toHaveBeenCalledWith(expect.objectContaining({ stage: 'run_link_persist', runId: 'unlinked-run' }));
+    expect(chat.history(projectId).messages[1]!.status).toBe('FAILED');
+  });
+
+  it('logs the original failure before a failed status write and retains it as the thrown cause', async () => {
+    database.connection.exec("CREATE TEMP TRIGGER reject_failure_status BEFORE UPDATE ON chat_messages WHEN NEW.status = 'FAILED' BEGIN SELECT RAISE(FAIL, 'Synthetic failure status storage failure'); END");
+    const original = new Error('Original provider failure');
+    completeChat.mockRejectedValueOnce(original);
+    await expect(chat.send(projectId, { content: 'question', clientMessageId: 'double-failure' })).rejects.toMatchObject({ cause: original });
+    expect(errorLog.mock.calls.map(([entry]) => entry.event)).toEqual(['chat_send_failed', 'chat_failure_status_write_failed']);
+    expect(errorLog.mock.calls[0]![0]).toMatchObject({ stage: 'ai', error: { message: original.message } });
+    expect(errorLog.mock.calls[1]![0]).toMatchObject({ stage: 'failure_persist', failedStage: 'ai' });
+    expect(JSON.stringify(errorLog.mock.calls[1])).toContain('Synthetic failure status storage failure');
+    expect(chat.history(projectId).messages[1]!.status).toBe('PENDING');
+  });
+
+  it('logs an initial turn write failure without marking another turn failed', async () => {
+    database.connection.exec("CREATE TEMP TRIGGER reject_turn BEFORE INSERT ON chat_messages BEGIN SELECT RAISE(FAIL, 'Synthetic turn storage failure'); END");
+    await expect(chat.send(projectId, { content: 'question', clientMessageId: 'turn-failure' })).rejects.toThrow('Synthetic turn storage failure');
+    expect(errorLog).toHaveBeenCalledOnce();
+    expect(errorLog.mock.calls[0]![0]).toMatchObject({ stage: 'turn_persist', assistantMessageId: null, runId: null });
+    expect(chat.history(projectId).messages).toEqual([]);
+  });
+
   it('keeps retries in their original conversation position without using later turns', async () => {
     completeChat.mockRejectedValueOnce(new Error('temporary failure'));
     await expect(chat.send(projectId, { content: '첫 번째 질문', clientMessageId: 'first' })).rejects.toBeInstanceOf(BadGatewayException);
@@ -255,7 +476,8 @@ describe('project chat', () => {
   });
 
   it('marks interrupted pending assistants failed on startup', async () => {
-    database.orm.insert(chatMessages).values({ id: 'interrupted', projectId, clientMessageId: 'old', role: 'assistant', content: '', status: 'PENDING', createdAt: new Date().toISOString() }).run();
+    const thread = chat.createThread(projectId);
+    database.orm.insert(chatMessages).values({ id: 'interrupted', projectId, threadId: thread.id, clientMessageId: 'old', role: 'assistant', content: '', status: 'PENDING', createdAt: new Date().toISOString() }).run();
     await chat.onModuleInit();
     expect(chat.history(projectId).messages[0]).toMatchObject({ status: 'FAILED', error: expect.stringContaining('재시작') });
   });
@@ -270,6 +492,7 @@ describe('project chat', () => {
     finish({ runId: 'late', value: { reply: '늦은 답변', proposals: [] } });
     await expect(pending).rejects.toBeInstanceOf(NotFoundException);
     expect(database.orm.select().from(chatMessages).all()).toHaveLength(0);
+    expect(database.orm.select().from(chatThreads).all()).toHaveLength(0);
   });
 
   it('reads a specific old draft episode in bounded pages without changing its body or status', async () => {

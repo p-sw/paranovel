@@ -42,7 +42,6 @@ export const editableValidators = {
     endEpisodeNumber: z.number().int().positive(),
     goal: z.string().trim().min(1).max(10_000),
     conflict: z.string().trim().min(1).max(10_000),
-    twistPlan: z.string().max(20_000),
     reversalPlan: z.array(z.strictObject({
       id: z.string().optional(),
       episode: z.number().int().positive(),
@@ -65,7 +64,7 @@ export const editableValidators = {
 export const creationDefaults: Record<ChatKind, Record<string, unknown>> = {
   PROJECT: {},
   CANON: { aliases: [], metadata: {}, status: 'ACTIVE' },
-  ARC: { twistPlan: '', reversalPlan: [], status: 'PLANNED' },
+  ARC: { reversalPlan: [], status: 'PLANNED' },
   IMPROVEMENT: { rationale: '', category: 'STYLE', tags: [], beforeExample: '', afterExample: '', active: true },
 };
 

@@ -1,6 +1,6 @@
 ---
 id: project-chat
-version: 2
+version: 3
 task: project_chat
 responseMode: json
 requiredVariables:
@@ -32,7 +32,7 @@ reply는 마크다운 문법이나 코드 펜스 없이 자연스러운 일반 �
 허용 필드:
 - PROJECT: title, logline, genreTags(문자열 배열), details, defaultTargetChars(500~30000).
 - CANON: category(CHARACTER/CHARACTER_APPEARANCE/LOCATION/ORGANIZATION/ABILITY/RULE/TIMELINE/OTHER), name, aliases(문자열 배열), content, metadata(객체), status(ACTIVE/PENDING/ACCEPTED/REJECTED). 생성 필수 category/name/content. 승인 후 저장될 기본 상태는 ACTIVE이다. CHARACTER_APPEARANCE(인물 외형)는 인물의 시각적 설정을 별도 항목의 content에 기록한다. 기존 인물과 같은 이름·별칭을 사용하되 인물 항목과 외형 항목의 ID를 분류로 구별한다. 머리카락 색·길이·스타일, 눈동자 색, 피부색, 체형, 옷의 종류·색·소재, 신발, 장신구와 눈에 띄는 특징을 구체적으로 다루고 미정인 정보는 미정으로 남긴다.
-- ARC: title, startEpisodeNumber, endEpisodeNumber, goal, conflict, twistPlan, reversalPlan(episode와 description을 가진 배열), status(PLANNED/ACTIVE/COMPLETE/ARCHIVED). 생성 필수 title/startEpisodeNumber/endEpisodeNumber/goal/conflict. 회차 범위는 양 끝 포함 5~20화. 기본 상태 PLANNED. 활성화를 명시적으로 요청받은 경우에만 ACTIVE로 지정한다. ACTIVE는 기존 활성 아크를 보관 상태로 바꾸므로 답변에서도 설명한다.
+- ARC: title, startEpisodeNumber, endEpisodeNumber, goal, conflict, reversalPlan(episode와 description을 가진 회차별 반전 배열), status(PLANNED/ACTIVE/COMPLETE/ARCHIVED). 생성 필수 title/startEpisodeNumber/endEpisodeNumber/goal/conflict. 회차 범위는 양 끝 포함 5~20화. 반전은 reversalPlan에만 작성하고 각 episode는 아크 범위 안의 공개 회차로 지정한다. 기본 상태 PLANNED. 활성화를 명시적으로 요청받은 경우에만 ACTIVE로 지정한다. ACTIVE는 기존 활성 아크를 보관 상태로 바꾸므로 답변에서도 설명한다.
 - IMPROVEMENT: title, rule, rationale, category, tags(문자열 배열), beforeExample, afterExample, active. 생성 필수 title/rule, 생성 active는 true. 작품 속 사실이 아니라 문체·구성 지침으로 작성한다.
 
 회차 본문이나 조작 도구를 변경 제안에 넣지 않는다. 제안은 최대 12개이며 실제 저장은 별도의 사용자 적용 절차에서만 이루어진다.

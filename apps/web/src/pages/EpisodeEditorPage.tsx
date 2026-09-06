@@ -22,15 +22,20 @@ import {
   LoaderCircle,
   MapPin,
   PanelRightOpen,
+  PencilLine,
   RefreshCw,
   Sparkles,
   Square,
   WandSparkles,
 } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import type { EditorAiEdit, EditorAiHistory, EditorAiInput } from '@paranovel/contracts';
 import { api, ApiError, isConflict, messageOf } from '../api/client';
 import { characterCount, createIdempotencyKey, cx } from '../lib';
 import DraftPreview, { DraftGenerationStatus } from '../components/DraftPreview';
+import ContinuityIssues from '../components/ContinuityIssues';
+import EditorAiPanel from '../components/EditorAiPanel';
+import { useContinuityRepair } from '../useContinuityRepair';
 import { rangeStillMatches, replaceUtf16Range } from '../editorText';
 import type {
   AiPhase,
@@ -83,6 +88,9 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
   const [continuationOpen, setContinuationOpen] = useState(false);
   const [replacementOpen, setReplacementOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
+  const [editorAiOpen, setEditorAiOpen] = useState(false);
+  const [editorApplying, setEditorApplying] = useState(false);
+  const editorApplyingRef = useRef(false);
   const [recoveryBackup, setRecoveryBackup] = useState<EpisodeDraftBackup | null>(null);
   const [lastReplacement, setLastReplacement] = useState<{
     start: number;
@@ -120,12 +128,10 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
   }, [episodeId, episodeQuery.data, episodeQuery.isFetching]);
 
   const updateDraft = (patch: Partial<Draft>) => {
-    setDraft((current) => {
-      const next = { ...current, ...patch };
-      draftRef.current = next;
-      if (saveInFlightRef.current) dirtyWhileSavingRef.current = true;
-      return next;
-    });
+    const next = { ...draftRef.current, ...patch };
+    draftRef.current = next;
+    if (saveInFlightRef.current) dirtyWhileSavingRef.current = true;
+    setDraft(next);
   };
 
   const saveNow = useCallback(async (): Promise<Episode | null> => {
@@ -177,6 +183,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
       }
       queryClient.setQueryData(['episodes', projectId, episodeId], updated);
       queryClient.invalidateQueries({ queryKey: ['episodes', projectId], exact: true });
+      queryClient.invalidateQueries({ queryKey: ['episode-order', projectId] });
       return updated;
     } catch (reason) {
       setSaveState('error');
@@ -259,7 +266,57 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
 
   const selected = Boolean(selection && selection.end > selection.start && selection.text);
   const isBusy = continuationOpen;
-  const editorLocked = isBusy || Boolean(recoveryBackup);
+  const editorLocked = isBusy || editorApplying || Boolean(recoveryBackup);
+
+  const prepareEditorRequest = async (content: string, clientMessageId: string): Promise<EditorAiInput> => {
+    const target = selection;
+    const saved = await saveNow();
+    if (!saved || saved.content !== draftRef.current.content) throw new Error('원고 저장이 끝난 뒤 다시 시도해 주세요.');
+    if (target && target.content !== saved.content) throw new Error('원고가 변경되었습니다. 수정할 부분을 다시 선택해 주세요.');
+    return {
+      content, clientMessageId, expectedRevision: saved.revision,
+      selection: target ? { start: target.start, end: target.end, text: target.text }
+        : { start: saved.content.length, end: saved.content.length, text: '' },
+    };
+  };
+
+  const applyEditorEdit = async (messageId: string, edit: EditorAiEdit) => {
+    if (editorApplyingRef.current) return;
+    editorApplyingRef.current = true;
+    setEditorApplying(true);
+    try {
+      const saved = await saveNow();
+      if (!saved || saved.content !== draftRef.current.content || saved.direction !== draftRef.current.direction || saved.title !== draftRef.current.title) {
+        throw new Error('원고 저장이 끝난 뒤 다시 적용해 주세요.');
+      }
+      const { episode: updated, message } = await api.editorAi.apply(projectId, episodeId, messageId);
+      const nextDraft = { title: updated.title, direction: updated.direction, content: updated.content };
+      draftRef.current = nextDraft;
+      savedRef.current = nextDraft;
+      revisionRef.current = updated.revision;
+      setDraft(nextDraft);
+      setRevision(updated.revision);
+      setSaveState('saved');
+      setSaveError('');
+      clearEpisodeDraftBackup(episodeId);
+      queryClient.setQueryData(['episodes', projectId, episodeId], updated);
+      await queryClient.cancelQueries({ queryKey: ['editor-ai', projectId, episodeId], exact: true });
+      queryClient.setQueryData<EditorAiHistory>(['editor-ai', projectId, episodeId], (history) => history ? {
+        messages: history.messages.map((item) => item.id === message.id ? message : item),
+      } : history);
+      for (const key of [['episodes', projectId], ['episode-order', projectId], ['scene', projectId, episodeId]]) {
+        void queryClient.invalidateQueries({ queryKey: key });
+      }
+      const end = edit.start + edit.replacement.length;
+      if (rangeStillMatches(updated.content, edit.start, end, edit.replacement)) {
+        setSelection({ start: edit.start, end, text: edit.replacement, content: updated.content, revision: updated.revision });
+        requestAnimationFrame(() => textareaRef.current?.setSelectionRange(edit.start, end));
+      } else setSelection(null);
+    } finally {
+      editorApplyingRef.current = false;
+      setEditorApplying(false);
+    }
+  };
 
   const restoreBackup = () => {
     if (!recoveryBackup) return;
@@ -284,7 +341,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
   };
 
   return (
-    <div className="editor-page">
+    <div className={cx('editor-page', editorAiOpen && 'editor-ai-open')}>
       <aside className="episode-rail" aria-label="회차 빠른 이동">
         <div className="episode-rail-title">회차</div>
         <nav>
@@ -309,16 +366,18 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
       <section className="editor-center">
         <header className="editor-toolbar">
           <div className="flex items-center gap-1">
-            <IconButton label="이전 회차" disabled={!previous} onClick={() => previous && void saveNow().then(() => navigate(`../${previous.id}`)).catch(() => undefined)}>
+            <IconButton label="이전 회차" disabled={!previous} onClick={() => previous && void saveNow().then(() => navigate(`/projects/${projectId}/episodes/${previous.id}`)).catch(() => undefined)}>
               <ChevronLeft className="size-5" />
             </IconButton>
             <span className="whitespace-nowrap text-xs font-semibold text-muted">{episode.number}화</span>
-            <IconButton label="다음 회차" disabled={!next} onClick={() => next && void saveNow().then(() => navigate(`../${next.id}`)).catch(() => undefined)}>
+            <IconButton label="다음 회차" disabled={!next} onClick={() => next && void saveNow().then(() => navigate(`/projects/${projectId}/episodes/${next.id}`)).catch(() => undefined)}>
               <ChevronRight className="size-5" />
             </IconButton>
           </div>
           <SaveIndicator state={saveState} error={saveError} onRetry={() => void saveNow()} />
-            <IconButton label="장면과 기억 보기" className="editor-context-toggle" onClick={() => setContextOpen(true)}>
+          <Button size="sm" variant={editorAiOpen ? 'primary' : 'secondary'} aria-expanded={editorAiOpen}
+            onClick={() => setEditorAiOpen((open) => !open)}><PencilLine className="size-4" />편집 AI</Button>
+          <IconButton label="장면과 기억 보기" className="editor-context-toggle" onClick={() => setContextOpen(true)}>
             <PanelRightOpen className="size-5" />
           </IconButton>
         </header>
@@ -366,7 +425,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
           {selected ? (
             <Button
               className="editor-ai-action"
-              disabled={Boolean(recoveryBackup)}
+              disabled={editorLocked}
               onPointerDown={(event: ReactPointerEvent<HTMLButtonElement>) => {
                 event.preventDefault();
                 captureSelection();
@@ -379,7 +438,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
           ) : (
             <Button
               className="editor-ai-action"
-              disabled={Boolean(recoveryBackup)}
+              disabled={editorLocked}
               onPointerDown={(event: ReactPointerEvent<HTMLButtonElement>) => {
                 event.preventDefault();
                 captureSelection();
@@ -399,7 +458,14 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
         </footer>
       </section>
 
+      <EditorAiPanel projectId={projectId} episodeId={episodeId} open={editorAiOpen}
+        disabled={editorLocked || replacementOpen} selection={selection} content={draft.content} revision={revision}
+        dirty={draft.content !== savedRef.current.content || draft.title !== savedRef.current.title || draft.direction !== savedRef.current.direction}
+        onClose={() => setEditorAiOpen(false)} onClearSelection={() => setSelection(null)}
+        prepareRequest={prepareEditorRequest} onApply={applyEditorEdit} />
+
       <aside className="editor-context-panel">
+        <fieldset disabled={editorApplying} className="min-w-0">
         <ContextPanel projectId={projectId} episode={{ ...episode, ...draft, revision }} onDirectionChange={(direction) => updateDraft({ direction })} onFinalize={async () => {
           await saveNow();
           const finalized = await api.episodes.finalize(projectId, episodeId, revisionRef.current);
@@ -407,11 +473,14 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
           setRevision(finalized.revision);
           queryClient.setQueryData(['episodes', projectId, episodeId], finalized);
           queryClient.invalidateQueries({ queryKey: ['episodes', projectId] });
+          queryClient.invalidateQueries({ queryKey: ['episode-order', projectId] });
           queryClient.invalidateQueries({ queryKey: ['scene', projectId, episodeId] });
         }} />
+        </fieldset>
       </aside>
 
       <Sheet open={contextOpen} onOpenChange={setContextOpen} title="장면과 기억" wide>
+        <fieldset disabled={editorApplying} className="min-w-0">
         <ContextPanel projectId={projectId} episode={{ ...episode, ...draft, revision }} onDirectionChange={(direction) => updateDraft({ direction })} onFinalize={async () => {
           await saveNow();
           const finalized = await api.episodes.finalize(projectId, episodeId, revisionRef.current);
@@ -420,6 +489,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
           queryClient.setQueryData(['episodes', projectId, episodeId], finalized);
           queryClient.invalidateQueries({ queryKey: ['scene', projectId, episodeId] });
         }} />
+        </fieldset>
       </Sheet>
 
       <ContinuationSheet
@@ -697,10 +767,33 @@ function ContinuationSheet({
   const abortRef = useRef<AbortController | null>(null);
   const requestRef = useRef<{ content: string; cursor: number; revision: number } | null>(null);
   const active = ['retrieving', 'writing', 'checking', 'repairing'].includes(phase);
+  const repair = useContinuityRepair({
+    request: (issue, onEvent, signal) => {
+      const request = requestRef.current;
+      if (!request || draftRef.current.content !== request.content || revisionRef.current !== request.revision) {
+        throw new Error('원고가 바뀌었습니다. 최신 커서에서 다시 생성해 주세요.');
+      }
+      return api.episodes.repairContinuation(projectId, episodeId, {
+        expectedRevision: request.revision,
+        cursorOffset: request.cursor,
+        content: preview,
+        issue,
+      }, onEvent, signal);
+    },
+    onSuccess: (result) => {
+      setPreview(result.content);
+      setIssues(result.issues);
+      setBlocked(result.blocked);
+      setPhase('done');
+    },
+  });
+  const displayedPhase = repair.phase ?? phase;
+  const busy = active || repair.isRepairing;
 
   useEffect(() => {
     if (open) return;
     abortRef.current?.abort();
+    repair.reset();
     abortRef.current = null;
     setPhase('idle');
     setPreview('');
@@ -708,12 +801,14 @@ function ContinuationSheet({
     setBlocked(false);
     setError('');
     requestRef.current = null;
-  }, [open]);
+  }, [open, repair.reset]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
   const generate = async () => {
+    if (repair.isRepairing) return;
     abortRef.current?.abort();
+    repair.reset();
     const controller = new AbortController();
     abortRef.current = controller;
     setError('');
@@ -765,6 +860,7 @@ function ContinuationSheet({
   };
 
   const apply = async () => {
+    if (repair.isRepairing) return;
     const request = requestRef.current;
     if (!request || !preview) return;
     if (draftRef.current.content !== request.content || revisionRef.current !== request.revision) {
@@ -793,26 +889,32 @@ function ContinuationSheet({
     <Sheet
       open={open}
       onOpenChange={(next) => {
-        if (!next && active && !window.confirm('생성을 중단하고 닫을까요?')) return;
-        if (!next) abortRef.current?.abort();
+        if (!next && busy && !window.confirm(repair.isRepairing ? '수정을 중단하고 닫을까요?' : '생성을 중단하고 닫을까요?')) return;
+        if (!next) {
+          abortRef.current?.abort();
+          repair.reset();
+        }
         onOpenChange(next);
       }}
       title="커서에서 이어쓰기"
       description="정사, 아크, 회차 기억과 개선점을 확인한 뒤 문장을 제안합니다."
       wide
-      bodyHeader={phase !== 'idle' ? <DraftGenerationStatus phase={phase} /> : undefined}
+      bodyHeader={displayedPhase !== 'idle' ? <DraftGenerationStatus phase={displayedPhase} /> : undefined}
       footer={
         <div className="action-row sm:justify-between">
-          {active ? (
-            <Button variant="secondary" onClick={() => abortRef.current?.abort()}><Square className="size-3.5 fill-current" /> 중단</Button>
+          {busy ? (
+            <Button variant="secondary" onClick={() => {
+              if (repair.isRepairing) repair.cancel();
+              else abortRef.current?.abort();
+            }}><Square className="size-3.5 fill-current" /> 중단</Button>
           ) : (
             <Button variant="ghost" onClick={() => onOpenChange(false)}>취소</Button>
           )}
           {phase === 'idle' || phase === 'error' ? (
-            <Button onClick={generate}><Sparkles className="size-4" /> {phase === 'error' ? '다시 생성' : '이어쓰기 시작'}</Button>
+            <Button onClick={generate} disabled={repair.isRepairing}><Sparkles className="size-4" /> {phase === 'error' ? '다시 생성' : '이어쓰기 시작'}</Button>
           ) : null}
           {(phase === 'done' || phase === 'cancelled' || phase === 'error') && preview ? (
-            <>{phase !== 'error' ? <Button variant="secondary" onClick={generate}><Sparkles className="size-4" /> 다시 생성</Button> : null}<Button onClick={apply}>{blocked || phase === 'error' || phase === 'cancelled' ? '검토 필요로 삽입' : '커서에 삽입'}</Button></>
+            <>{phase !== 'error' ? <Button variant="secondary" onClick={generate} disabled={repair.isRepairing}><Sparkles className="size-4" /> 다시 생성</Button> : null}<Button onClick={apply} disabled={repair.isRepairing}>{blocked || phase === 'error' || phase === 'cancelled' ? '검토 필요로 삽입' : '커서에 삽입'}</Button></>
           ) : null}
         </div>
       }
@@ -831,15 +933,24 @@ function ContinuationSheet({
             label="이어쓰기 제안 수정"
             value={preview}
             onChange={setPreview}
-            readOnly={active}
+            readOnly={busy}
             placeholder="본문과 관련 기억을 살피고 있습니다…"
           />
-          {issues.length ? (
-            <div className={blocked ? 'warning-box danger' : 'warning-box'} role="alert"><strong>{blocked ? '차단 이슈가 남아 있어요' : '삽입 전에 확인하세요'}</strong><ul>{issues.map((issue, index) => <li key={`${issue.explanation}-${index}`}><b>{issue.severity === 'BLOCKING' ? '차단' : '주의'}:</b> {issue.explanation}</li>)}</ul></div>
-          ) : null}
+          <ContinuityIssues
+            issues={issues}
+            blocked={blocked}
+            heading={blocked ? '차단 이슈가 남아 있어요' : '삽입 전에 확인하세요'}
+            onRepair={(issue, index) => {
+              setError('');
+              void repair.repair(issue, index);
+            }}
+            repairingIndex={repair.repairingIndex}
+            disabled={busy || !preview.trim()}
+          />
         </div>
       )}
       <FieldError>{error}</FieldError>
+      <FieldError>{repair.error}</FieldError>
     </Sheet>
   );
 }

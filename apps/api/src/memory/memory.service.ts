@@ -7,6 +7,7 @@ import {
 import { and, eq, isNull, or } from 'drizzle-orm';
 import { OpenRouterGateway } from '../ai/openrouter.gateway';
 import { DatabaseService } from '../database/database.service';
+import { formatArcMemory } from './arc-memory';
 import {
   arcs,
   canonEntries,
@@ -62,15 +63,21 @@ export class MemoryService {
     sourceType: string;
     sourceId: string;
     text: string;
+    expectedEpisode?: { number: number; revision: number };
   }): Promise<void> {
     const pieces = chunkText(input.text);
-    const episodeNumber = ['EPISODE', 'EPISODE_SUMMARY'].includes(input.sourceType)
+    const isEpisode = ['EPISODE', 'EPISODE_SUMMARY'].includes(input.sourceType);
+    const sourceEpisode = isEpisode
       ? this.database.orm
-          .select({ number: episodes.number })
+          .select({ number: episodes.number, revision: episodes.revision, projectId: episodes.projectId })
           .from(episodes)
-          .where(eq(episodes.id, input.sourceId))
-          .get()?.number ?? 0
-      : 0;
+          .where(and(eq(episodes.id, input.sourceId), isNull(episodes.deletedAt)))
+          .get()
+      : undefined;
+    if (isEpisode && (!sourceEpisode || sourceEpisode.projectId !== input.projectId ||
+      (input.expectedEpisode && (sourceEpisode.number !== input.expectedEpisode.number ||
+        sourceEpisode.revision !== input.expectedEpisode.revision)))) return;
+    const episodeNumber = sourceEpisode?.number ?? 0;
     let vectors: number[][] = [];
     if (pieces.length > 0) {
       try {
@@ -82,18 +89,20 @@ export class MemoryService {
       }
     }
 
-    const oldRows = this.database.orm
-      .select({ id: memoryChunks.id })
-      .from(memoryChunks)
-      .where(
-        and(
-          eq(memoryChunks.sourceType, input.sourceType),
-          eq(memoryChunks.sourceId, input.sourceId),
-        ),
-      )
-      .all();
-
     this.database.connection.transaction(() => {
+      // Embeddings may finish after a reorder, edit, or deletion. Never restore
+      // stale chunks, or delete a newer index that was written in the meantime.
+      if (sourceEpisode) {
+        const current = this.database.orm.select().from(episodes)
+          .where(and(eq(episodes.id, input.sourceId), isNull(episodes.deletedAt))).get();
+        if (!current || current.number !== sourceEpisode.number ||
+          current.revision !== sourceEpisode.revision) return;
+      }
+      const oldRows = this.database.orm
+        .select({ id: memoryChunks.id })
+        .from(memoryChunks)
+        .where(and(eq(memoryChunks.sourceType, input.sourceType), eq(memoryChunks.sourceId, input.sourceId)))
+        .all();
       const deleteFts = this.database.connection.prepare(
         'DELETE FROM memory_chunks_fts WHERE chunk_id = ?',
       );
@@ -316,7 +325,15 @@ export class MemoryService {
     return [...candidates.values()]
       .sort((a, b) => b.score - a.score)
       .slice(0, limit)
-      .map(({ row, score }) => ({ ...row, score }));
+      .flatMap(({ row, score }) => {
+        if (row.sourceType !== 'ARC') return [{ ...row, score }];
+        // Older search chunks can contain the retired summary. Use the current plan.
+        const source = this.database.orm.select({ arc: arcs, ordinal: memoryChunks.ordinal }).from(arcs)
+          .innerJoin(memoryChunks, and(eq(memoryChunks.id, row.id), eq(memoryChunks.sourceId, arcs.id)))
+          .where(and(eq(arcs.id, row.sourceId), eq(arcs.projectId, projectId))).get();
+        const content = source ? chunkText(formatArcMemory(source.arc))[source.ordinal] : undefined;
+        return content ? [{ ...row, content, score }] : [];
+      });
   }
 
   async assemble(projectId: string, query: string, episodeId?: string): Promise<AssembledMemory> {
@@ -469,7 +486,6 @@ export class MemoryService {
               range: [currentArc.startEpisodeNumber, currentArc.endEpisodeNumber],
               goal: currentArc.goal,
               conflict: currentArc.conflict,
-              twistPlan: currentArc.twistPlan,
               reversalPlan: parseJson(currentArc.reversalPlanJson, []),
             }
           : null,
@@ -555,6 +571,7 @@ export class MemoryService {
       sourceType: string;
       sourceId: string;
       text: string;
+      expectedEpisode?: { number: number; revision: number };
     }> = [];
     for (const entry of this.database.orm
       .select()
@@ -578,7 +595,7 @@ export class MemoryService {
         projectId,
         sourceType: 'ARC',
         sourceId: arc.id,
-        text: `${arc.title}\n목표: ${arc.goal}\n갈등: ${arc.conflict}\n반전: ${arc.twistPlan}`,
+        text: formatArcMemory(arc),
       });
     }
     for (const improvement of this.database.orm
@@ -615,6 +632,7 @@ export class MemoryService {
         sourceType: 'EPISODE',
         sourceId: episode.id,
         text: `${episode.number}화 ${episode.title}\n${episode.direction}\n${episode.content}`,
+        expectedEpisode: { number: episode.number, revision: episode.revision },
       });
       const summary = this.database.orm
         .select()
@@ -626,6 +644,7 @@ export class MemoryService {
           projectId,
           sourceType: 'EPISODE_SUMMARY',
           sourceId: episode.id,
+          expectedEpisode: { number: episode.number, revision: episode.revision },
           text: [
             ...parseJson<string[]>(summary.eventsJson, []),
             ...parseJson<Array<{ character: string; from: string; to: string; cause: string }>>(

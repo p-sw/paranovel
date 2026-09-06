@@ -263,7 +263,6 @@ export class ProjectWizardService {
         endEpisodeNumber: blueprint.arc.endEpisode,
         goal: blueprint.arc.goal,
         conflict: blueprint.arc.conflict,
-        twistPlan: blueprint.arc.reversalPlan.map((beat) => `${beat.episode}화: ${beat.description}`).join('\n'),
         reversalPlanJson: stringifyJson(blueprint.arc.reversalPlan),
         status: 'ACTIVE',
         revision: 1,

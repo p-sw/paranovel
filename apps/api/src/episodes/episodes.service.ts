@@ -73,6 +73,12 @@ interface MemoryExtraction {
   }>;
 }
 
+interface EpisodeOrderSnapshot {
+  rows: Array<typeof episodes.$inferSelect>;
+  slotCount: number;
+  revision: string;
+}
+
 @Injectable()
 export class EpisodesService {
   constructor(
@@ -93,59 +99,108 @@ export class EpisodesService {
       .map((row) => this.toView(row));
   }
 
+  order(projectId: string) {
+    return this.database.connection.transaction(() => this.orderView(this.readOrder(projectId)))();
+  }
+
+  updateOrder(projectId: string, body: unknown) {
+    const input = (body ?? {}) as Record<string, unknown>;
+    const expectedRevision = requireString(input.expectedRevision, 'expectedRevision', { max: 64 });
+    if (!Array.isArray(input.slots) || input.slots.some((slot) => slot !== null && typeof slot !== 'string')) {
+      throw new BadRequestException('slots must contain episode IDs or null placeholders');
+    }
+    const slots = input.slots as Array<string | null>;
+    return this.database.connection.transaction(() => {
+      const current = this.readOrder(projectId);
+      if (expectedRevision !== current.revision) {
+        throw new ConflictException('회차 목록이 변경되었습니다. 최신 목록을 불러와 다시 정렬해 주세요.');
+      }
+      const actualIds = slots.filter((slot): slot is string => slot !== null);
+      const idSet = new Set(actualIds);
+      if (
+        actualIds.length !== current.rows.length || idSet.size !== actualIds.length ||
+        current.rows.some((row) => !idSet.has(row.id))
+      ) {
+        throw new BadRequestException('Every existing episode must appear exactly once');
+      }
+      if (slots.length > current.slotCount) {
+        throw new BadRequestException('Placeholder slots cannot be added');
+      }
+      const newNumbers = new Map<string, number>();
+      slots.forEach((episodeId, index) => {
+        if (episodeId !== null) newNumbers.set(episodeId, index + 1);
+      });
+      const moved = current.rows.filter((row) => newNumbers.get(row.id) !== row.number);
+      const firstChanged = moved.reduce(
+        (earliest, row) => Math.min(earliest, row.number, newNumbers.get(row.id)!),
+        Infinity,
+      );
+      if (moved.length === 0 && slots.length === current.slotCount) return this.orderView(current);
+
+      const stamp = now();
+      // Positive public numbers are unique per project. Temporarily vacate all
+      // moved numbers so swaps cannot violate the immediate UNIQUE constraint.
+      for (const row of moved) {
+        this.database.orm.update(episodes).set({ number: -row.number })
+          .where(eq(episodes.id, row.id)).run();
+      }
+      for (const row of current.rows) {
+        const number = newNumbers.get(row.id)!;
+        if (number < firstChanged) continue;
+        this.database.orm.update(episodes).set({
+          number,
+          revision: row.revision + 1,
+          status: this.editedStatus(row.status, false),
+          updatedAt: stamp,
+        }).where(eq(episodes.id, row.id)).run();
+        this.removeEpisodeMemory(row.id);
+      }
+      this.database.orm.update(projects)
+        .set({ nextEpisodeNumber: slots.length + 1, updatedAt: stamp })
+        .where(eq(projects.id, projectId)).run();
+      return this.orderView(this.readOrder(projectId));
+    }).immediate();
+  }
+
   get(projectId: string, episodeId: string) {
     const row = this.requireEpisode(projectId, episodeId);
     return this.toView(row);
   }
 
   async create(projectId: string, body: unknown, idempotencyKey?: string) {
-    this.projects.get(projectId);
     const input = (body ?? {}) as Record<string, unknown>;
     const requestHash = sha256(stringifyJson(input));
-    if (idempotencyKey) {
-      if (idempotencyKey.length > 200) throw new BadRequestException('Idempotency-Key is too long');
-      const existing = this.database.orm
-        .select()
-        .from(episodeIdempotency)
-        .where(
-          and(
+    if (idempotencyKey && idempotencyKey.length > 200) throw new BadRequestException('Idempotency-Key is too long');
+    return this.database.connection.transaction(() => {
+      const project = this.projects.get(projectId);
+      if (idempotencyKey) {
+        const existing = this.database.orm.select().from(episodeIdempotency)
+          .where(and(
             eq(episodeIdempotency.projectId, projectId),
             eq(episodeIdempotency.idempotencyKey, idempotencyKey),
-          ),
-        )
-        .get();
-      if (existing) {
-        if (existing.requestHash !== requestHash) {
-          throw new ConflictException('Idempotency-Key was already used with a different request');
+          )).get();
+        if (existing) {
+          if (existing.requestHash !== requestHash) {
+            throw new ConflictException('Idempotency-Key was already used with a different request');
+          }
+          return this.get(projectId, existing.episodeId);
         }
-        return this.get(projectId, existing.episodeId);
       }
-    }
-    const projectRow = this.database.orm
-      .select()
-      .from(projects)
-      .where(eq(projects.id, projectId))
-      .get();
-    if (!projectRow) throw new NotFoundException('Project not found');
-    const stamp = now();
-    const episodeId = id();
-    const row: typeof episodes.$inferInsert = {
-      id: episodeId,
-      projectId,
-      number: projectRow.nextEpisodeNumber,
-      title: requireString(input.title, 'title', { max: 200 }),
-      direction: optionalString(input.direction, 'direction', 20_000) ?? '',
-      content: optionalString(input.content, 'content', 1_000_000) ?? '',
-      revision: 1,
-      status:
-        input.forceNeedsReview === true || input.force === true
-          ? 'NEEDS_REVIEW'
-          : 'DRAFT',
-      createdAt: stamp,
-      updatedAt: stamp,
-      deletedAt: null,
-    };
-    this.database.connection.transaction(() => {
+      const stamp = now();
+      const episodeId = id();
+      const row: typeof episodes.$inferInsert = {
+        id: episodeId,
+        projectId,
+        number: project.nextEpisodeNumber,
+        title: requireString(input.title, 'title', { max: 200 }),
+        direction: optionalString(input.direction, 'direction', 20_000) ?? '',
+        content: optionalString(input.content, 'content', 1_000_000) ?? '',
+        revision: 1,
+        status: input.forceNeedsReview === true || input.force === true ? 'NEEDS_REVIEW' : 'DRAFT',
+        createdAt: stamp,
+        updatedAt: stamp,
+        deletedAt: null,
+      };
       this.database.orm.insert(episodes).values(row).run();
       if (idempotencyKey) {
         this.database.orm.insert(episodeIdempotency).values({
@@ -158,14 +213,19 @@ export class EpisodesService {
       }
       this.database.orm
         .update(projects)
-        .set({ nextEpisodeNumber: projectRow.nextEpisodeNumber + 1, updatedAt: stamp })
-        .where(and(eq(projects.id, projectId), eq(projects.nextEpisodeNumber, projectRow.nextEpisodeNumber)))
+        .set({ nextEpisodeNumber: project.nextEpisodeNumber + 1, updatedAt: stamp })
+        .where(eq(projects.id, projectId))
         .run();
-    })();
-    return this.toView(row as typeof episodes.$inferSelect);
+      return this.toView(row as typeof episodes.$inferSelect);
+    }).immediate();
   }
 
   async update(projectId: string, episodeId: string, body: unknown) {
+    return this.updateSavedDraft(projectId, episodeId, body);
+  }
+
+  // Synchronous so an editor edit and its application receipt can be committed together.
+  updateSavedDraft(projectId: string, episodeId: string, body: unknown) {
     const current = this.requireEpisode(projectId, episodeId);
     const input = (body ?? {}) as Record<string, unknown>;
     const expectedRevision = positiveInteger(input.expectedRevision, 'expectedRevision');
@@ -204,23 +264,32 @@ export class EpisodesService {
   }
 
   remove(projectId: string, episodeId: string, body: unknown): void {
-    const current = this.requireEpisode(projectId, episodeId);
     const input = (body ?? {}) as Record<string, unknown>;
     const expectedRevision = positiveInteger(input.expectedRevision, 'expectedRevision');
-    if (expectedRevision !== current.revision) {
-      throw new ConflictException('Episode revision is stale');
-    }
-    this.memory.removeSource('EPISODE', episodeId);
-    this.memory.removeSource('EPISODE_SUMMARY', episodeId);
-    this.database.orm.delete(episodes).where(eq(episodes.id, episodeId)).run();
-    this.invalidateFrom(projectId, current.number + 1);
+    this.database.connection.transaction(() => {
+      const current = this.requireEpisode(projectId, episodeId);
+      if (expectedRevision !== current.revision) {
+        throw new ConflictException('Episode revision is stale');
+      }
+      const project = this.projects.get(projectId);
+      this.removeEpisodeMemory(episodeId);
+      this.database.orm.delete(episodes).where(eq(episodes.id, episodeId)).run();
+      this.database.orm.update(projects).set({
+        nextEpisodeNumber: current.number === project.nextEpisodeNumber - 1
+          ? project.nextEpisodeNumber - 1 : project.nextEpisodeNumber,
+        updatedAt: now(),
+      }).where(eq(projects.id, projectId)).run();
+      this.invalidateFrom(projectId, current.number + 1);
+    }).immediate();
   }
 
   async propose(projectId: string, body: unknown) {
     const input = (body ?? {}) as Record<string, unknown>;
     const hint = optionalString(input.hint, 'hint', 5_000) ?? '';
+    const orderRevision = this.readOrder(projectId).revision;
     await this.refreshStalePredecessors(projectId);
     const memory = await this.memory.assemble(projectId, hint);
+    this.assertOrderRevision(projectId, orderRevision);
     const { value } = await this.ai.completeJson<{
       title: string;
       direction: string;
@@ -236,6 +305,41 @@ export class EpisodesService {
       validator: episodeDirectionValidator,
       maxTokens: 3_000,
     });
+    this.assertOrderRevision(projectId, orderRevision);
+    return value;
+  }
+
+  async refine(projectId: string, body: unknown) {
+    this.projects.get(projectId);
+    const input = (body ?? {}) as Record<string, unknown>;
+    // Keep the user's formatting intact while validating required, bounded text.
+    const title = optionalString(input.title, 'title', 200) ?? '';
+    const direction = optionalString(input.direction, 'direction', 20_000) ?? '';
+    requireString(title, 'title', { max: 200 });
+    requireString(direction, 'direction', { max: 20_000 });
+    const instruction = requireString(optionalString(input.instruction, 'instruction', 5_000), 'instruction', { max: 5_000 });
+    const orderRevision = this.readOrder(projectId).revision;
+    await this.refreshStalePredecessors(projectId);
+    const memory = await this.memory.assemble(projectId, `${instruction}\n${title}\n${direction}`);
+    this.assertOrderRevision(projectId, orderRevision);
+    const { value } = await this.ai.completeJson<{
+      title: string;
+      direction: string;
+      conflicts: string[];
+    }>({
+      task: 'episode_direction_refine',
+      promptId: 'episode-direction-refine',
+      projectId,
+      variables: this.promptMemory(memory, {
+        episode_title: title,
+        episode_direction: direction,
+        refinement_instruction: instruction,
+      }),
+      schema: { name: 'episode_direction', value: episodeDirectionSchema },
+      validator: episodeDirectionValidator,
+      maxTokens: Math.max(3_000, (title.length + direction.length) * 2 + 1_000),
+    });
+    this.assertOrderRevision(projectId, orderRevision);
     return value;
   }
 
@@ -250,13 +354,16 @@ export class EpisodesService {
     const title = requireString(input.title, 'title', { max: 200 });
     const direction = requireString(input.direction, 'direction', { max: 20_000 });
     const targetChars = this.targetChars(input.targetChars, project.defaultTargetChars);
+    const orderRevision = this.readOrder(projectId).revision;
     await this.refreshStalePredecessors(projectId);
     emit({ type: 'stage', stage: 'MEMORY' });
     const memory = await this.memory.assemble(projectId, `${title}\n${direction}`);
+    this.assertOrderRevision(projectId, orderRevision);
     emit({ type: 'stage', stage: 'WRITING' });
     await this.streamWithContinuity(
       {
         projectId,
+        baseOrderRevision: orderRevision,
         promptId: 'episode-draft',
         task: 'episode_draft',
         variables: this.promptMemory(memory, {
@@ -299,6 +406,7 @@ export class EpisodesService {
       ...parseJson<Record<string, unknown>>(memory.currentScene, {}),
       previousParagraph: extractLastParagraph(before),
     });
+    this.assertEpisodeRevision(projectId, episodeId, expectedRevision);
     emit({ type: 'stage', stage: 'WRITING' });
     await this.streamWithContinuity(
       {
@@ -332,6 +440,85 @@ export class EpisodesService {
       emit,
       signal,
     );
+  }
+
+  async repairDraft(
+    projectId: string,
+    body: unknown,
+    emit: (event: StreamEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    this.projects.get(projectId);
+    const input = (body ?? {}) as Record<string, unknown>;
+    const title = requireString(input.title, 'title', { max: 200 });
+    const direction = requireString(input.direction, 'direction', { max: 20_000 });
+    const { content, issue } = this.repairInput(input);
+    const orderRevision = this.readOrder(projectId).revision;
+    signal?.throwIfAborted();
+    emit({ type: 'stage', stage: 'MEMORY' });
+    await this.refreshStalePredecessors(projectId);
+    signal?.throwIfAborted();
+    const memory = await this.memory.assemble(projectId, `${title}\n${direction}`);
+    this.assertOrderRevision(projectId, orderRevision);
+    await this.repairSelectedIssue({
+      projectId,
+      baseOrderRevision: orderRevision,
+      content,
+      issue,
+      reviewVariables: this.promptMemory(memory, {
+        episode_title: title,
+        episode_direction: direction,
+        boundary_context: '새 회차 전체 초안',
+      }),
+    }, emit, signal);
+  }
+
+  async repairContinuation(
+    projectId: string,
+    episodeId: string,
+    body: unknown,
+    emit: (event: StreamEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const episode = this.requireEpisode(projectId, episodeId);
+    const input = (body ?? {}) as Record<string, unknown>;
+    const expectedRevision = positiveInteger(input.expectedRevision, 'expectedRevision');
+    if (expectedRevision !== episode.revision) throw new ConflictException('Episode revision is stale');
+    const cursorOffset = positiveInteger(input.cursorOffset, 'cursorOffset');
+    if (cursorOffset > episode.content.length) throw new BadRequestException('cursorOffset is outside the episode');
+    const { content, issue } = this.repairInput(input);
+    const before = episode.content.slice(0, cursorOffset);
+    const after = episode.content.slice(cursorOffset);
+    signal?.throwIfAborted();
+    emit({ type: 'stage', stage: 'MEMORY' });
+    await this.refreshStalePredecessors(projectId, episode.number);
+    signal?.throwIfAborted();
+    await this.ensureScene(projectId, episode, before, signal);
+    signal?.throwIfAborted();
+    const memory = await this.memory.assemble(projectId, `${episode.direction}\n${extractLastParagraph(before)}`, episodeId);
+    memory.currentScene = stringifyJson({
+      ...parseJson<Record<string, unknown>>(memory.currentScene, {}),
+      previousParagraph: extractLastParagraph(before),
+    });
+    this.assertEpisodeRevision(projectId, episodeId, expectedRevision);
+    await this.repairSelectedIssue({
+      projectId,
+      episodeId,
+      baseRevision: expectedRevision,
+      content,
+      issue,
+      reviewVariables: this.promptMemory(memory, {
+        episode_title: episode.title,
+        episode_direction: episode.direction,
+        text_before_cursor: before.slice(-16_000),
+        text_after_cursor: after.slice(0, 8_000),
+        boundary_context: stringifyJson({
+          textBeforeCursor: before.slice(-4_000),
+          textAfterCursor: after.slice(0, 4_000),
+          insertionPoint: cursorOffset,
+        }),
+      }),
+    }, emit, signal);
   }
 
   async replaceSelection(projectId: string, episodeId: string, body: unknown) {
@@ -388,6 +575,7 @@ export class EpisodesService {
       return this.get(projectId, episodeId);
     }
     const memory = await this.memory.assemble(projectId, `${episode.title}\n${episode.direction}`, episodeId);
+    this.assertEpisodeRevision(projectId, episodeId, expectedRevision);
     if (episode.status === 'NEEDS_REVIEW') {
       const reviewVariables = this.promptMemory(memory, {
         episode_title: episode.title,
@@ -522,6 +710,7 @@ export class EpisodesService {
         projectId,
         sourceType: 'EPISODE_SUMMARY',
         sourceId: episodeId,
+        expectedEpisode: { number: episode.number, revision: episode.revision },
         text: [
           ...value.events,
           ...value.emotionalChanges.map((item) => `${item.character}: ${item.from} → ${item.to} (${item.cause})`),
@@ -530,6 +719,7 @@ export class EpisodesService {
         ].join('\n'),
       }),
     ]);
+    this.assertEpisodeRevision(projectId, episodeId, expectedRevision);
     return this.get(projectId, episodeId);
   }
 
@@ -584,11 +774,73 @@ export class EpisodesService {
     return this.getScene(projectId, episodeId);
   }
 
-  private async streamWithContinuity(
+  private repairInput(input: Record<string, unknown>): { content: string; issue: ContinuityIssue } {
+    const content = optionalString(input.content, 'content', 1_000_000);
+    if (!content?.trim()) throw new BadRequestException('content must not be empty');
+    const parsed = continuityReviewValidator.safeParse({ issues: [input.issue] });
+    if (!parsed.success) throw new BadRequestException('issue must be a valid continuity issue');
+    const issue = parsed.data.issues[0]!;
+    if (!issue.explanation.trim() && !issue.repairInstruction.trim()) {
+      throw new BadRequestException('issue must include an explanation or repair instruction');
+    }
+    return { content, issue };
+  }
+
+  private async repairSelectedIssue(
     input: {
-      projectId?: string;
+      projectId: string;
       episodeId?: string;
       baseRevision?: number;
+      baseOrderRevision?: string;
+      content: string;
+      issue: ContinuityIssue;
+      reviewVariables: Record<string, unknown>;
+    },
+    emit: (event: StreamEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
+    emit({ type: 'stage', stage: 'REPAIRING' });
+    const selectedIssues = stringifyJson([input.issue]);
+    const repaired = await this.ai.streamText({
+      task: 'continuity_repair',
+      promptId: 'continuity-repair',
+      projectId: input.projectId,
+      episodeId: input.episodeId,
+      variables: {
+        ...input.reviewVariables,
+        candidate_text: input.content,
+        draft_text: input.content,
+        continuity_issues: selectedIssues,
+        issues: selectedIssues,
+        review_issues: selectedIssues,
+      },
+      signal,
+      maxTokens: 32_000,
+    }, () => undefined, (runId) => emit({ type: 'meta', runId, baseRevision: input.baseRevision }));
+    signal?.throwIfAborted();
+    if (!repaired.result.content.trim()) throw new BadGatewayException('AI returned an empty continuity repair');
+    this.assertGenerationCurrent(input, 'repair');
+    emit({ type: 'stage', stage: 'CHECKING' });
+    // Recheck the whole candidate without automatically repairing other issues.
+    const issues = await this.reviewContinuity(input, repaired.result.content, signal);
+    signal?.throwIfAborted();
+    this.assertGenerationCurrent(input, 'repair');
+    emit({
+      type: 'done',
+      content: repaired.result.content,
+      issues,
+      blocked: issues.some((issue) => issue.severity === 'BLOCKING'),
+      baseRevision: input.baseRevision,
+    });
+  }
+
+  private async streamWithContinuity(
+    input: {
+      projectId: string;
+      episodeId?: string;
+      baseRevision?: number;
+      baseOrderRevision?: string;
       task: string;
       promptId: 'episode-draft' | 'episode-continue';
       variables: Record<string, unknown>;
@@ -608,8 +860,10 @@ export class EpisodesService {
     );
     if (!draft.result.content.trim()) throw new BadGatewayException('AI returned an empty episode draft');
     signal?.throwIfAborted();
+    this.assertGenerationCurrent(input);
     emit({ type: 'stage', stage: 'CHECKING' });
     let review = await this.reviewContinuity(input, draft.result.content, signal);
+    this.assertGenerationCurrent(input);
     let finalContent = draft.result.content;
     if (review.some((issue) => issue.severity === 'BLOCKING')) {
       emit({ type: 'stage', stage: 'REPAIRING' });
@@ -641,6 +895,7 @@ export class EpisodesService {
       review = await this.reviewContinuity(input, finalContent, signal);
     }
     signal?.throwIfAborted();
+    this.assertGenerationCurrent(input);
     emit({
       type: 'done',
       content: finalContent,
@@ -795,6 +1050,7 @@ export class EpisodesService {
       signal,
       maxTokens: 2_000,
     });
+    this.assertEpisodeRevision(projectId, episode.id, episode.revision);
     const stamp = now();
     this.database.orm
       .insert(sceneStates)
@@ -839,11 +1095,66 @@ export class EpisodesService {
     return row;
   }
 
+  private readOrder(projectId: string): EpisodeOrderSnapshot {
+    return this.database.connection.transaction(() => {
+      const project = this.projects.get(projectId);
+      const rows = this.database.orm.select().from(episodes)
+        .where(and(eq(episodes.projectId, projectId), isNull(episodes.deletedAt)))
+        .orderBy(episodes.number).all();
+      const slotCount = project.nextEpisodeNumber - 1;
+      return {
+        rows,
+        slotCount,
+        revision: sha256(stringifyJson({
+          slotCount,
+          episodes: rows.map(({ id, number, revision }) => ({ id, number, revision })),
+        })),
+      };
+    })();
+  }
+
+  private orderView(snapshot: EpisodeOrderSnapshot) {
+    const slots: Array<string | null> = Array(snapshot.slotCount).fill(null);
+    for (const row of snapshot.rows) slots[row.number - 1] = row.id;
+    return {
+      episodes: snapshot.rows.map((row) => this.toView(row)),
+      slots,
+      revision: snapshot.revision,
+    };
+  }
+
+  private assertOrderRevision(projectId: string, expectedRevision: string): void {
+    if (this.readOrder(projectId).revision !== expectedRevision) {
+      throw new ConflictException('회차 목록이 변경되었습니다. 최신 순서를 확인한 뒤 다시 시도해 주세요.');
+    }
+  }
+
+  private assertEpisodeRevision(projectId: string, episodeId: string, expectedRevision: number, operation = 'generation'): void {
+    if (this.requireEpisode(projectId, episodeId).revision !== expectedRevision) {
+      throw new ConflictException(`Episode revision changed during ${operation}`);
+    }
+  }
+
+  private assertGenerationCurrent(input: {
+    projectId: string;
+    episodeId?: string;
+    baseRevision?: number;
+    baseOrderRevision?: string;
+  }, operation = 'generation'): void {
+    if (input.episodeId && input.baseRevision !== undefined) {
+      this.assertEpisodeRevision(input.projectId, input.episodeId, input.baseRevision, operation);
+    }
+    if (input.baseOrderRevision !== undefined) {
+      this.assertOrderRevision(input.projectId, input.baseOrderRevision);
+    }
+  }
+
   private async indexEpisode(row: typeof episodes.$inferSelect): Promise<void> {
     await this.memory.indexSource({
       projectId: row.projectId,
       sourceType: 'EPISODE',
       sourceId: row.id,
+      expectedEpisode: { number: row.number, revision: row.revision },
       text: `${row.number}화 ${row.title}\n방향: ${row.direction}\n${row.content}`,
     });
   }

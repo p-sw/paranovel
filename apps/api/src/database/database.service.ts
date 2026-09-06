@@ -267,6 +267,56 @@ ALTER TABLE canon_entries_with_appearance RENAME TO canon_entries;
 CREATE INDEX idx_canon_project_category ON canon_entries(project_id, category, status);
 `;
 
+const CHAT_THREADS_MIGRATION = `
+CREATE TABLE chat_threads (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_chat_threads_project_updated ON chat_threads(project_id, updated_at);
+ALTER TABLE chat_messages ADD COLUMN thread_id TEXT REFERENCES chat_threads(id) ON DELETE CASCADE;
+INSERT INTO chat_threads (id, project_id, title, created_at, updated_at)
+SELECT 'legacy-' || project_id, project_id,
+  COALESCE((SELECT substr(content, 1, 80) FROM chat_messages first_message
+    WHERE first_message.project_id = messages.project_id AND role = 'user' ORDER BY rowid LIMIT 1), '이전 대화'),
+  MIN(created_at), MAX(created_at)
+FROM chat_messages messages GROUP BY project_id;
+UPDATE chat_messages SET thread_id = 'legacy-' || project_id;
+CREATE INDEX idx_chat_messages_thread ON chat_messages(thread_id);
+`;
+
+// Historical counters included deleted trailing episodes. From this migration
+// onward the counter also preserves deliberately retained placeholder slots.
+const EPISODE_SLOT_COUNTER_MIGRATION = `
+UPDATE projects SET next_episode_number = COALESCE((
+  SELECT MAX(number) FROM episodes
+  WHERE episodes.project_id = projects.id AND episodes.deleted_at IS NULL
+), 0) + 1;
+`;
+
+const EDITOR_AI_MIGRATION = `
+CREATE TABLE editor_ai_messages (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  episode_id TEXT NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+  client_message_id TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('user','assistant')),
+  content TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('PENDING','COMPLETE','FAILED')),
+  request_json TEXT,
+  edit_json TEXT,
+  applied_at TEXT,
+  error TEXT,
+  run_id TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(episode_id, client_message_id, role)
+);
+CREATE INDEX idx_editor_ai_episode ON editor_ai_messages(episode_id);
+CREATE UNIQUE INDEX idx_editor_ai_pending ON editor_ai_messages(episode_id) WHERE status = 'PENDING';
+`;
+
 @Injectable()
 export class DatabaseService implements OnApplicationShutdown {
   readonly connection: Database.Database;
@@ -301,6 +351,9 @@ export class DatabaseService implements OnApplicationShutdown {
       { version: 6, sql: CHARACTER_APPEARANCE_MIGRATION },
       // Versions 7 and 8 remain reserved in existing database histories.
       // The retired feature's stored tables and data are left untouched.
+      { version: 9, sql: CHAT_THREADS_MIGRATION },
+      { version: 10, sql: EPISODE_SLOT_COUNTER_MIGRATION },
+      { version: 11, sql: EDITOR_AI_MIGRATION },
     ];
     this.connection.exec(
       'CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)',

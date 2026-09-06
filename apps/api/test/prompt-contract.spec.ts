@@ -27,8 +27,10 @@ const variables: Record<string, unknown> = {
   interview_answers: '[]',
   episode_title: '문 앞에서',
   episode_direction: '기록관이 닫힌 문에 도착한다.',
+  refinement_instruction: '마지막 장면의 긴장감만 높여줘.',
   episode_number: 1,
   episode_text: '기록관은 문 앞에 섰다.',
+  episode_context: { title: '문 앞에서', selection: { start: 0, end: 0, text: '' } },
   previous_episode_memories: '[]',
   previous_paragraph: '기록관은 숨을 골랐다.',
   text_before_cursor: '기록관은 숨을 골랐다.',
@@ -53,6 +55,7 @@ describe('expanded prompt contracts', () => {
     'continuity-review',
     'continuity-repair',
     'episode-direction',
+    'episode-direction-refine',
     'arc-plan',
     'worldbuilding-generate',
   ];
@@ -78,4 +81,20 @@ describe('expanded prompt contracts', () => {
       expect(rendered.user).not.toMatch(/\{\{\s*[a-zA-Z0-9_.-]+\s*\}\}/);
     },
   );
+
+  it('limits direction refinement to the requested parts of the latest plan and retains continuity rules', () => {
+    const registry = new PromptRegistryService();
+    const rendered = registry.render('episode-direction-refine', variables);
+
+    expect(rendered.user).toContain(`<episode_title>\n${variables.episode_title}\n</episode_title>`);
+    expect(rendered.user).toContain(`<episode_direction>\n${variables.episode_direction}\n</episode_direction>`);
+    expect(rendered.user).toContain(`<refinement_instruction>\n${variables.refinement_instruction}\n</refinement_instruction>`);
+    expect(rendered.system).toContain('매번 이 최신본에서 이어서 개선');
+    expect(rendered.system).toContain('요청하지 않은 부분은 문구, 문장 순서, 줄바꿈과 공백까지 그대로 보존');
+    expect(rendered.system).toContain('제목만 개선하라는 요청이면 direction 전체를 입력 그대로 반환');
+    expect(rendered.system).toContain('전개 방향만 개선하라는 요청이면 title을 입력 그대로 반환');
+    expect(rendered.system).toContain('Canon을 최우선');
+    expect(rendered.system).toContain('이전 화의 사건을 요약·복습하거나 마지막 장면을 재연하는 도입');
+    expect(rendered.system).toContain('해당 부분의 기존 내용을 보존하고 충돌 이유를 conflicts에 표시');
+  });
 });
