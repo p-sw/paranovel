@@ -336,7 +336,12 @@ export class MemoryService {
       });
   }
 
-  async assemble(projectId: string, query: string, episodeId?: string): Promise<AssembledMemory> {
+  async assemble(
+    projectId: string,
+    query: string,
+    episodeId?: string,
+    options?: { previousEpisodeScene?: boolean },
+  ): Promise<AssembledMemory> {
     const project = this.database.orm
       .select()
       .from(projects)
@@ -400,7 +405,7 @@ export class MemoryService {
         ),
       )
       .all();
-    const scene = episodeId
+    const scene = episodeId && !options?.previousEpisodeScene
       ? this.database.connection
           .prepare(
             `SELECT s.episode_id AS episodeId, s.location,
@@ -427,9 +432,10 @@ export class MemoryService {
              JOIN episodes e ON e.id = s.episode_id
              WHERE e.project_id = ? AND e.deleted_at IS NULL
                AND e.status = 'CONFIRMED' AND s.source_revision = e.revision
+               ${historyFilter}
              ORDER BY e.number DESC LIMIT 1`,
           )
-          .get(projectId) as
+          .get(...(currentEpisode ? [projectId, currentEpisode.number] : [projectId])) as
           | (typeof sceneStates.$inferSelect & { episode_content: string })
           | undefined;
     const retrievalQuery = query.trim() || [

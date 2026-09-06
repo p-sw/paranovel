@@ -18,13 +18,10 @@ import {
   Sparkles,
   Trash2,
 } from 'lucide-react';
-import { Link, useOutletContext, useParams } from 'react-router-dom';
+import { Link, useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router-dom';
 import { api, isConflict, messageOf } from '../api/client';
 import { characterCount, createIdempotencyKey, formatRelativeDate } from '../lib';
-import DraftPreview, { DraftGenerationStatus } from '../components/DraftPreview';
-import ContinuityIssues from '../components/ContinuityIssues';
-import { useContinuityRepair } from '../useContinuityRepair';
-import type { AiPhase, ContinuityIssue, Episode } from '../types';
+import type { Episode } from '../types';
 import type { ProjectOutletContext } from '../components/AppShell';
 import {
   Badge,
@@ -58,6 +55,8 @@ function ProjectEpisodes({ projectId }: { projectId: string }) {
   const { project } = useOutletContext<ProjectOutletContext>();
   const queryClient = useQueryClient();
   const [creatorOpen, setCreatorOpen] = useState(false);
+  const [resumingEpisode, setResumingEpisode] = useState<Episode | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
   const [deleting, setDeleting] = useState<Episode | null>(null);
   const [draft, setDraft] = useState<OrderDraft | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -100,11 +99,30 @@ function ProjectEpisodes({ projectId }: { projectId: string }) {
       saveMutation.reset();
     },
   });
+  useEffect(() => {
+    const resumeId = searchParams.get('resume');
+    if (!resumeId || !orderQuery.data || orderQuery.isFetching) return;
+    const episode = orderQuery.data.episodes.find((item) => item.id === resumeId);
+    if (episode?.status === 'INCOMPLETE') {
+      setResumingEpisode(episode);
+      setCreatorOpen(true);
+    }
+    setSearchParams((params) => {
+      params.delete('resume');
+      return params;
+    }, { replace: true });
+  }, [orderQuery.data, orderQuery.isFetching, searchParams, setSearchParams]);
+
   const items = draft?.items ?? (orderQuery.data ? orderItems(orderQuery.data) : []);
   const editing = draft !== null;
   const busy = saveMutation.isPending || reloadMutation.isPending;
   const locked = busy || dragging;
   const conflict = isConflict(saveMutation.error);
+  const openCreator = () => {
+    if (editing) return;
+    setResumingEpisode(null);
+    setCreatorOpen(true);
+  };
   const save = () => {
     if (draft && !locked && !conflict) saveMutation.mutate(draft);
   };
@@ -140,7 +158,7 @@ function ProjectEpisodes({ projectId }: { projectId: string }) {
               }}
             ><Pencil className="size-4" /> 수정</Button>
           )}
-          <Button disabled={editing} onClick={() => setCreatorOpen(true)}>
+          <Button disabled={editing} onClick={openCreator}>
             <Plus className="size-4" /> 새 회차
           </Button>
         </div>
@@ -172,7 +190,7 @@ function ProjectEpisodes({ projectId }: { projectId: string }) {
           icon={<BookOpenText className="size-8" />}
           title="첫 회차가 기다리고 있어요"
           description="원하는 내용을 적거나 바로 다음으로 넘어가세요. AI가 제목과 전개 방향을 만들어요."
-          action={<Button onClick={() => setCreatorOpen(true)}><FilePlus2 className="size-4" /> 첫 회차 만들기</Button>}
+          action={<Button onClick={openCreator}><FilePlus2 className="size-4" /> 첫 회차 만들기</Button>}
         />
       ) : null}
       {editing && !items.length ? (
@@ -204,7 +222,14 @@ function ProjectEpisodes({ projectId }: { projectId: string }) {
         <section className="episode-list" aria-label="회차 목록">
           {items.map((item, index) => (
             <article className={`episode-row${item.episode ? '' : ' episode-placeholder'}`} key={item.id}>
-              {item.episode ? (
+              {item.episode?.status === 'INCOMPLETE' ? (
+                <button type="button" className="episode-row-link text-left" onClick={() => {
+                  setResumingEpisode(item.episode);
+                  setCreatorOpen(true);
+                }}>
+                  <EpisodeRowContent episode={item.episode} number={items.length - index} />
+                </button>
+              ) : item.episode ? (
                 <Link className="episode-row-link" to={`${item.episode.id}`}>
                   <EpisodeRowContent episode={item.episode} number={items.length - index} />
                 </Link>
@@ -232,7 +257,7 @@ function ProjectEpisodes({ projectId }: { projectId: string }) {
         </section>
       ) : null}
 
-      {creatorOpen ? <CreateEpisodeSheet open={creatorOpen} onOpenChange={setCreatorOpen} projectId={projectId} /> : null}
+      {creatorOpen ? <CreateEpisodeSheet open={creatorOpen} onOpenChange={setCreatorOpen} projectId={projectId} initialEpisode={resumingEpisode} /> : null}
       <ConfirmDialog
         open={Boolean(deleting)}
         onOpenChange={(open) => !open && setDeleting(null)}
@@ -282,7 +307,9 @@ function EpisodeRowContent({ episode, number }: { episode: Episode | null; numbe
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <h2>{episode ? episode.title || '제목 없는 회차' : '빈 회차'}</h2>
-          {episode ? summaryFresh ? (
+          {episode?.status === 'INCOMPLETE' ? (
+            <Badge tone="warning">미완성</Badge>
+          ) : episode ? summaryFresh ? (
             <Badge tone="sage"><CheckCircle2 className="size-3" /> 기억 최신</Badge>
           ) : (
             <Badge tone="warning"><AlertTriangle className="size-3" /> 기억 갱신 필요</Badge>
@@ -301,31 +328,65 @@ function CreateEpisodeSheet({
   open,
   onOpenChange,
   projectId,
+  initialEpisode,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   projectId: string;
+  initialEpisode: Episode | null;
 }) {
   const queryClient = useQueryClient();
-  const [step, setStep] = useState<'request' | 'direction' | 'draft'>('request');
-  const [title, setTitle] = useState('');
-  const [direction, setDirection] = useState('');
+  const navigate = useNavigate();
+  const [step, setStep] = useState<'request' | 'direction'>(initialEpisode ? 'direction' : 'request');
+  const [title, setTitle] = useState(initialEpisode?.title ?? '');
+  const [direction, setDirection] = useState(initialEpisode?.direction ?? '');
   const [hint, setHint] = useState('');
   const [instruction, setInstruction] = useState('');
-  const [preview, setPreview] = useState('');
-  const [phase, setPhase] = useState<AiPhase>('idle');
-  const [issues, setIssues] = useState<ContinuityIssue[]>([]);
   const [proposalConflicts, setProposalConflicts] = useState<string[]>([]);
-  const [blocked, setBlocked] = useState(false);
   const [error, setError] = useState('');
   const abortRef = useRef<AbortController | null>(null);
-  const proposedHintRef = useRef<string | null>(null);
+  const mountedRef = useRef(false);
+  const proposedHintRef = useRef<string | null>(initialEpisode ? '' : null);
+  const episodeRef = useRef(initialEpisode);
   const idempotencyKeyRef = useRef(createIdempotencyKey());
+  // Keep the first create payload stable if its response is lost. Later edits
+  // are applied to the returned episode instead of creating another record.
+  const createInputRef = useRef<{ title: string; direction: string; content: string; incomplete: boolean } | null>(null);
 
+  const cacheEpisode = (episode: Episode) => {
+    episodeRef.current = episode;
+    queryClient.setQueryData(['episodes', projectId, episode.id], episode);
+    void queryClient.invalidateQueries({ queryKey: ['episodes', projectId], exact: true });
+    void queryClient.invalidateQueries({ queryKey: ['episode-order', projectId] });
+    void queryClient.invalidateQueries({ queryKey: ['projects'] });
+  };
+  const saveMutation = useMutation({
+    mutationFn: async ({ title, direction, incomplete = true }: { title: string; direction: string; incomplete?: boolean }) => {
+      const plan = { title: title.trim(), direction: direction.trim() };
+      if (!plan.title || !plan.direction) throw new Error('제목과 전개 방향을 먼저 확인해 주세요.');
+      let episode = episodeRef.current;
+      if (!episode) {
+        createInputRef.current ??= { ...plan, content: '', incomplete: true };
+        episode = await api.episodes.create(projectId, createInputRef.current, idempotencyKeyRef.current);
+        cacheEpisode(episode);
+      }
+      if (episode.title !== plan.title || episode.direction !== plan.direction || (episode.status === 'INCOMPLETE') !== incomplete) {
+        episode = await api.episodes.update(projectId, episode.id, {
+          ...plan, expectedRevision: episode.revision, incomplete,
+        });
+        cacheEpisode(episode);
+      }
+      return episode;
+    },
+    onError: (reason) => setError(messageOf(reason)),
+  });
+  const planContext = () => episodeRef.current ? {
+    episodeId: episodeRef.current.id, expectedRevision: episodeRef.current.revision,
+  } : undefined;
   const proposeMutation = useMutation({
     mutationFn: ({ hint, signal }: { hint: string; signal: AbortSignal }) =>
-      api.episodes.propose(projectId, hint || undefined, signal),
-    onSuccess: (proposal, { hint, signal }) => {
+      api.episodes.propose(projectId, hint || undefined, signal, planContext()),
+    onSuccess: async (proposal, { hint, signal }) => {
       if (signal.aborted) return;
       proposedHintRef.current = hint;
       setTitle(proposal.title);
@@ -334,6 +395,7 @@ function CreateEpisodeSheet({
       setInstruction('');
       setError('');
       setStep('direction');
+      await saveMutation.mutateAsync(proposal).catch(() => undefined);
     },
     onError: (reason, { signal }) => {
       if (!signal.aborted) setError(messageOf(reason));
@@ -343,52 +405,32 @@ function CreateEpisodeSheet({
     mutationFn: ({ input, signal }: {
       input: { title: string; direction: string; instruction: string };
       signal: AbortSignal;
-    }) => api.episodes.refine(projectId, input, signal),
-    onSuccess: (proposal, { signal }) => {
+    }) => api.episodes.refine(projectId, { ...input, ...planContext() }, signal),
+    onSuccess: async (proposal, { signal }) => {
       if (signal.aborted) return;
       setTitle(proposal.title);
       setDirection(proposal.direction);
       setProposalConflicts(proposal.conflicts ?? []);
       setInstruction('');
       setError('');
+      await saveMutation.mutateAsync(proposal).catch(() => undefined);
     },
     onError: (reason, { signal }) => {
       if (!signal.aborted) setError(messageOf(reason));
     },
   });
-  const createMutation = useMutation({
-    mutationFn: (forceNeedsReview: boolean) => api.episodes.create(
-      projectId,
-      { title: title.trim(), direction: direction.trim(), content: preview, forceNeedsReview },
-      idempotencyKeyRef.current,
-    ),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['episodes', projectId] });
-      queryClient.invalidateQueries({ queryKey: ['episode-order', projectId] });
-      queryClient.invalidateQueries({ queryKey: ['projects'] });
-      onOpenChange(false);
-    },
-    onError: (reason) => setError(messageOf(reason)),
-  });
-  const repair = useContinuityRepair({
-    request: (issue, onEvent, signal) => api.episodes.repair(
-      projectId,
-      { title: title.trim(), direction: direction.trim(), content: preview, issue },
-      onEvent,
-      signal,
-    ),
-    onSuccess: (result) => {
-      setPreview(result.content);
-      setIssues(result.issues);
-      setBlocked(result.blocked);
-      setPhase('done');
-    },
-  });
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      abortRef.current?.abort();
+    };
+  }, []);
 
+  const busy = proposeMutation.isPending || refineMutation.isPending || saveMutation.isPending;
   const next = () => {
-    if (proposeMutation.isPending || refineMutation.isPending || createMutation.isPending) return;
+    if (busy) return;
     if (proposedHintRef.current === hint.trim()) {
       setError('');
       setStep('direction');
@@ -401,176 +443,86 @@ function CreateEpisodeSheet({
     setError('');
     proposeMutation.mutate({ hint: hint.trim(), signal: controller.signal });
   };
-
   const refine = () => {
-    if (refineMutation.isPending || createMutation.isPending) return;
-    if (!title.trim() || !direction.trim() || !instruction.trim()) return;
+    if (busy || !title.trim() || !direction.trim() || !instruction.trim()) return;
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
     setError('');
-    refineMutation.mutate({
-      input: { title, direction, instruction: instruction.trim() },
-      signal: controller.signal,
-    });
+    refineMutation.mutate({ input: { title, direction, instruction: instruction.trim() }, signal: controller.signal });
   };
-
-  const generate = async () => {
-    if (repair.isRepairing || createMutation.isPending || refineMutation.isPending) return;
-    if (!title.trim() || !direction.trim()) {
-      setError('제목과 전개 방향을 먼저 확인해 주세요.');
-      return;
-    }
+  const close = async () => {
+    if (saveMutation.isPending) return;
     abortRef.current?.abort();
-    repair.reset();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setPreview('');
-    setIssues([]);
-    setBlocked(false);
     setError('');
-    setStep('draft');
-    setPhase('retrieving');
-    try {
-      const result = await api.episodes.generate(
-        projectId,
-        { title: title.trim(), direction: direction.trim() },
-        (event, content) => {
-          if (controller.signal.aborted) return;
-          if (event.type === 'stage') {
-            setPhase(event.stage === 'MEMORY' ? 'retrieving' : event.stage === 'WRITING' ? 'writing' : event.stage === 'REPAIRING' ? 'repairing' : 'checking');
-          }
-          if (event.type === 'delta' || event.type === 'reset') {
-            setPhase((current) => current === 'repairing' || current === 'checking' ? current : 'writing');
-            setPreview(content);
-          }
-          if (event.type === 'done') {
-            setPreview(event.content);
-            setIssues(event.issues);
-            setBlocked(event.blocked);
-            setPhase('done');
-          }
-        },
-        controller.signal,
-      );
-      if (controller.signal.aborted) return;
-      setPreview(result.content);
-      setIssues(result.issues);
-      setBlocked(result.blocked);
-      setPhase('done');
-    } catch (reason) {
-      if (controller.signal.aborted) setPhase('cancelled');
-      else {
-        setPhase('error');
-        setError(messageOf(reason));
+    if (proposedHintRef.current !== null) {
+      try {
+        await saveMutation.mutateAsync({ title, direction });
+      } catch {
+        return;
       }
     }
+    onOpenChange(false);
   };
-
-  const isGenerating = ['retrieving', 'writing', 'checking', 'repairing'].includes(phase);
-  const needsReview = blocked || phase === 'cancelled' || phase === 'error';
-  const footer = step === 'request' ? (
-    <div className="action-row sm:justify-between">
-      <Button variant="ghost" onClick={() => onOpenChange(false)}>취소</Button>
-      <Button type="submit" form="episode-request-form" busy={proposeMutation.isPending}>
-        {proposeMutation.isPending ? '만드는 중' : '다음'}
-        {!proposeMutation.isPending ? <ArrowRight className="size-4" /> : null}
-      </Button>
-    </div>
-  ) : step === 'direction' ? (
-    <div className="action-row">
-      <Button variant="ghost" disabled={createMutation.isPending || refineMutation.isPending} onClick={() => { setStep('request'); setError(''); }}>이전</Button>
-      <Button variant="secondary" disabled={!title.trim() || !direction.trim() || refineMutation.isPending} busy={createMutation.isPending} onClick={() => createMutation.mutate(false)}>
-        빈 회차로 시작
-      </Button>
-      <Button disabled={!title.trim() || !direction.trim() || createMutation.isPending || refineMutation.isPending} onClick={() => void generate()}>
-        <Sparkles className="size-4" /> AI 초안 만들기
-      </Button>
-    </div>
-  ) : isGenerating || repair.isRepairing ? (
-    <div className="action-row">
-      <Button variant="secondary" onClick={() => repair.isRepairing ? repair.cancel() : abortRef.current?.abort()}>
-        {repair.isRepairing ? '수정 중단' : '생성 중단'}
-      </Button>
-    </div>
-  ) : (
-    <div className="action-row">
-      <Button variant="ghost" disabled={createMutation.isPending} onClick={() => { repair.reset(); setStep('direction'); setPreview(''); setIssues([]); setPhase('idle'); setError(''); }}>제목·방향 확인</Button>
-      <Button variant="secondary" disabled={createMutation.isPending} onClick={() => void generate()}><Sparkles className="size-4" /> 다시 생성</Button>
-      {preview ? (
-        <Button busy={createMutation.isPending} onClick={() => createMutation.mutate(needsReview)}>
-          {needsReview ? '검토 필요로 저장' : '초안 저장'}
-        </Button>
-      ) : null}
-    </div>
-  );
+  const startWriting = async (generateEpisode: boolean) => {
+    if (busy) return;
+    setError('');
+    try {
+      const episode = await saveMutation.mutateAsync({ title, direction, incomplete: generateEpisode });
+      if (!mountedRef.current) return;
+      navigate(`/projects/${projectId}/episodes/${episode.id}`, {
+        state: generateEpisode ? { generateEpisode: true } : null,
+      });
+    } catch {
+      // Keep the saved plan and dialog available for retry.
+    }
+  };
 
   return (
     <Sheet
       open={open}
-      onOpenChange={(next) => {
-        if (!next && createMutation.isPending) return;
-        if (!next && repair.isRepairing && !window.confirm('수정을 중단하고 닫을까요?')) return;
-        if (!next && isGenerating && !window.confirm('생성을 중단하고 닫을까요?')) return;
-        if (!next) {
-          abortRef.current?.abort();
-          repair.reset();
-        }
-        onOpenChange(next);
-      }}
+      onOpenChange={(nextOpen) => { if (!nextOpen) void close(); }}
       title="새 회차 만들기"
-      description={step === 'request' ? '원하는 내용이 있으면 적어 주세요. 비워 두어도 괜찮아요.' : step === 'direction' ? '제목과 전개 방향을 직접 고치거나, 개선 요청을 적어 여러 번 다듬어 보세요.' : '완성된 초안을 확인하고 저장하세요.'}
-      footer={footer}
-      bodyHeader={step === 'draft' ? <DraftGenerationStatus phase={repair.phase ?? phase} /> : undefined}
+      description={step === 'request' ? '원하는 내용이 있으면 적어 주세요. 비워 두어도 괜찮아요.' : '제목과 전개 방향을 직접 고치거나, 개선 요청을 적어 여러 번 다듬어 보세요. 닫아도 미완성 회차에서 이어갈 수 있어요.'}
+      footer={step === 'request' ? (
+        <div className="action-row sm:justify-between">
+          <Button variant="ghost" disabled={saveMutation.isPending} onClick={() => void close()}>취소</Button>
+          <Button type="submit" form="episode-request-form" busy={proposeMutation.isPending} disabled={busy}>
+            {proposeMutation.isPending ? '만드는 중' : '다음'}
+            {!proposeMutation.isPending ? <ArrowRight className="size-4" /> : null}
+          </Button>
+        </div>
+      ) : (
+        <div className="action-row">
+          <Button variant="ghost" disabled={busy} onClick={() => { setStep('request'); setError(''); }}>이전</Button>
+          <Button variant="secondary" disabled={busy || !title.trim() || !direction.trim()} onClick={() => void startWriting(false)}>빈 회차로 시작</Button>
+          <Button busy={saveMutation.isPending} disabled={busy || !title.trim() || !direction.trim()} onClick={() => void startWriting(true)}>
+            <Sparkles className="size-4" /> AI 회차 작성
+          </Button>
+        </div>
+      )}
       wide
     >
       {step === 'request' ? (
         <form id="episode-request-form" onSubmit={(event) => { event.preventDefault(); next(); }}>
           <label className="field-label" htmlFor="episode-hint">이번 회차에 원하는 것 <span className="font-normal text-muted">(선택)</span></label>
           <textarea
-            id="episode-hint"
-            className="input mt-2"
-            rows={8}
-            maxLength={5000}
-            value={hint}
-            disabled={proposeMutation.isPending}
-            onChange={(event) => setHint(event.target.value)}
-            aria-describedby="episode-hint-help"
+            id="episode-hint" className="input mt-2" rows={8} maxLength={5000} value={hint} disabled={busy}
+            onChange={(event) => setHint(event.target.value)} aria-describedby="episode-hint-help"
             placeholder="예: 주인공이 처음으로 능력을 들키는 회차"
           />
           <p id="episode-hint-help" className="field-hint">다음을 누르면 AI가 이야기의 흐름에 맞춰 제목과 전개 방향을 자동으로 만들어요.</p>
-          {proposeMutation.isPending ? (
-            <p className="generation-status mt-5" role="status">이전 회차와 설정을 확인하며 제목과 전개 방향을 만들고 있어요.</p>
-          ) : null}
+          {proposeMutation.isPending ? <p className="generation-status mt-5" role="status">이전 회차와 설정을 확인하며 제목과 전개 방향을 만들고 있어요.</p> : null}
         </form>
-      ) : step === 'draft' ? (
-        <div className="generation-preview">
-          <DraftPreview
-            label="AI 초안 수정"
-            value={preview}
-            onChange={setPreview}
-            readOnly={isGenerating || repair.isRepairing}
-            disabled={createMutation.isPending}
-            placeholder="이야기의 흐름과 설정을 살펴보고 있어요…"
-          />
-          <ContinuityIssues
-            issues={issues}
-            blocked={blocked}
-            heading={blocked ? '저장 전 반드시 검토하세요' : '이어짐을 확인해 주세요'}
-            onRepair={(issue, index) => { setError(''); void repair.repair(issue, index); }}
-            repairingIndex={repair.repairingIndex}
-            disabled={isGenerating || createMutation.isPending || !preview.trim()}
-          />
-        </div>
       ) : (
         <div className="space-y-6">
           <div>
             <label className="field-label" htmlFor="episode-title">회차 제목</label>
-            <input id="episode-title" className="input" maxLength={200} disabled={createMutation.isPending || refineMutation.isPending} value={title} onChange={(event) => setTitle(event.target.value)} />
+            <input id="episode-title" className="input" maxLength={200} disabled={busy} value={title} onChange={(event) => setTitle(event.target.value)} />
           </div>
           <div>
             <label className="field-label" htmlFor="episode-direction">전개 방향</label>
-            <textarea id="episode-direction" className="input" rows={10} maxLength={20000} disabled={createMutation.isPending || refineMutation.isPending} value={direction} onChange={(event) => setDirection(event.target.value)} />
+            <textarea id="episode-direction" className="input" rows={10} maxLength={20000} disabled={busy} value={direction} onChange={(event) => setDirection(event.target.value)} />
           </div>
           {proposalConflicts.length ? (
             <div className="warning-box" role="alert">
@@ -581,38 +533,24 @@ function CreateEpisodeSheet({
           <form onSubmit={(event) => { event.preventDefault(); refine(); }}>
             <label className="field-label" htmlFor="episode-refinement">개선 요청</label>
             <textarea
-              id="episode-refinement"
-              className="input"
-              rows={3}
-              maxLength={5000}
-              value={instruction}
-              disabled={createMutation.isPending || refineMutation.isPending}
-              onChange={(event) => setInstruction(event.target.value)}
-              aria-describedby="episode-refinement-help"
+              id="episode-refinement" className="input" rows={3} maxLength={5000} value={instruction} disabled={busy}
+              onChange={(event) => setInstruction(event.target.value)} aria-describedby="episode-refinement-help"
               placeholder="예: 제목은 그대로 두고, 마지막 장면의 긴장감만 높여 줘"
             />
             <p id="episode-refinement-help" className="field-hint">현재 제목과 전개 방향에서 요청한 부분만 다듬어요. 개선된 결과에 요청을 더해 계속 개선할 수 있어요.</p>
             <div className="action-row mt-3">
-              <Button
-                type="submit"
-                variant="secondary"
-                busy={refineMutation.isPending}
-                disabled={!instruction.trim() || !title.trim() || !direction.trim() || createMutation.isPending}
-              >
+              <Button type="submit" variant="secondary" busy={refineMutation.isPending} disabled={busy || !instruction.trim() || !title.trim() || !direction.trim()}>
                 {!refineMutation.isPending ? <Sparkles className="size-4" /> : null}
                 {refineMutation.isPending ? '개선 중' : '개선'}
               </Button>
             </div>
             {refineMutation.isPending ? (
               <p className="generation-status mt-3" role="status">현재 제목과 전개 방향에 개선 요청을 반영하고 있어요.</p>
-            ) : refineMutation.isSuccess ? (
-              <p className="field-hint mt-3" role="status">개선 요청을 반영했어요. 더 다듬고 싶은 부분이 있으면 다시 요청해 주세요.</p>
-            ) : null}
+            ) : refineMutation.isSuccess ? <p className="field-hint mt-3" role="status">개선 요청을 반영했어요. 더 다듬고 싶은 부분이 있으면 다시 요청해 주세요.</p> : null}
           </form>
         </div>
       )}
       <FieldError>{error}</FieldError>
-      <FieldError>{repair.error}</FieldError>
     </Sheet>
   );
 }

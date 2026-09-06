@@ -48,7 +48,7 @@ CREATE TABLE episodes (
   direction TEXT NOT NULL,
   content TEXT NOT NULL DEFAULT '',
   revision INTEGER NOT NULL DEFAULT 1,
-  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','CONFIRMED','MEMORY_STALE','NEEDS_REVIEW')),
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('INCOMPLETE','DRAFT','CONFIRMED','MEMORY_STALE','NEEDS_REVIEW')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   deleted_at TEXT,
@@ -317,6 +317,27 @@ CREATE INDEX idx_editor_ai_episode ON editor_ai_messages(episode_id);
 CREATE UNIQUE INDEX idx_editor_ai_pending ON editor_ai_messages(episode_id) WHERE status = 'PENDING';
 `;
 
+const INCOMPLETE_EPISODE_MIGRATION = `
+CREATE TABLE episodes_with_incomplete (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  number INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  revision INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('INCOMPLETE','DRAFT','CONFIRMED','MEMORY_STALE','NEEDS_REVIEW')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT,
+  UNIQUE(project_id, number)
+);
+INSERT INTO episodes_with_incomplete SELECT * FROM episodes;
+DROP TABLE episodes;
+ALTER TABLE episodes_with_incomplete RENAME TO episodes;
+CREATE INDEX idx_episodes_project ON episodes(project_id, number);
+`;
+
 @Injectable()
 export class DatabaseService implements OnApplicationShutdown {
   readonly connection: Database.Database;
@@ -354,6 +375,7 @@ export class DatabaseService implements OnApplicationShutdown {
       { version: 9, sql: CHAT_THREADS_MIGRATION },
       { version: 10, sql: EPISODE_SLOT_COUNTER_MIGRATION },
       { version: 11, sql: EDITOR_AI_MIGRATION },
+      { version: 12, sql: INCOMPLETE_EPISODE_MIGRATION, rebuildsReferencedTable: true },
     ];
     this.connection.exec(
       'CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)',
@@ -366,12 +388,22 @@ export class DatabaseService implements OnApplicationShutdown {
     );
     for (const migration of migrations) {
       if (applied.has(migration.version)) continue;
-      this.connection.transaction(() => {
-        this.connection.exec(migration.sql);
-        this.connection
-          .prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)')
-          .run(migration.version, new Date().toISOString());
-      })();
+      // Rebuilding episodes must preserve its dependent summaries, scenes and
+      // application receipts instead of firing their ON DELETE actions.
+      if (migration.rebuildsReferencedTable) this.connection.pragma('foreign_keys = OFF');
+      try {
+        this.connection.transaction(() => {
+          this.connection.exec(migration.sql);
+          if (migration.rebuildsReferencedTable && this.connection.prepare('PRAGMA foreign_key_check').all().length > 0) {
+            throw new Error('Episode migration would leave invalid foreign keys');
+          }
+          this.connection
+            .prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)')
+            .run(migration.version, new Date().toISOString());
+        })();
+      } finally {
+        if (migration.rebuildsReferencedTable) this.connection.pragma('foreign_keys = ON');
+      }
     }
   }
 

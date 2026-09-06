@@ -207,7 +207,7 @@ export const api = {
       json<Episode>(`/projects/${projectId}/episodes/${episodeId}`),
     create: (
       projectId: string,
-      input: { title: string; direction: string; content?: string; forceNeedsReview?: boolean },
+      input: { title: string; direction: string; content?: string; incomplete?: boolean; forceNeedsReview?: boolean },
       idempotencyKey: string,
     ) =>
       json<Episode>(`/projects/${projectId}/episodes`, {
@@ -215,15 +215,15 @@ export const api = {
         body: input,
         headers: { 'Idempotency-Key': idempotencyKey },
       }),
-    propose: (projectId: string, hint?: string, signal?: AbortSignal) =>
+    propose: (projectId: string, hint?: string, signal?: AbortSignal, context?: { episodeId: string; expectedRevision?: number }) =>
       json<{ title: string; direction: string; conflicts: string[] }>(`/projects/${projectId}/episodes/propose`, {
         method: 'POST',
-        body: hint ? { hint } : {},
+        body: { ...(hint ? { hint } : {}), ...context },
         signal,
       }),
     refine: (
       projectId: string,
-      input: { title: string; direction: string; instruction: string },
+      input: { title: string; direction: string; instruction: string; episodeId?: string; expectedRevision?: number },
       signal?: AbortSignal,
     ) =>
       json<{ title: string; direction: string; conflicts: string[] }>(`/projects/${projectId}/episodes/refine`, {
@@ -233,13 +233,13 @@ export const api = {
       }),
     generate: (
       projectId: string,
-      input: { title: string; direction: string },
+      input: { title: string; direction: string; episodeId?: string; expectedRevision?: number },
       onEvent: (event: StreamEvent, content: string) => void,
       signal?: AbortSignal,
     ) => ndjson(`/projects/${projectId}/episodes/generate`, input, onEvent, signal),
     repair: (
       projectId: string,
-      input: { title: string; direction: string; content: string; issue: ContinuityIssue },
+      input: { title: string; direction: string; content: string; issue: ContinuityIssue; episodeId?: string; expectedRevision?: number },
       onEvent: (event: StreamEvent, content: string) => void,
       signal?: AbortSignal,
     ) => ndjson(`/projects/${projectId}/episodes/repair`, input, onEvent, signal),
@@ -251,6 +251,7 @@ export const api = {
         title?: string;
         direction?: string;
         content?: string;
+        incomplete?: boolean;
         forceNeedsReview?: boolean;
       },
     ) => json<Episode>(`/projects/${projectId}/episodes/${episodeId}`, { method: 'PATCH', body: input }),

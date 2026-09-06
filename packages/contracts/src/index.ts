@@ -172,7 +172,7 @@ export const episodeSchema = z.object({
   direction: z.string(),
   content: z.string(),
   revision: z.number().int().nonnegative(),
-  status: z.enum(['DRAFT', 'CONFIRMED', 'MEMORY_STALE', 'NEEDS_REVIEW']),
+  status: z.enum(['INCOMPLETE', 'DRAFT', 'CONFIRMED', 'MEMORY_STALE', 'NEEDS_REVIEW']),
   summary: episodeSummarySchema.nullable().optional(),
   createdAt: isoDateSchema,
   updatedAt: isoDateSchema,
@@ -289,10 +289,14 @@ export const updateEpisodeSchema = z
     title: z.string().min(1).optional(),
     direction: z.string().optional(),
     content: z.string().optional(),
+    incomplete: z.boolean().optional(),
     forceNeedsReview: z.boolean().optional(),
   })
-  .refine((value) => value.title !== undefined || value.direction !== undefined || value.content !== undefined, {
+  .refine((value) => value.title !== undefined || value.direction !== undefined || value.content !== undefined || value.incomplete !== undefined, {
     message: '수정할 필드가 필요합니다.',
+  })
+  .refine((value) => !value.incomplete || !value.content?.trim(), {
+    message: '본문이 있는 회차는 미완성으로 표시할 수 없습니다.',
   });
 export type UpdateEpisodeInput = z.infer<typeof updateEpisodeSchema>;
 

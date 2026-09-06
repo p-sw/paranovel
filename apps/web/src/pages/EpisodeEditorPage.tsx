@@ -28,7 +28,7 @@ import {
   Square,
   WandSparkles,
 } from 'lucide-react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { EditorAiEdit, EditorAiHistory, EditorAiInput } from '@paranovel/contracts';
 import { api, ApiError, isConflict, messageOf } from '../api/client';
 import { characterCount, createIdempotencyKey, cx } from '../lib';
@@ -72,15 +72,29 @@ export default function EpisodeEditorPage() {
 
 function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; episodeId: string }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const draftRef = useRef<Draft>(emptyDraft);
   const savedRef = useRef<Draft>(emptyDraft);
+  const savedStatusRef = useRef<Episode['status']>('DRAFT');
   const revisionRef = useRef(0);
   const saveInFlightRef = useRef<Promise<Episode | null> | null>(null);
   const dirtyWhileSavingRef = useRef(false);
   const initializedRef = useRef(false);
   const recoveryPendingRef = useRef(false);
+  const generationRequestedRef = useRef(Boolean(location.state?.generateEpisode));
+  const generationControllerRef = useRef<AbortController | null>(null);
+  const generationBusyRef = useRef(false);
+  const generationModeRef = useRef<'generate' | 'repair'>('generate');
+  const forceNeedsReviewRef = useRef(false);
+  const incompleteOnSaveRef = useRef(false);
+  const [generationPhase, setGenerationPhase] = useState<AiPhase>('idle');
+  const [generationBusy, setGenerationBusy] = useState(false);
+  const [generationIssues, setGenerationIssues] = useState<ContinuityIssue[]>([]);
+  const [generationBlocked, setGenerationBlocked] = useState(false);
+  const [generationError, setGenerationError] = useState('');
+  const [generationRepairIndex, setGenerationRepairIndex] = useState<number | null>(null);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [revision, setRevision] = useState(0);
   const [saveState, setSaveState] = useState<SaveState>('idle');
@@ -120,6 +134,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
     setDraft(initial);
     draftRef.current = initial;
     savedRef.current = initial;
+    savedStatusRef.current = episodeQuery.data.status;
     revisionRef.current = episodeQuery.data.revision;
     setRevision(episodeQuery.data.revision);
     const backup = readEpisodeDraftBackup(episodeId);
@@ -137,15 +152,18 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
     setDraft(next);
   };
 
-  const saveNow = useCallback(async (): Promise<Episode | null> => {
+  const saveNow = useCallback(async (allowDuringGeneration = false): Promise<Episode | null> => {
     if (!initializedRef.current) return null;
+    if (generationBusyRef.current && !allowDuringGeneration) return null;
     if (saveInFlightRef.current) {
       dirtyWhileSavingRef.current = true;
       await saveInFlightRef.current;
-      return saveNow();
+      return saveNow(allowDuringGeneration);
     }
     const snapshot = { ...draftRef.current };
     if (
+      !incompleteOnSaveRef.current &&
+      (!forceNeedsReviewRef.current || savedStatusRef.current === 'NEEDS_REVIEW') &&
       snapshot.title === savedRef.current.title &&
       snapshot.direction === savedRef.current.direction &&
       snapshot.content === savedRef.current.content
@@ -157,18 +175,25 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
     setSaveState('saving');
     setSaveError('');
     dirtyWhileSavingRef.current = false;
+    const forceNeedsReview = !incompleteOnSaveRef.current && forceNeedsReviewRef.current;
+    const saveIncomplete = incompleteOnSaveRef.current;
     const request = api.episodes.update(projectId, episodeId, {
       expectedRevision: revisionRef.current,
       title: snapshot.title,
       direction: snapshot.direction,
       content: snapshot.content,
+      forceNeedsReview: forceNeedsReview || undefined,
+      ...(saveIncomplete ? { incomplete: true } : {}),
     });
     saveInFlightRef.current = request;
     try {
       const updated = await request;
+      if (saveIncomplete) incompleteOnSaveRef.current = false;
+      if (forceNeedsReview) forceNeedsReviewRef.current = false;
       revisionRef.current = updated.revision;
       setRevision(updated.revision);
       savedRef.current = snapshot;
+      savedStatusRef.current = updated.status;
       setSaveState('saved');
       const current = draftRef.current;
       const hasNewerLocalChanges =
@@ -180,6 +205,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
           ...current,
           savedAt: new Date().toISOString(),
           baseRevision: updated.revision,
+          ...(forceNeedsReviewRef.current ? { forceNeedsReview: true } : {}),
         });
       } else {
         clearEpisodeDraftBackup(episodeId);
@@ -206,10 +232,22 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
   latestSaveNowRef.current = saveNow;
 
   useEffect(() => () => {
+    const controller = generationControllerRef.current;
+    generationControllerRef.current = null;
+    controller?.abort();
+    if (generationBusyRef.current && generationModeRef.current === 'generate') {
+      forceNeedsReviewRef.current = true;
+      if (!draftRef.current.content.trim()) {
+        forceNeedsReviewRef.current = false;
+        draftRef.current = { ...draftRef.current, content: '' };
+        incompleteOnSaveRef.current = true;
+      }
+    }
+    generationBusyRef.current = false;
     const current = draftRef.current;
     const saved = savedRef.current;
     const dirty = current.title !== saved.title || current.direction !== saved.direction || current.content !== saved.content;
-    if (initializedRef.current && dirty) {
+    if (initializedRef.current && (dirty || incompleteOnSaveRef.current)) {
       // Route changes unmount this keyed workspace. Let the already-scoped
       // request finish in the background; localStorage remains the fallback
       // if the network request cannot complete.
@@ -234,10 +272,133 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
       ...draft,
       savedAt: new Date().toISOString(),
       baseRevision: revisionRef.current,
+      ...(forceNeedsReviewRef.current || (generationBusyRef.current && generationModeRef.current === 'generate') ? { forceNeedsReview: true } : {}),
     });
+    // The generation request reviews this revision. Keep a local backup while
+    // streaming, and persist once writing and post-processing have finished.
+    if (generationBusyRef.current) return;
     const timeout = window.setTimeout(() => void saveNow().catch(() => undefined), 750);
     return () => window.clearTimeout(timeout);
   }, [draft, episodeId, recoveryBackup, saveNow]);
+
+  const runGeneration = useCallback(async (issue?: ContinuityIssue, issueIndex?: number) => {
+    if (!initializedRef.current || recoveryPendingRef.current || generationBusyRef.current) return;
+    if (!issue && draftRef.current.content.trim()) return;
+    const controller = new AbortController();
+    generationControllerRef.current = controller;
+    generationBusyRef.current = true;
+    setGenerationBusy(true);
+    generationModeRef.current = issue ? 'repair' : 'generate';
+    setGenerationError('');
+    setGenerationRepairIndex(issueIndex ?? null);
+    setGenerationPhase(issue ? 'repairing' : 'retrieving');
+    if (!issue) {
+      setGenerationIssues([]);
+      setGenerationBlocked(false);
+    }
+    const isCurrent = () => generationControllerRef.current === controller && !controller.signal.aborted;
+    const showContent = (content: string) => {
+      const updated = { ...draftRef.current, content };
+      draftRef.current = updated;
+      setDraft(updated);
+      writeEpisodeDraftBackup(episodeId, { ...updated, savedAt: new Date().toISOString(), baseRevision: revisionRef.current,
+        ...(!issue || forceNeedsReviewRef.current ? { forceNeedsReview: true } : {}),
+      });
+    };
+    let writingFinished = false;
+    let persistedResult = false;
+    try {
+      const saved = await latestSaveNowRef.current(true);
+      if (!isCurrent()) return;
+      if (!saved) throw new Error('원고 저장이 끝난 뒤 다시 시도해 주세요.');
+      const input = { title: saved.title, direction: saved.direction, episodeId, expectedRevision: saved.revision };
+      const onEvent: Parameters<typeof api.episodes.generate>[2] = (event, accumulated) => {
+        if (!isCurrent()) return;
+        if (event.type === 'reset' || (event.type === 'stage' && ['CHECKING', 'REPAIRING'].includes(event.stage))) writingFinished = true;
+        if (event.type === 'stage') {
+          setGenerationPhase(event.stage === 'MEMORY' ? 'retrieving' : event.stage === 'WRITING' ? 'writing' : event.stage === 'REPAIRING' ? 'repairing' : 'checking');
+        }
+        // Explicit repairs replace the body only after review. Post-processing
+        // must never clear or rewrite the first streamed manuscript.
+        if (!issue && event.type === 'delta' && !writingFinished) {
+          setGenerationPhase('writing');
+          showContent(accumulated);
+        }
+      };
+      const result = issue
+        ? await api.episodes.repair(projectId, { ...input, content: saved.content, issue }, onEvent, controller.signal)
+        : await api.episodes.generate(projectId, input, onEvent, controller.signal);
+      if (!isCurrent()) return;
+      if (result.baseRevision !== undefined && result.baseRevision !== saved.revision) throw new Error('원고가 변경되었습니다. 최신 원고를 확인해 주세요.');
+      if (!result.content.trim()) throw new Error('AI가 빈 원고를 반환했습니다. 다시 시도해 주세요.');
+      showContent(result.content);
+      setGenerationIssues(result.issues);
+      setGenerationBlocked(result.blocked);
+      forceNeedsReviewRef.current = result.blocked;
+      // Finish the reviewed result before releasing the editor for other work.
+      persistedResult = true;
+      await latestSaveNowRef.current(true);
+      if (!isCurrent()) return;
+      setGenerationPhase('done');
+    } catch (reason) {
+      if (!isCurrent()) return;
+      setGenerationError(messageOf(reason));
+      setGenerationPhase(issue && !persistedResult ? 'done' : 'error');
+      if (!issue && !persistedResult) {
+        forceNeedsReviewRef.current = true;
+        if (!draftRef.current.content.trim()) {
+          forceNeedsReviewRef.current = false;
+          showContent('');
+          incompleteOnSaveRef.current = true;
+        }
+        await latestSaveNowRef.current(true).catch(() => undefined);
+      }
+    } finally {
+      if (generationControllerRef.current === controller) {
+        generationControllerRef.current = null;
+        generationBusyRef.current = false;
+        setGenerationBusy(false);
+        setGenerationRepairIndex(null);
+      }
+    }
+  }, [episodeId, projectId]);
+
+  useEffect(() => {
+    if (!generationRequestedRef.current || !initializedRef.current || recoveryPendingRef.current) return;
+    // Deferring one tick lets StrictMode clean up its first effect pass before
+    // consuming the navigation request or opening an AI stream.
+    const timeout = window.setTimeout(() => {
+      generationRequestedRef.current = false;
+      const { generateEpisode: _request, ...remainingState } = location.state ?? {};
+      navigate(`${location.pathname}${location.search}${location.hash}`, { replace: true, state: remainingState });
+      if (!draftRef.current.content.trim()) void runGeneration();
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [draft, location, navigate, recoveryBackup, runGeneration]);
+
+  const cancelGeneration = () => {
+    const controller = generationControllerRef.current;
+    if (!controller) return;
+    generationControllerRef.current = null;
+    controller.abort();
+    generationBusyRef.current = false;
+    setGenerationBusy(false);
+    setGenerationRepairIndex(null);
+    if (generationModeRef.current === 'repair') {
+      setGenerationPhase('done');
+      setGenerationError('수정을 중단했습니다.');
+    } else {
+      forceNeedsReviewRef.current = true;
+      if (!draftRef.current.content.trim()) {
+        forceNeedsReviewRef.current = false;
+        draftRef.current = { ...draftRef.current, content: '' };
+        setDraft(draftRef.current);
+        incompleteOnSaveRef.current = true;
+      }
+      setGenerationPhase('cancelled');
+      void latestSaveNowRef.current().catch(() => undefined);
+    }
+  };
 
   const rememberEditorSelection = useCallback((snapshot: SelectionSnapshot | null) => {
     editorAiSelectionRef.current = snapshot;
@@ -286,8 +447,11 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
   if (!initializedRef.current) return <Spinner label="최신 원고와 로컬 백업을 확인하는 중" />;
 
   const selected = Boolean(selection && selection.end > selection.start && selection.text);
-  const isBusy = continuationOpen;
+  const isBusy = continuationOpen || generationBusy;
   const editorLocked = isBusy || editorApplying || Boolean(recoveryBackup);
+  const episodeDestination = (item: Episode) => item.status === 'INCOMPLETE'
+    ? `/projects/${projectId}/episodes?resume=${encodeURIComponent(item.id)}`
+    : `/projects/${projectId}/episodes/${item.id}`;
 
   const prepareEditorRequest = async (content: string, clientMessageId: string): Promise<EditorAiInput> => {
     const target = editorAiSelectionRef.current;
@@ -349,6 +513,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
       content: recoveryBackup.content,
     };
     draftRef.current = recovered;
+    forceNeedsReviewRef.current = recoveryBackup.forceNeedsReview === true;
     setDraft(recovered);
     clearEditorSelection();
     recoveryPendingRef.current = false;
@@ -371,16 +536,17 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
           {episodes.map((item) => (
             <Link
               key={item.id}
-              to={`/projects/${projectId}/episodes/${item.id}`}
+              to={episodeDestination(item)}
               className={cx('episode-rail-item', item.id === episodeId && 'active')}
               onClick={(event) => {
                 if (item.id === episodeId || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
                 event.preventDefault();
-                void saveNow().then(() => navigate(`/projects/${projectId}/episodes/${item.id}`)).catch(() => undefined);
+                void saveNow().then(() => navigate(episodeDestination(item))).catch(() => undefined);
               }}
             >
               <span>{item.number}</span>
               <span className="truncate">{item.title || '제목 없음'}</span>
+              {item.status === 'INCOMPLETE' ? <Badge tone="warning">미완성</Badge> : null}
             </Link>
           ))}
         </nav>
@@ -389,16 +555,16 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
       <section className="editor-center">
         <header className="editor-toolbar">
           <div className="flex items-center gap-1">
-            <IconButton label="이전 회차" disabled={!previous} onClick={() => previous && void saveNow().then(() => navigate(`/projects/${projectId}/episodes/${previous.id}`)).catch(() => undefined)}>
+            <IconButton label="이전 회차" disabled={!previous} onClick={() => previous && void saveNow().then(() => navigate(episodeDestination(previous))).catch(() => undefined)}>
               <ChevronLeft className="size-5" />
             </IconButton>
             <span className="whitespace-nowrap text-xs font-semibold text-muted">{episode.number}화</span>
-            <IconButton label="다음 회차" disabled={!next} onClick={() => next && void saveNow().then(() => navigate(`/projects/${projectId}/episodes/${next.id}`)).catch(() => undefined)}>
+            <IconButton label="다음 회차" disabled={!next} onClick={() => next && void saveNow().then(() => navigate(episodeDestination(next))).catch(() => undefined)}>
               <ChevronRight className="size-5" />
             </IconButton>
           </div>
           <SaveIndicator state={saveState} error={saveError} onRetry={() => void saveNow()} />
-          <Button size="sm" variant={editorAiOpen ? 'primary' : 'secondary'} aria-expanded={editorAiOpen}
+          <Button size="sm" disabled={generationBusy} variant={editorAiOpen ? 'primary' : 'secondary'} aria-expanded={editorAiOpen}
             onClick={() => setEditorAiOpen((open) => !open)}><PencilLine className="size-4" />편집 AI</Button>
           <IconButton label="장면과 기억 보기" className="editor-context-toggle" onClick={() => setContextOpen(true)}>
             <PanelRightOpen className="size-5" />
@@ -420,6 +586,20 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
         ) : null}
 
         <div className="editor-paper">
+          {generationPhase !== 'idle' ? (
+            <section className="mb-5 max-h-[35vh] shrink-0 space-y-3 overflow-y-auto px-4 py-3" aria-label="AI 회차 작성">
+              <div className="flex items-center justify-between gap-3">
+                <DraftGenerationStatus phase={generationPhase} />
+                {generationBusy ? <Button size="sm" variant="secondary" onClick={cancelGeneration}><Square className="size-3.5" />{generationRepairIndex !== null ? '수정 중단' : '생성 중단'}</Button>
+                  : !draft.content.trim() ? <Button size="sm" variant="secondary" onClick={() => void runGeneration()}><Sparkles className="size-4" />다시 생성</Button> : null}
+              </div>
+              <ContinuityIssues issues={generationIssues} blocked={generationBlocked}
+                heading={generationBlocked ? '정합성 차단 이슈가 있어요' : '집필 중 확인할 점'}
+                onRepair={(issue, index) => void runGeneration(issue, index)}
+                repairingIndex={generationRepairIndex} disabled={editorLocked || replacementOpen} />
+              <FieldError>{generationError}</FieldError>
+            </section>
+          ) : null}
           <input
             className="editor-title-input"
             aria-label="회차 제목"
@@ -435,7 +615,8 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
             value={draft.content}
             placeholder="첫 문장을 써 보세요. 이곳은 서식 없는 원고 편집기입니다."
             spellCheck
-            disabled={editorLocked}
+            disabled={editorLocked && !generationBusy}
+            readOnly={generationBusy}
             onChange={(event: ChangeEvent<HTMLTextAreaElement>) => updateDraft({ content: event.target.value })}
             onSelect={captureSelection}
             onPointerUp={captureSelection}
@@ -492,7 +673,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
         prepareRequest={prepareEditorRequest} onApply={applyEditorEdit} />
 
       <aside className="editor-context-panel">
-        <fieldset disabled={editorApplying} className="min-w-0">
+        <fieldset disabled={editorLocked} className="min-w-0">
         <ContextPanel projectId={projectId} episode={{ ...episode, ...draft, revision }} onDirectionChange={(direction) => updateDraft({ direction })} onFinalize={async () => {
           await saveNow();
           const finalized = await api.episodes.finalize(projectId, episodeId, revisionRef.current);
@@ -507,7 +688,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
       </aside>
 
       <Sheet open={contextOpen} onOpenChange={setContextOpen} title="장면과 기억" wide>
-        <fieldset disabled={editorApplying} className="min-w-0">
+        <fieldset disabled={editorLocked} className="min-w-0">
         <ContextPanel projectId={projectId} episode={{ ...episode, ...draft, revision }} onDirectionChange={(direction) => updateDraft({ direction })} onFinalize={async () => {
           await saveNow();
           const finalized = await api.episodes.finalize(projectId, episodeId, revisionRef.current);

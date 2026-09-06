@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Outlet, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
+import type { EpisodeOrder } from '@paranovel/contracts';
 import { api } from '../api/client';
-import type { ContinuityIssue, StreamResult } from '../types';
+import type { Episode } from '../types';
 import EpisodesPage from './EpisodesPage';
 
 const proposal = {
@@ -13,25 +14,39 @@ const proposal = {
   conflicts: [],
 };
 
-const warningA: ContinuityIssue = {
-  category: 'TIMELINE', severity: 'WARNING', excerpt: '해가 뜬 왕궁',
-  explanation: '한밤중에 왕궁으로 향했는데 도착하자 아침입니다.',
-  evidenceRefs: [], repairInstruction: '왕궁에 도착한 시각을 한밤중으로 맞추세요.',
+const incompleteEpisode: Episode = {
+  id: 'episode-1', projectId: 'story', number: 1,
+  title: proposal.title, direction: proposal.direction, content: '', revision: 1,
+  status: 'INCOMPLETE', summary: null,
+  createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-09-01T00:00:00Z',
 };
-const warningB: ContinuityIssue = {
-  category: 'CHARACTER', severity: 'WARNING', excerpt: '동료의 왼손',
-  explanation: '다친 오른손이 왼손으로 바뀌었습니다.',
-  evidenceRefs: ['episode:previous'], repairInstruction: '다친 손을 오른손으로 통일하세요.',
-};
+let persistedEpisodes: Episode[];
+const createdByKey = new Map<string, Episode>();
+let navigateRouter: ReturnType<typeof useNavigate>;
 
-function renderPage() {
+function NavigationProbe() {
+  navigateRouter = useNavigate();
+  return null;
+}
+
+function EditorRoute() {
+  const { episodeId } = useParams();
+  const location = useLocation();
+  return <div data-testid="editor-route">{JSON.stringify({ episodeId, state: location.state })}</div>;
+}
+
+function renderPage(initialEntry = '/projects/story/episodes', cachedOrder?: EpisodeOrder) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  if (cachedOrder) queryClient.setQueryData(['episode-order', 'story'], cachedOrder);
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={['/projects/story/episodes']}>
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <NavigationProbe />
         <Routes>
+          <Route path="/elsewhere" element={<div data-testid="elsewhere-route">다른 페이지</div>} />
           <Route path="/projects/:projectId" element={<Outlet context={{ project: { genreTags: ['판타지'], logline: '기록관의 모험' } }} />}>
             <Route path="episodes" element={<EpisodesPage />} />
+            <Route path="episodes/:episodeId" element={<EditorRoute />} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -40,7 +55,35 @@ function renderPage() {
 }
 
 beforeEach(() => {
-  vi.spyOn(api.episodes, 'order').mockResolvedValue({ episodes: [], slots: [], revision: 'initial' });
+  persistedEpisodes = [];
+  createdByKey.clear();
+  vi.spyOn(api.episodes, 'order').mockImplementation(async () => ({
+    episodes: [...persistedEpisodes], slots: persistedEpisodes.map((episode) => episode.id),
+    revision: persistedEpisodes.map((episode) => `${episode.id}:${episode.revision}`).join(',') || 'initial',
+  }));
+  vi.spyOn(api.episodes, 'create').mockImplementation(async (_projectId, input, key) => {
+    const existing = createdByKey.get(key);
+    if (existing) return existing;
+    const episode: Episode = {
+      ...incompleteEpisode, id: `episode-${persistedEpisodes.length + 1}`, number: persistedEpisodes.length + 1,
+      title: input.title, direction: input.direction, content: input.content ?? '',
+      status: input.incomplete ? 'INCOMPLETE' : 'DRAFT',
+    };
+    persistedEpisodes.push(episode);
+    createdByKey.set(key, episode);
+    return episode;
+  });
+  vi.spyOn(api.episodes, 'update').mockImplementation(async (_projectId, episodeId, input) => {
+    const current = persistedEpisodes.find((episode) => episode.id === episodeId);
+    if (!current || current.revision !== input.expectedRevision) throw new Error('회차가 변경됐어요.');
+    const episode: Episode = {
+      ...current, title: input.title ?? current.title, direction: input.direction ?? current.direction,
+      content: input.content ?? current.content, revision: current.revision + 1,
+      status: input.incomplete === true ? 'INCOMPLETE' : input.incomplete === false ? 'DRAFT' : current.status,
+    };
+    persistedEpisodes = persistedEpisodes.map((item) => item.id === episodeId ? episode : item);
+    return episode;
+  });
   vi.spyOn(api.episodes, 'propose').mockResolvedValue(proposal);
 });
 
@@ -50,11 +93,12 @@ async function openCreator() {
   const user = userEvent.setup();
   renderPage();
   await user.click(screen.getByRole('button', { name: '새 회차' }));
+  await screen.findByRole('dialog', { name: '새 회차 만들기' });
   return user;
 }
 
 describe('new episode flow', () => {
-  it('repeatedly refines the latest edited title and direction, refreshes conflicts, and drafts from the final plan', async () => {
+  it('repeatedly refines and persists the same episode with revision context before starting AI writing', async () => {
     vi.mocked(api.episodes.propose).mockResolvedValueOnce({ ...proposal, conflicts: ['처음 제안에서 확인할 충돌'] });
     const firstRefinement = {
       title: '문틈의 흔적', direction: '기록관이 동료가 남긴 표식을 살피며 왕궁에 잠입한다.', conflicts: ['개선 후 확인할 충돌'],
@@ -66,7 +110,7 @@ describe('new episode flow', () => {
       .mockResolvedValueOnce(firstRefinement)
       .mockResolvedValueOnce(finalRefinement);
     const generate = vi.spyOn(api.episodes, 'generate').mockResolvedValue({ content: '표식을 따라간 최종 초안.', issues: [], blocked: false });
-    const create = vi.spyOn(api.episodes, 'create').mockResolvedValue({} as never);
+    const create = vi.mocked(api.episodes.create);
     const user = await openCreator();
     await user.click(screen.getByRole('button', { name: '다음' }));
 
@@ -81,6 +125,7 @@ describe('new episode flow', () => {
     await user.click(screen.getByRole('button', { name: '개선' }));
 
     expect(refine).toHaveBeenNthCalledWith(1, 'story', {
+      episodeId: 'episode-1', expectedRevision: 1,
       title: '  직접 다듬은 제목  ', direction: '  동료의 표식을 발견하고 왕궁에 잠입한다.\n', instruction: '잠입 장면만 더 긴장감 있게 해 줘',
     }, expect.any(AbortSignal));
     expect(title).toHaveValue(firstRefinement.title);
@@ -96,6 +141,7 @@ describe('new episode flow', () => {
     await user.click(screen.getByRole('button', { name: '개선' }));
 
     expect(refine).toHaveBeenNthCalledWith(2, 'story', {
+      episodeId: 'episode-1', expectedRevision: 2,
       title: '표식의 비밀', direction: `${firstRefinement.direction} 경비대와는 마주치지 않는다.`, instruction: '표식의 의미를 암시하도록 제목만 다듬어 줘',
     }, expect.any(AbortSignal));
     expect(title).toHaveValue(finalRefinement.title);
@@ -104,15 +150,15 @@ describe('new episode flow', () => {
     expect(screen.queryByText('개선 후 확인할 충돌')).not.toBeInTheDocument();
     expect(api.episodes.propose).toHaveBeenCalledTimes(1);
 
-    await user.click(screen.getByRole('button', { name: 'AI 초안 만들기' }));
-    expect(await screen.findByLabelText('AI 초안 수정')).toHaveValue('표식을 따라간 최종 초안.');
-    expect(generate).toHaveBeenCalledWith('story', {
-      title: finalRefinement.title, direction: finalRefinement.direction,
-    }, expect.any(Function), expect.any(AbortSignal));
-    await user.click(screen.getByRole('button', { name: '초안 저장' }));
-    expect(create).toHaveBeenCalledWith('story', {
-      title: finalRefinement.title, direction: finalRefinement.direction, content: '표식을 따라간 최종 초안.', forceNeedsReview: false,
-    }, expect.any(String));
+    await user.click(screen.getByRole('button', { name: 'AI 회차 작성' }));
+    expect(await screen.findByTestId('editor-route')).toHaveTextContent(JSON.stringify({ episodeId: 'episode-1', state: { generateEpisode: true } }));
+    expect(generate).not.toHaveBeenCalled();
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(api.episodes.update).toHaveBeenLastCalledWith('story', 'episode-1', {
+      expectedRevision: 2, title: finalRefinement.title, direction: finalRefinement.direction, incomplete: true,
+    });
+    expect(persistedEpisodes).toHaveLength(1);
+    expect(persistedEpisodes[0]).toMatchObject({ title: finalRefinement.title, direction: finalRefinement.direction, status: 'INCOMPLETE' });
   });
 
   it('requires a nonblank improvement request, title, and direction before refining', async () => {
@@ -199,6 +245,7 @@ describe('new episode flow', () => {
     await user.click(screen.getByRole('button', { name: '개선' }));
     expect(refine).toHaveBeenCalledTimes(2);
     expect(refine).toHaveBeenLastCalledWith('story', {
+      episodeId: 'episode-1', expectedRevision: 1,
       title: `${proposal.title} 수정`, direction: `${proposal.direction} 동료는 무사하다.`, instruction: '동료의 흔적을 더 구체적으로 묘사해 줘',
     }, expect.any(AbortSignal));
     expect(title).toHaveValue('다듬은 제목');
@@ -218,7 +265,7 @@ describe('new episode flow', () => {
       fail = reject;
     }));
     const generate = vi.spyOn(api.episodes, 'generate');
-    const create = vi.spyOn(api.episodes, 'create');
+    const create = vi.mocked(api.episodes.create);
     const user = await openCreator();
     await user.click(screen.getByRole('button', { name: '다음' }));
     await user.type(await screen.findByLabelText('개선 요청'), '추격 장면만 짧게 해 줘');
@@ -230,15 +277,16 @@ describe('new episode flow', () => {
     expect(screen.getByLabelText('개선 요청')).toBeDisabled();
     expect(screen.getByRole('button', { name: '이전' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '빈 회차로 시작' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'AI 초안 만들기' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'AI 회차 작성' })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: '개선 중' }));
     expect(refine).toHaveBeenCalledTimes(1);
     expect(generate).not.toHaveBeenCalled();
-    expect(create).not.toHaveBeenCalled();
+    expect(create).toHaveBeenCalledTimes(1);
 
     const signal = refine.mock.calls[0][2];
     await user.click(screen.getByRole('button', { name: '닫기' }));
     expect(signal?.aborted).toBe(true);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     await user.click(screen.getByRole('button', { name: '새 회차' }));
     await user.click(screen.getByRole('button', { name: '다음' }));
     expect(await screen.findByLabelText('회차 제목')).toHaveValue(newProposal.title);
@@ -254,200 +302,12 @@ describe('new episode flow', () => {
     expect(screen.getByText('새로운 설정 충돌')).toBeVisible();
     expect(screen.queryByText('이전 개선 요청의 늦은 오류')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '개선' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'AI 초안 만들기' })).toBeEnabled();
-  });
-
-  it('repairs individual warnings using the edited draft, refreshes the issues, and saves the final text', async () => {
-    vi.spyOn(api.episodes, 'generate').mockResolvedValue({ content: '수정 전 원고.', issues: [warningA, warningB], blocked: false });
-    let finish!: (result: StreamResult) => void;
-    const repair = vi.spyOn(api.episodes, 'repair').mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
-    const create = vi.spyOn(api.episodes, 'create').mockResolvedValue({} as never);
-    const user = await openCreator();
-    await user.click(screen.getByRole('button', { name: '다음' }));
-    await user.click(await screen.findByRole('button', { name: 'AI 초안 만들기' }));
-
-    const textarea = screen.getByLabelText('AI 초안 수정') as HTMLTextAreaElement;
-    const issueButtons = screen.getAllByRole('button', { name: /^자동 수정:/ });
-    expect(issueButtons).toHaveLength(2);
-    issueButtons.forEach((button) => expect(button).toHaveTextContent('자동 수정'));
-    await user.clear(textarea);
-    await user.type(textarea, '사용자가 다듬은 원고.');
-    await user.click(screen.getByRole('button', { name: `자동 수정: ${warningB.explanation}` }));
-
-    expect(repair).toHaveBeenCalledWith('story', {
-      title: proposal.title, direction: proposal.direction, content: '사용자가 다듬은 원고.', issue: warningB,
-    }, expect.any(Function), expect.any(AbortSignal));
-    expect(textarea).toHaveValue('사용자가 다듬은 원고.');
-    expect(textarea.readOnly).toBe(true);
-    expect(screen.getByText(warningA.explanation)).toBeVisible();
-    expect(screen.getByText(warningB.explanation)).toBeVisible();
-    expect(screen.getByRole('button', { name: `자동 수정: ${warningA.explanation}` })).toBeDisabled();
-    expect(screen.queryByRole('button', { name: '초안 저장' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '다시 생성' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '수정 중단' })).toBeEnabled();
-
-    const refreshedIssue: ContinuityIssue = { ...warningA, excerpt: '밝아진 왕궁', explanation: '왕궁 안의 밝기를 한밤중에 맞춰 주세요.' };
-    await act(async () => finish({ content: '오른손으로 바로잡은 원고.', issues: [refreshedIssue], blocked: false }));
-    expect(textarea).toHaveValue('오른손으로 바로잡은 원고.');
-    expect(textarea.readOnly).toBe(false);
-    expect(screen.queryByText(warningA.explanation)).not.toBeInTheDocument();
-    expect(screen.queryByText(warningB.explanation)).not.toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: /^자동 수정:/ })).toHaveLength(1);
-
-    await user.type(textarea, ' 다음 장면도 직접 고쳤다.');
-    repair.mockResolvedValueOnce({ content: '두 주의를 고친 최종 원고.', issues: [], blocked: false });
-    await user.click(screen.getByRole('button', { name: `자동 수정: ${refreshedIssue.explanation}` }));
-    expect(repair).toHaveBeenLastCalledWith('story', {
-      title: proposal.title, direction: proposal.direction,
-      content: '오른손으로 바로잡은 원고. 다음 장면도 직접 고쳤다.', issue: refreshedIssue,
-    }, expect.any(Function), expect.any(AbortSignal));
-    expect(textarea).toHaveValue('두 주의를 고친 최종 원고.');
-    expect(screen.queryByRole('button', { name: /^자동 수정:/ })).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '초안 저장' }));
-    expect(create).toHaveBeenCalledWith('story', {
-      title: proposal.title, direction: proposal.direction, content: '두 주의를 고친 최종 원고.', forceNeedsReview: false,
-    }, expect.any(String));
-  });
-
-  it.each(['error', 'cancel'] as const)('preserves the reviewed draft and warnings after a selective repair %s and allows retry', async (failure) => {
-    vi.spyOn(api.episodes, 'generate').mockResolvedValue({ content: '보존할 검토 완료 원고.', issues: [warningA, warningB], blocked: false });
-    const repair = vi.spyOn(api.episodes, 'repair');
-    let stream!: ReadableStreamDefaultController<Uint8Array>;
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
-      start(controller) { stream = controller; },
-    }))));
-    const user = await openCreator();
-    await user.click(screen.getByRole('button', { name: '다음' }));
-    await user.click(await screen.findByRole('button', { name: 'AI 초안 만들기' }));
-    await user.click(screen.getByRole('button', { name: `자동 수정: ${warningB.explanation}` }));
-    const signal = repair.mock.calls[0][3];
-    const send = async (event: unknown) => act(async () => {
-      stream.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
-    });
-    await send({ type: 'stage', stage: 'REPAIRING' });
-    await send({ type: 'reset' });
-    await send({ type: 'delta', text: '아직 완성되지 않은 수정' });
-    expect(screen.getByLabelText('AI 초안 수정')).toHaveValue('보존할 검토 완료 원고.');
-    if (failure === 'error') {
-      await send({ type: 'error', code: 'FAILED', message: '선택한 문제를 수정하지 못했습니다.' });
-      expect(await screen.findByText('선택한 문제를 수정하지 못했습니다.')).toBeVisible();
-    } else {
-      await user.click(screen.getByRole('button', { name: '수정 중단' }));
-      expect(signal?.aborted).toBe(true);
-    }
-
-    expect(await screen.findByRole('button', { name: '초안 저장' })).toBeEnabled();
-    expect(screen.getByLabelText('AI 초안 수정')).toHaveValue('보존할 검토 완료 원고.');
-    expect((screen.getByLabelText('AI 초안 수정') as HTMLTextAreaElement).readOnly).toBe(false);
-    expect(screen.getByText(warningA.explanation)).toBeVisible();
-    expect(screen.getByText(warningB.explanation)).toBeVisible();
-    expect(screen.getByRole('button', { name: `자동 수정: ${warningA.explanation}` })).toBeEnabled();
-    repair.mockResolvedValueOnce({ content: '재시도에서 수정된 원고.', issues: [warningA], blocked: false });
-    await user.click(screen.getByRole('button', { name: `자동 수정: ${warningB.explanation}` }));
-    expect(repair).toHaveBeenCalledTimes(2);
-    expect(screen.getByLabelText('AI 초안 수정')).toHaveValue('재시도에서 수정된 원고.');
-    expect(screen.queryByText(warningB.explanation)).not.toBeInTheDocument();
-  });
-
-  it('aborts a selective repair when closed and ignores its late result after creating another draft', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    vi.spyOn(api.episodes, 'generate')
-      .mockResolvedValueOnce({ content: '첫 번째 초안.', issues: [warningA], blocked: false })
-      .mockResolvedValueOnce({ content: '새로 연 초안.', issues: [warningB], blocked: false });
-    let finish!: (result: StreamResult) => void;
-    const repair = vi.spyOn(api.episodes, 'repair').mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
-    const user = await openCreator();
-    await user.click(screen.getByRole('button', { name: '다음' }));
-    await user.click(await screen.findByRole('button', { name: 'AI 초안 만들기' }));
-    await user.click(screen.getByRole('button', { name: `자동 수정: ${warningA.explanation}` }));
-    const signal = repair.mock.calls[0][3];
-    await user.click(screen.getByRole('button', { name: '닫기' }));
-    expect(signal?.aborted).toBe(true);
-    await user.click(screen.getByRole('button', { name: '새 회차' }));
-    await user.click(screen.getByRole('button', { name: '다음' }));
-    await user.click(await screen.findByRole('button', { name: 'AI 초안 만들기' }));
-    await act(async () => {
-      repair.mock.calls[0][2]({ type: 'done', content: '늦게 도착한 이전 수정.', issues: [], blocked: false }, '늦게 도착한 이전 수정.');
-      finish({ content: '늦게 도착한 이전 수정.', issues: [], blocked: false });
-    });
-
-    expect(screen.getByLabelText('AI 초안 수정')).toHaveValue('새로 연 초안.');
-    expect(screen.getByRole('button', { name: `자동 수정: ${warningB.explanation}` })).toBeEnabled();
-    expect(screen.getByRole('button', { name: '초안 저장' })).toBeEnabled();
-  });
-
-  it('keeps the same readable textarea and scroll position through writing, checking and completion', async () => {
-    let stream!: ReadableStreamDefaultController<Uint8Array>;
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
-      start(controller) { stream = controller; },
-    }))));
-    const user = await openCreator();
-    await user.click(screen.getByRole('button', { name: '다음' }));
-    await user.click(await screen.findByRole('button', { name: 'AI 초안 만들기' }));
-    const textarea = screen.getByLabelText('AI 초안 수정') as HTMLTextAreaElement;
-    const draft = '문을 열자 빛이 쏟아졌다.\n\n'.repeat(500);
-    const send = async (event: unknown) => act(async () => {
-      stream.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
-    });
-    await send({ type: 'stage', stage: 'WRITING' });
-    await send({ type: 'delta', text: draft });
-    textarea.scrollTop = 640;
-    textarea.dispatchEvent(new Event('scroll'));
-    await send({ type: 'stage', stage: 'CHECKING' });
-
-    expect(screen.getByLabelText('AI 초안 수정')).toBe(textarea);
-    expect(textarea).toHaveValue(draft);
-    expect(textarea.readOnly).toBe(true);
-    expect(textarea).toBeEnabled();
-    expect(textarea.scrollTop).toBe(640);
-    const status = screen.getByText('일관성을 확인하는 중');
-    expect(status.closest('.sheet-body')).toBeNull();
-    expect(status).toBeVisible();
-
-    const repaired = draft.replaceAll('빛이', '비가');
-    await send({ type: 'done', content: repaired, issues: [], blocked: false });
-    expect(screen.getByLabelText('AI 초안 수정')).toBe(textarea);
-    expect(textarea).toHaveValue(repaired);
-    expect(textarea.readOnly).toBe(false);
-    expect(textarea.scrollTop).toBe(640);
-    expect(screen.getByRole('button', { name: '초안 저장' })).toBeEnabled();
-  });
-
-  it.each(['error', 'empty', 'eof', 'cancel'] as const)('preserves the draft when repair ends with %s', async (failure) => {
-    let stream!: ReadableStreamDefaultController<Uint8Array>;
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
-      start(controller) { stream = controller; },
-    }))));
-    const create = vi.spyOn(api.episodes, 'create').mockResolvedValue({} as never);
-    const user = await openCreator();
-    await user.click(screen.getByRole('button', { name: '다음' }));
-    await user.click(await screen.findByRole('button', { name: 'AI 초안 만들기' }));
-    const send = async (event: unknown) => act(async () => {
-      stream.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
-    });
-    await send({ type: 'delta', text: '보존해야 할 원고.' });
-    await send({ type: 'stage', stage: 'CHECKING' });
-    await send({ type: 'stage', stage: 'REPAIRING' });
-    await send({ type: 'reset' });
-    await send({ type: 'delta', text: '아직 완성되지 않은 보정' });
-    expect(screen.getByText('충돌을 바로잡는 중')).toBeVisible();
-    expect(screen.getByLabelText('AI 초안 수정')).toHaveValue('보존해야 할 원고.');
-
-    if (failure === 'error') await send({ type: 'error', code: 'FAILED', message: '보정 오류' });
-    if (failure === 'empty') await send({ type: 'done', content: ' ', issues: [], blocked: false });
-    if (failure === 'eof') await act(async () => stream.close());
-    if (failure === 'cancel') await user.click(screen.getByRole('button', { name: '생성 중단' }));
-
-    expect(await screen.findByRole('button', { name: '검토 필요로 저장' })).toBeEnabled();
-    expect(screen.getByLabelText('AI 초안 수정')).toHaveValue('보존해야 할 원고.');
-    expect((screen.getByLabelText('AI 초안 수정') as HTMLTextAreaElement).readOnly).toBe(false);
-    await user.click(screen.getByRole('button', { name: '검토 필요로 저장' }));
-    expect(create).toHaveBeenCalledWith('story', expect.objectContaining({ content: '보존해야 할 원고.', forceNeedsReview: true }), expect.any(String));
+    expect(screen.getByRole('button', { name: 'AI 회차 작성' })).toBeEnabled();
   });
 
   it('starts with one optional request and generates the title and direction on next, even when empty', async () => {
     const generate = vi.spyOn(api.episodes, 'generate').mockResolvedValue({ content: '완성된 첫 문장.', issues: [], blocked: false });
-    const create = vi.spyOn(api.episodes, 'create').mockResolvedValue({} as never);
+    const create = vi.mocked(api.episodes.create);
     const user = await openCreator();
     const dialog = within(screen.getByRole('dialog'));
 
@@ -460,36 +320,41 @@ describe('new episode flow', () => {
 
     await user.click(dialog.getByRole('button', { name: '다음' }));
 
-    expect(api.episodes.propose).toHaveBeenCalledWith('story', undefined, expect.any(AbortSignal));
+    expect(vi.mocked(api.episodes.propose).mock.calls[0].slice(0, 3)).toEqual(['story', undefined, expect.any(AbortSignal)]);
     expect(await dialog.findByLabelText('회차 제목')).toHaveValue(proposal.title);
     expect(dialog.getByLabelText('전개 방향')).toHaveValue(proposal.direction);
     expect(dialog.queryByLabelText(/이번 회차에 원하는 것/)).not.toBeInTheDocument();
     expect(generate).not.toHaveBeenCalled();
-    expect(create).not.toHaveBeenCalled();
-
-    await user.click(dialog.getByRole('button', { name: 'AI 초안 만들기' }));
-    expect(await dialog.findByLabelText('AI 초안 수정')).toHaveValue('완성된 첫 문장.');
-    expect(generate).toHaveBeenCalledWith('story', { title: proposal.title, direction: proposal.direction }, expect.any(Function), expect.any(AbortSignal));
-    await user.click(dialog.getByRole('button', { name: '초안 저장' }));
     expect(create).toHaveBeenCalledWith('story', {
-      title: proposal.title, direction: proposal.direction, content: '완성된 첫 문장.', forceNeedsReview: false,
+      title: proposal.title, direction: proposal.direction, content: '', incomplete: true,
     }, expect.any(String));
+    expect(persistedEpisodes).toHaveLength(1);
+    expect(persistedEpisodes[0].status).toBe('INCOMPLETE');
+
+    await user.click(dialog.getByRole('button', { name: 'AI 회차 작성' }));
+    expect(await screen.findByTestId('editor-route')).toHaveTextContent(JSON.stringify({ episodeId: 'episode-1', state: { generateEpisode: true } }));
+    expect(generate).not.toHaveBeenCalled();
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(api.episodes.update).not.toHaveBeenCalled();
+    expect(persistedEpisodes[0].status).toBe('INCOMPLETE');
   });
 
   it('sends only the user request and lets the generated plan be edited before starting an empty episode', async () => {
-    const create = vi.spyOn(api.episodes, 'create').mockResolvedValue({} as never);
+    const create = vi.mocked(api.episodes.create);
     const user = await openCreator();
     await user.type(screen.getByLabelText(/이번 회차에 원하는 것/), '  능력을 들키는 장면\n동료의 반응도 보여 줘  ');
     await user.click(screen.getByRole('button', { name: '다음' }));
 
-    expect(api.episodes.propose).toHaveBeenCalledWith('story', '능력을 들키는 장면\n동료의 반응도 보여 줘', expect.any(AbortSignal));
+    expect(vi.mocked(api.episodes.propose).mock.calls[0].slice(0, 3)).toEqual(['story', '능력을 들키는 장면\n동료의 반응도 보여 줘', expect.any(AbortSignal)]);
     const title = await screen.findByLabelText('회차 제목');
     await user.clear(title);
     await user.type(title, '드러난 비밀');
     await user.click(screen.getByRole('button', { name: '빈 회차로 시작' }));
-    expect(create).toHaveBeenCalledWith('story', {
-      title: '드러난 비밀', direction: proposal.direction, content: '', forceNeedsReview: false,
-    }, expect.any(String));
+    expect(await screen.findByTestId('editor-route')).toHaveTextContent(JSON.stringify({ episodeId: 'episode-1', state: null }));
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(api.episodes.update).toHaveBeenCalledWith('story', 'episode-1', {
+      expectedRevision: 1, title: '드러난 비밀', direction: proposal.direction, incomplete: false,
+    });
   });
 
   it('keeps the request after a planning failure and retries from next', async () => {
@@ -517,6 +382,7 @@ describe('new episode flow', () => {
     const signal = vi.mocked(api.episodes.propose).mock.calls[0][2];
     await user.click(screen.getByRole('button', { name: '닫기' }));
     expect(signal?.aborted).toBe(true);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     await user.click(screen.getByRole('button', { name: '새 회차' }));
     await act(async () => finish(proposal));
 
@@ -524,5 +390,225 @@ describe('new episode flow', () => {
     expect(screen.queryByLabelText('회차 제목')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '다음' })).toBeEnabled();
     expect(api.episodes.propose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('incomplete episode plans', () => {
+  it('keeps one incomplete row after closing and restores manual edits after reloading the list', async () => {
+    const user = userEvent.setup();
+    const page = renderPage();
+    await user.click(screen.getByRole('button', { name: '새 회차' }));
+    await user.click(await screen.findByRole('button', { name: '다음' }));
+    expect(await screen.findByLabelText('회차 제목')).toHaveValue(proposal.title);
+    await user.click(screen.getByRole('button', { name: '닫기' }));
+
+    const row = await screen.findByRole('button', { name: /닫힌 문 너머.*미완성/ });
+    expect(screen.getAllByText('미완성')).toHaveLength(1);
+    expect(screen.queryByRole('link', { name: /닫힌 문 너머/ })).not.toBeInTheDocument();
+    await user.click(row);
+    expect(await screen.findByRole('dialog', { name: '새 회차 만들기' })).toBeVisible();
+    expect(screen.getByLabelText('회차 제목')).toHaveValue(proposal.title);
+    expect(screen.getByLabelText('전개 방향')).toHaveValue(proposal.direction);
+    expect(screen.queryByLabelText(/이번 회차에 원하는 것/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('editor-route')).not.toBeInTheDocument();
+    expect(api.episodes.propose).toHaveBeenCalledTimes(1);
+    expect(api.episodes.create).toHaveBeenCalledTimes(1);
+
+    await user.clear(screen.getByLabelText('회차 제목'));
+    await user.type(screen.getByLabelText('회차 제목'), '다시 열린 문');
+    await user.type(screen.getByLabelText('전개 방향'), ' 동료의 목소리가 들린다.');
+    await user.click(screen.getByRole('button', { name: '닫기' }));
+    expect(await screen.findByRole('button', { name: /다시 열린 문.*미완성/ })).toBeVisible();
+    expect(api.episodes.update).toHaveBeenLastCalledWith('story', 'episode-1', {
+      expectedRevision: 1, title: '다시 열린 문', direction: `${proposal.direction} 동료의 목소리가 들린다.`, incomplete: true,
+    });
+    page.unmount();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: /다시 열린 문.*미완성/ }));
+    expect(await screen.findByLabelText('회차 제목')).toHaveValue('다시 열린 문');
+    expect(screen.getByLabelText('전개 방향')).toHaveValue(`${proposal.direction} 동료의 목소리가 들린다.`);
+    expect(api.episodes.propose).toHaveBeenCalledTimes(1);
+    expect(api.episodes.create).toHaveBeenCalledTimes(1);
+    expect(persistedEpisodes).toHaveLength(1);
+  });
+
+  it('opens an incomplete plan directly from the resume URL without proposing or creating again', async () => {
+    persistedEpisodes = [incompleteEpisode];
+    renderPage('/projects/story/episodes?resume=episode-1');
+
+    expect(await screen.findByRole('dialog', { name: '새 회차 만들기' })).toBeVisible();
+    expect(screen.getByLabelText('회차 제목')).toHaveValue(proposal.title);
+    expect(screen.getByLabelText('전개 방향')).toHaveValue(proposal.direction);
+    expect(screen.queryByTestId('editor-route')).not.toBeInTheDocument();
+    expect(api.episodes.propose).not.toHaveBeenCalled();
+    expect(api.episodes.create).not.toHaveBeenCalled();
+    await userEvent.setup().click(screen.getByRole('button', { name: '닫기' }));
+    expect(await screen.findByRole('button', { name: /닫힌 문 너머.*미완성/ })).toBeVisible();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('continues to open a normal empty draft in the editor', async () => {
+    persistedEpisodes = [{ ...incompleteEpisode, status: 'DRAFT' }];
+    renderPage();
+    await userEvent.setup().click(await screen.findByRole('link', { name: /닫힌 문 너머/ }));
+
+    expect(await screen.findByTestId('editor-route')).toHaveTextContent(JSON.stringify({ episodeId: 'episode-1', state: null }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(api.episodes.propose).not.toHaveBeenCalled();
+    expect(api.episodes.create).not.toHaveBeenCalled();
+  });
+
+  it('reproposes a changed request with the existing episode context and updates its row', async () => {
+    const replacement = { title: '새로운 작전', direction: '경비병으로 변장해서 왕궁에 들어간다.', conflicts: [] };
+    vi.mocked(api.episodes.propose).mockResolvedValueOnce(proposal).mockResolvedValueOnce(replacement);
+    const user = await openCreator();
+    await user.type(screen.getByLabelText(/이번 회차에 원하는 것/), '왕궁 잠입');
+    await user.click(screen.getByRole('button', { name: '다음' }));
+    await screen.findByLabelText('회차 제목');
+    await user.click(screen.getByRole('button', { name: '이전' }));
+    await user.type(screen.getByLabelText(/이번 회차에 원하는 것/), ' 변장 작전');
+    await user.click(screen.getByRole('button', { name: '다음' }));
+
+    expect(await screen.findByLabelText('회차 제목')).toHaveValue(replacement.title);
+    expect(api.episodes.propose).toHaveBeenLastCalledWith('story', '왕궁 잠입 변장 작전', expect.any(AbortSignal), {
+      episodeId: 'episode-1', expectedRevision: 1,
+    });
+    expect(api.episodes.update).toHaveBeenCalledWith('story', 'episode-1', {
+      expectedRevision: 1, title: replacement.title, direction: replacement.direction, incomplete: true,
+    });
+    await user.click(screen.getByRole('button', { name: '닫기' }));
+    expect(await screen.findByRole('button', { name: /새로운 작전.*미완성/ })).toBeVisible();
+    expect(screen.getAllByText('미완성')).toHaveLength(1);
+    expect(api.episodes.create).toHaveBeenCalledTimes(1);
+    expect(persistedEpisodes).toHaveLength(1);
+  });
+
+  it('retries a lost create response with its original key and payload, then saves subsequent manual edits', async () => {
+    const create = vi.mocked(api.episodes.create);
+    const persist = create.getMockImplementation()!;
+    create.mockImplementationOnce(async (...args) => {
+      await persist(...args);
+      throw new Error('저장 응답을 받지 못했어요.');
+    });
+    const user = await openCreator();
+    await user.click(screen.getByRole('button', { name: '다음' }));
+    expect(await screen.findByText('저장 응답을 받지 못했어요.')).toBeVisible();
+    expect(screen.getByLabelText('회차 제목')).toHaveValue(proposal.title);
+    const initialCall = create.mock.calls[0];
+    await user.type(screen.getByLabelText('회차 제목'), ' 수정');
+    await user.click(screen.getByRole('button', { name: '닫기' }));
+
+    expect(await screen.findByRole('button', { name: /닫힌 문 너머 수정.*미완성/ })).toBeVisible();
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create.mock.calls[1]).toEqual(initialCall);
+    expect(api.episodes.update).toHaveBeenCalledWith('story', 'episode-1', {
+      expectedRevision: 1, title: `${proposal.title} 수정`, direction: proposal.direction, incomplete: true,
+    });
+    expect(api.episodes.propose).toHaveBeenCalledTimes(1);
+    expect(persistedEpisodes).toHaveLength(1);
+    expect(persistedEpisodes[0].title).toBe(`${proposal.title} 수정`);
+  });
+
+  it('keeps an unsaved plan in the dialog after a close failure and retries the same episode', async () => {
+    persistedEpisodes = [incompleteEpisode];
+    vi.mocked(api.episodes.update).mockRejectedValueOnce(new Error('전개 방향을 저장하지 못했어요.'));
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: /닫힌 문 너머.*미완성/ }));
+    await user.type(screen.getByLabelText('전개 방향'), ' 잠입 계획을 바꾼다.');
+    await user.click(screen.getByRole('button', { name: '닫기' }));
+
+    expect(await screen.findByText('전개 방향을 저장하지 못했어요.')).toBeVisible();
+    expect(screen.getByRole('dialog')).toBeVisible();
+    expect(screen.getByLabelText('전개 방향')).toHaveValue(`${proposal.direction} 잠입 계획을 바꾼다.`);
+    expect(screen.queryByTestId('editor-route')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '닫기' }));
+    expect(await screen.findByRole('button', { name: /닫힌 문 너머.*미완성/ })).toBeVisible();
+    expect(api.episodes.update).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(api.episodes.update).mock.calls[1]).toEqual(vi.mocked(api.episodes.update).mock.calls[0]);
+    expect(api.episodes.create).not.toHaveBeenCalled();
+    expect(persistedEpisodes[0].direction).toBe(`${proposal.direction} 잠입 계획을 바꾼다.`);
+  });
+
+  it.each(['AI 회차 작성', '빈 회차로 시작'])('retries failed %s saving and waits for it before entering the editor', async (action) => {
+    persistedEpisodes = [incompleteEpisode];
+    const update = vi.mocked(api.episodes.update);
+    const persist = update.getMockImplementation()!;
+    update.mockRejectedValueOnce(new Error('회차를 시작하지 못했어요.'));
+    let finish!: () => void;
+    update.mockImplementationOnce((...args) => new Promise((resolve, reject) => {
+      finish = () => { void persist(...args).then(resolve, reject); };
+    }));
+    const generate = vi.spyOn(api.episodes, 'generate');
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: /닫힌 문 너머.*미완성/ }));
+    await user.type(screen.getByLabelText('회차 제목'), ' 수정');
+    await user.click(screen.getByRole('button', { name: action }));
+
+    expect(await screen.findByText('회차를 시작하지 못했어요.')).toBeVisible();
+    expect(screen.getByRole('dialog')).toBeVisible();
+    expect(persistedEpisodes[0].status).toBe('INCOMPLETE');
+    expect(screen.queryByTestId('editor-route')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: action }));
+    expect(screen.getByRole('button', { name: 'AI 회차 작성' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '빈 회차로 시작' })).toBeDisabled();
+    expect(screen.getByLabelText('회차 제목')).toBeDisabled();
+    expect(screen.queryByTestId('editor-route')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '닫기' }));
+    expect(screen.getByRole('dialog')).toBeVisible();
+    expect(update).toHaveBeenCalledTimes(2);
+    await act(async () => finish());
+
+    expect(await screen.findByTestId('editor-route')).toHaveTextContent(JSON.stringify({
+      episodeId: 'episode-1', state: action === 'AI 회차 작성' ? { generateEpisode: true } : null,
+    }));
+    expect(persistedEpisodes[0].status).toBe(action === 'AI 회차 작성' ? 'INCOMPLETE' : 'DRAFT');
+    expect(persistedEpisodes[0].title).toBe(`${proposal.title} 수정`);
+    expect(api.episodes.create).not.toHaveBeenCalled();
+    expect(generate).not.toHaveBeenCalled();
+  });
+});
+
+describe('episode resume navigation races', () => {
+  it('waits for stale order data to refresh before consuming an incomplete episode resume URL', async () => {
+    const cachedOrder: EpisodeOrder = {
+      episodes: [{ ...incompleteEpisode, status: 'DRAFT' }], slots: ['episode-1'], revision: 'old-order',
+    };
+    let finish!: (order: EpisodeOrder) => void;
+    vi.mocked(api.episodes.order).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    renderPage('/projects/story/episodes?resume=episode-1', cachedOrder);
+    expect(await screen.findByRole('link', { name: /닫힌 문 너머/ })).toBeVisible();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    await act(async () => finish({ episodes: [incompleteEpisode], slots: ['episode-1'], revision: 'new-order' }));
+    expect(await screen.findByRole('dialog', { name: '새 회차 만들기' })).toBeVisible();
+    expect(screen.getByLabelText('회차 제목')).toHaveValue(proposal.title);
+    expect(api.episodes.propose).not.toHaveBeenCalled();
+    expect(api.episodes.create).not.toHaveBeenCalled();
+  });
+
+  it('finishes saving after leaving the creator without reopening the editor or starting AI writing', async () => {
+    persistedEpisodes = [incompleteEpisode];
+    const persist = vi.mocked(api.episodes.update).getMockImplementation()!;
+    let finish!: () => Promise<void>;
+    vi.mocked(api.episodes.update).mockImplementationOnce((...args) => new Promise((resolve, reject) => {
+      finish = async () => { await persist(...args).then(resolve, reject); };
+    }));
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: /닫힌 문 너머.*미완성/ }));
+    await user.type(screen.getByLabelText('회차 제목'), ' 수정');
+    await user.click(screen.getByRole('button', { name: 'AI 회차 작성' }));
+    expect(api.episodes.update).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'AI 회차 작성' })).toBeDisabled();
+    await act(async () => navigateRouter('/elsewhere'));
+    expect(await screen.findByTestId('elsewhere-route')).toBeVisible();
+    await act(async () => finish());
+
+    expect(screen.getByTestId('elsewhere-route')).toBeVisible();
+    expect(screen.queryByTestId('editor-route')).not.toBeInTheDocument();
+    expect(persistedEpisodes[0]).toMatchObject({ title: `${proposal.title} 수정`, status: 'INCOMPLETE' });
+    expect(api.episodes.create).not.toHaveBeenCalled();
   });
 });

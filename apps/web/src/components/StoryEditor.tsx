@@ -9,7 +9,17 @@ type Props = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'value' | 'classN
 
 export default function StoryEditor({ textareaRef, value, highlight, ...props }: Props) {
   const mirrorRef = useRef<HTMLDivElement>(null);
+  const readingPositionRef = useRef(0);
+  const wasReadOnlyRef = useRef(props.readOnly);
   const visible = Boolean(highlight?.text && highlight.content === value);
+
+  useLayoutEffect(() => {
+    if ((props.readOnly || wasReadOnlyRef.current) && textareaRef.current) {
+      textareaRef.current.scrollTop = readingPositionRef.current;
+      readingPositionRef.current = textareaRef.current.scrollTop;
+    }
+    wasReadOnlyRef.current = props.readOnly;
+  }, [value, props.readOnly, textareaRef]);
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -36,6 +46,9 @@ export default function StoryEditor({ textareaRef, value, highlight, ...props }:
     {visible && highlight ? <div ref={mirrorRef} className="story-editor story-editor-highlight" aria-hidden="true">
       {value.slice(0, highlight.start)}<mark>{value.slice(highlight.start, highlight.end)}</mark>{value.slice(highlight.end)}{'\n'}
     </div> : null}
-    <textarea {...props} ref={textareaRef} value={value} className="story-editor" />
+    <textarea {...props} ref={textareaRef} value={value} className="story-editor" onScroll={(event) => {
+      readingPositionRef.current = event.currentTarget.scrollTop;
+      props.onScroll?.(event);
+    }} />
   </div>;
 }

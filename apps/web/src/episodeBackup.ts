@@ -4,6 +4,7 @@ export interface EpisodeDraftBackup {
   content: string;
   savedAt: string;
   baseRevision?: number;
+  forceNeedsReview?: boolean;
 }
 
 export interface EpisodeServerDraft {
@@ -34,6 +35,7 @@ export function parseEpisodeDraftBackup(raw: string | null): EpisodeDraftBackup 
       content: value.content,
       savedAt: value.savedAt,
       ...(Number.isInteger(value.baseRevision) ? { baseRevision: Number(value.baseRevision) } : {}),
+      ...(value.forceNeedsReview === true ? { forceNeedsReview: true } : {}),
     };
   } catch {
     return null;

@@ -6,7 +6,7 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { and, eq, gte, isNull, lt } from 'drizzle-orm';
+import { and, eq, gte, isNull, lt, ne } from 'drizzle-orm';
 import { AiRunnerService } from '../ai/ai-runner.service';
 import {
   continuityReviewSchema,
@@ -188,15 +188,18 @@ export class EpisodesService {
       }
       const stamp = now();
       const episodeId = id();
+      const content = optionalString(input.content, 'content', 1_000_000) ?? '';
+      const incomplete = this.incompleteFlag(input);
+      if (incomplete && content.trim()) throw new BadRequestException('An incomplete episode cannot contain content');
       const row: typeof episodes.$inferInsert = {
         id: episodeId,
         projectId,
         number: project.nextEpisodeNumber,
         title: requireString(input.title, 'title', { max: 200 }),
         direction: optionalString(input.direction, 'direction', 20_000) ?? '',
-        content: optionalString(input.content, 'content', 1_000_000) ?? '',
+        content,
         revision: 1,
-        status: input.forceNeedsReview === true || input.force === true ? 'NEEDS_REVIEW' : 'DRAFT',
+        status: input.forceNeedsReview === true || input.force === true ? 'NEEDS_REVIEW' : incomplete ? 'INCOMPLETE' : 'DRAFT',
         createdAt: stamp,
         updatedAt: stamp,
         deletedAt: null,
@@ -237,9 +240,18 @@ export class EpisodesService {
     if ('direction' in input) changes.direction = optionalString(input.direction, 'direction', 20_000) ?? '';
     if ('content' in input) {
       changes.content = optionalString(input.content, 'content', 1_000_000) ?? '';
-      changes.status = this.editedStatus(current.status, input.forceNeedsReview === true);
     }
-    if (!('title' in input) && !('direction' in input) && !('content' in input)) {
+    const incomplete = this.incompleteFlag(input);
+    const content = changes.content ?? current.content;
+    if (incomplete && content.trim()) throw new BadRequestException('An incomplete episode cannot contain content');
+    if ('content' in input || incomplete !== undefined) {
+      const remainsIncomplete = incomplete ?? (current.status === 'INCOMPLETE' && !content.trim());
+      changes.status = input.forceNeedsReview === true || current.status === 'NEEDS_REVIEW'
+        ? 'NEEDS_REVIEW'
+        : remainsIncomplete ? 'INCOMPLETE'
+          : current.status === 'INCOMPLETE' ? 'DRAFT' : this.editedStatus(current.status, false);
+    }
+    if (!('title' in input) && !('direction' in input) && !('content' in input) && incomplete === undefined) {
       throw new BadRequestException('At least one editable field is required');
     }
     const result = this.database.orm
@@ -286,9 +298,10 @@ export class EpisodesService {
   async propose(projectId: string, body: unknown) {
     const input = (body ?? {}) as Record<string, unknown>;
     const hint = optionalString(input.hint, 'hint', 5_000) ?? '';
+    const episode = this.requestedDraftEpisode(projectId, input);
     const orderRevision = this.readOrder(projectId).revision;
-    await this.refreshStalePredecessors(projectId);
-    const memory = await this.memory.assemble(projectId, hint);
+    await this.refreshStalePredecessors(projectId, episode?.number);
+    const memory = await this.assembleDraftMemory(projectId, hint, episode?.id);
     this.assertOrderRevision(projectId, orderRevision);
     const { value } = await this.ai.completeJson<{
       title: string;
@@ -298,6 +311,7 @@ export class EpisodesService {
       task: 'episode_direction',
       promptId: 'episode-direction',
       projectId,
+      episodeId: episode?.id,
       variables: this.promptMemory(memory, {
         user_request: hint,
       }),
@@ -318,9 +332,10 @@ export class EpisodesService {
     requireString(title, 'title', { max: 200 });
     requireString(direction, 'direction', { max: 20_000 });
     const instruction = requireString(optionalString(input.instruction, 'instruction', 5_000), 'instruction', { max: 5_000 });
+    const episode = this.requestedDraftEpisode(projectId, input);
     const orderRevision = this.readOrder(projectId).revision;
-    await this.refreshStalePredecessors(projectId);
-    const memory = await this.memory.assemble(projectId, `${instruction}\n${title}\n${direction}`);
+    await this.refreshStalePredecessors(projectId, episode?.number);
+    const memory = await this.assembleDraftMemory(projectId, `${instruction}\n${title}\n${direction}`, episode?.id);
     this.assertOrderRevision(projectId, orderRevision);
     const { value } = await this.ai.completeJson<{
       title: string;
@@ -330,6 +345,7 @@ export class EpisodesService {
       task: 'episode_direction_refine',
       promptId: 'episode-direction-refine',
       projectId,
+      episodeId: episode?.id,
       variables: this.promptMemory(memory, {
         episode_title: title,
         episode_direction: direction,
@@ -354,15 +370,21 @@ export class EpisodesService {
     const title = requireString(input.title, 'title', { max: 200 });
     const direction = requireString(input.direction, 'direction', { max: 20_000 });
     const targetChars = this.targetChars(input.targetChars, project.defaultTargetChars);
+    const episode = this.requestedDraftEpisode(projectId, input, true);
     const orderRevision = this.readOrder(projectId).revision;
-    await this.refreshStalePredecessors(projectId);
+    signal?.throwIfAborted();
+    await this.refreshStalePredecessors(projectId, episode?.number);
+    signal?.throwIfAborted();
     emit({ type: 'stage', stage: 'MEMORY' });
-    const memory = await this.memory.assemble(projectId, `${title}\n${direction}`);
+    const memory = await this.assembleDraftMemory(projectId, `${title}\n${direction}`, episode?.id);
+    signal?.throwIfAborted();
     this.assertOrderRevision(projectId, orderRevision);
     emit({ type: 'stage', stage: 'WRITING' });
     await this.streamWithContinuity(
       {
         projectId,
+        episodeId: episode?.id,
+        baseRevision: episode?.revision,
         baseOrderRevision: orderRevision,
         promptId: 'episode-draft',
         task: 'episode_draft',
@@ -453,15 +475,18 @@ export class EpisodesService {
     const title = requireString(input.title, 'title', { max: 200 });
     const direction = requireString(input.direction, 'direction', { max: 20_000 });
     const { content, issue } = this.repairInput(input);
+    const episode = this.requestedDraftEpisode(projectId, input, true, false);
     const orderRevision = this.readOrder(projectId).revision;
     signal?.throwIfAborted();
     emit({ type: 'stage', stage: 'MEMORY' });
-    await this.refreshStalePredecessors(projectId);
+    await this.refreshStalePredecessors(projectId, episode?.number);
     signal?.throwIfAborted();
-    const memory = await this.memory.assemble(projectId, `${title}\n${direction}`);
+    const memory = await this.assembleDraftMemory(projectId, `${title}\n${direction}`, episode?.id);
     this.assertOrderRevision(projectId, orderRevision);
     await this.repairSelectedIssue({
       projectId,
+      episodeId: episode?.id,
+      baseRevision: episode?.revision,
       baseOrderRevision: orderRevision,
       content,
       issue,
@@ -971,6 +996,7 @@ export class EpisodesService {
         and(
           eq(episodes.projectId, projectId),
           gte(episodes.number, startNumber),
+          ne(episodes.status, 'INCOMPLETE'),
           isNull(episodes.deletedAt),
         ),
       )
@@ -988,9 +1014,42 @@ export class EpisodesService {
 
   private editedStatus(current: string, forceNeedsReview: boolean): string {
     if (forceNeedsReview) return 'NEEDS_REVIEW';
+    if (current === 'INCOMPLETE') return 'INCOMPLETE';
     if (current === 'DRAFT') return 'DRAFT';
     if (current === 'NEEDS_REVIEW') return 'NEEDS_REVIEW';
     return 'MEMORY_STALE';
+  }
+
+  private incompleteFlag(input: Record<string, unknown>): boolean | undefined {
+    if (input.incomplete !== undefined && typeof input.incomplete !== 'boolean') {
+      throw new BadRequestException('incomplete must be a boolean');
+    }
+    return input.incomplete as boolean | undefined;
+  }
+
+  private requestedDraftEpisode(
+    projectId: string,
+    input: Record<string, unknown>,
+    requireRevision = false,
+    requireEmpty = true,
+  ) {
+    if (input.episodeId === undefined) {
+      if (input.expectedRevision !== undefined) throw new BadRequestException('episodeId is required with expectedRevision');
+      return undefined;
+    }
+    const episode = this.requireEpisode(projectId, requireString(input.episodeId, 'episodeId'));
+    if (requireRevision || input.expectedRevision !== undefined) {
+      const expectedRevision = positiveInteger(input.expectedRevision, 'expectedRevision');
+      if (episode.revision !== expectedRevision) throw new ConflictException('Episode revision is stale');
+    }
+    if (requireEmpty && episode.content.trim()) throw new BadRequestException('The episode already contains content');
+    return episode;
+  }
+
+  private assembleDraftMemory(projectId: string, query: string, episodeId?: string) {
+    return episodeId
+      ? this.memory.assemble(projectId, query, episodeId, { previousEpisodeScene: true })
+      : this.memory.assemble(projectId, query);
   }
 
   private async refreshStalePredecessors(projectId: string, beforeNumber?: number): Promise<void> {
