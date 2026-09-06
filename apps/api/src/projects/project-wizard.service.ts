@@ -14,6 +14,8 @@ import {
 } from '../ai/ai.schemas';
 import { DatabaseService } from '../database/database.service';
 import { arcs, canonEntries, projectCreationSessions } from '../database/schema';
+import { formatArcMemory } from '../memory/arc-memory';
+import { formatCanonMemory } from '../memory/canon-memory';
 import { MemoryService } from '../memory/memory.service';
 import {
   id,
@@ -33,6 +35,7 @@ export interface SetupQuestion {
   inputType: 'text' | 'long_text' | 'single' | 'multi';
   options: string[];
   required: boolean;
+  suggestedAnswer?: string;
 }
 
 export interface Blueprint {
@@ -41,6 +44,8 @@ export interface Blueprint {
   genreTags: string[];
   details: string;
   defaultTargetChars: number;
+  targetEpisode: number;
+  targetEpisodeSource: 'USER' | 'AI';
   canon: Array<{
     category: string;
     name: string;
@@ -48,14 +53,14 @@ export interface Blueprint {
     content: string;
     metadata: Record<string, unknown>;
   }>;
-  arc: {
+  arcs: Array<{
     title: string;
     startEpisode: number;
     endEpisode: number;
     goal: string;
     conflict: string;
     reversalPlan: Array<{ episode: number; description: string }>;
-  };
+  }>;
 }
 
 type SessionRow = typeof projectCreationSessions.$inferSelect;
@@ -105,7 +110,20 @@ export class ProjectWizardService {
   }
 
   async get(sessionId: string) {
-    const session = this.requireSession(sessionId);
+    let session = this.requireSession(sessionId);
+    if (session.status === 'READY' && !this.parseStoredBlueprint(session.blueprintJson)) {
+      // Older READY sessions may be missing a blueprint, contain the former
+      // single-arc shape, or have a range that no longer satisfies the
+      // full-story contract. Reopen the interview so the target and complete
+      // arc sequence can be regenerated instead of returning an invalid wire
+      // response with a null blueprint.
+      this.updateSession(session, {
+        status: 'ACTIVE',
+        blueprintJson: null,
+        pendingQuestionJson: null,
+      });
+      session = this.requireSession(sessionId);
+    }
     if (session.status === 'ACTIVE' && !session.pendingQuestionJson) {
       return this.next(session);
     }
@@ -160,6 +178,16 @@ export class ProjectWizardService {
         }
       }
     }
+    if (!skip && pending.field === 'title') {
+      answer = requireString(answer, 'title', { max: 200 });
+    }
+    if (!skip && pending.field === 'targetEpisode') {
+      const targetEpisode = this.parseTargetEpisode(answer);
+      if (targetEpisode === null) {
+        throw new BadRequestException('Target episode must be a whole number between 5 and 2000');
+      }
+      answer = String(targetEpisode);
+    }
     const record: AnswerRecord = { question: pending, answer, skipped: skip, ...(otherAnswer === undefined ? {} : { otherAnswer }) };
     // Viewing history never mutates the session. An unchanged resubmission also
     // preserves every later answer and the reviewed blueprint.
@@ -200,34 +228,39 @@ export class ProjectWizardService {
   async commit(sessionId: string, body?: unknown) {
     const session = this.requireSession(sessionId);
     if (session.status === 'COMMITTED' && session.projectId) {
+      await this.indexCommittedProject(session.projectId);
       return { project: this.projects.get(session.projectId) };
     }
     if (session.status !== 'READY' || !session.blueprintJson) {
       throw new ConflictException('Project interview is not ready to commit');
     }
     this.assertExpectedState(session, body && typeof body === 'object' ? (body as Record<string, unknown>).expectedState : undefined);
-    let blueprint = parseJson<Blueprint | null>(session.blueprintJson, null);
+    let blueprint = this.parseStoredBlueprint(session.blueprintJson);
     const submitted = body && typeof body === 'object'
       ? (body as Record<string, unknown>).blueprint
       : undefined;
     if (submitted !== undefined) {
-      const parsed = projectBlueprintValidator.safeParse(submitted);
+      const normalized = this.normalizeLegacyBlueprint(submitted);
+      const adjusted = normalized && typeof normalized === 'object' && !Array.isArray(normalized)
+        ? {
+            ...(normalized as Record<string, unknown>),
+            targetEpisodeSource:
+              Number((normalized as Record<string, unknown>).targetEpisode) !== blueprint?.targetEpisode
+                ? 'USER'
+                : this.targetSourceFromTranscript(session) ?? (normalized as Record<string, unknown>).targetEpisodeSource,
+          }
+        : normalized;
+      const parsed = projectBlueprintValidator.safeParse(adjusted);
       if (!parsed.success) {
         throw new BadRequestException(`Invalid blueprint: ${parsed.error.message}`);
       }
       blueprint = parsed.data;
       this.validateBlueprint(blueprint);
-      this.database.orm
-        .update(projectCreationSessions)
-        .set({ blueprintJson: stringifyJson(blueprint), updatedAt: now() })
-        .where(eq(projectCreationSessions.id, sessionId))
-        .run();
     }
     if (!blueprint) throw new ConflictException('Blueprint is missing');
     this.validateBlueprint(blueprint);
     const projectId = id();
-    const stamp = now();
-    const canonIds: string[] = [];
+    const stamp = new Date(Math.max(Date.now(), Date.parse(session.updatedAt) + 1)).toISOString();
     this.database.connection.transaction(() => {
       this.projects.createInternal({
         id: projectId,
@@ -236,10 +269,11 @@ export class ProjectWizardService {
         genreTags: blueprint.genreTags,
         details: blueprint.details,
         defaultTargetChars: blueprint.defaultTargetChars,
+        targetEpisode: blueprint.targetEpisode,
+        targetEpisodeSource: blueprint.targetEpisodeSource,
       });
       for (const item of blueprint.canon ?? []) {
         const canonId = id();
-        canonIds.push(canonId);
         this.database.orm.insert(canonEntries).values({
           id: canonId,
           projectId,
@@ -255,39 +289,41 @@ export class ProjectWizardService {
           updatedAt: stamp,
         }).run();
       }
-      this.database.orm.insert(arcs).values({
-        id: id(),
-        projectId,
-        title: blueprint.arc.title,
-        startEpisodeNumber: blueprint.arc.startEpisode,
-        endEpisodeNumber: blueprint.arc.endEpisode,
-        goal: blueprint.arc.goal,
-        conflict: blueprint.arc.conflict,
-        reversalPlanJson: stringifyJson(blueprint.arc.reversalPlan),
-        status: 'ACTIVE',
-        revision: 1,
-        createdAt: stamp,
-        updatedAt: stamp,
-      }).run();
-      this.database.orm
+      for (const [index, arc] of blueprint.arcs.entries()) {
+        this.database.orm.insert(arcs).values({
+          id: id(),
+          projectId,
+          title: arc.title,
+          startEpisodeNumber: arc.startEpisode,
+          endEpisodeNumber: arc.endEpisode,
+          goal: arc.goal,
+          conflict: arc.conflict,
+          reversalPlanJson: stringifyJson(arc.reversalPlan),
+          status: index === 0 ? 'ACTIVE' : 'PLANNED',
+          revision: 1,
+          createdAt: stamp,
+          updatedAt: stamp,
+        }).run();
+      }
+      const committed = this.database.orm
         .update(projectCreationSessions)
-        .set({ status: 'COMMITTED', projectId, updatedAt: stamp })
-        .where(eq(projectCreationSessions.id, sessionId))
+        .set({
+          status: 'COMMITTED',
+          projectId,
+          blueprintJson: stringifyJson(blueprint),
+          updatedAt: stamp,
+        })
+        .where(and(
+          eq(projectCreationSessions.id, sessionId),
+          eq(projectCreationSessions.status, 'READY'),
+          eq(projectCreationSessions.updatedAt, session.updatedAt),
+        ))
         .run();
-    })();
-    await Promise.all(
-      canonIds.map(async (canonId) => {
-        const canon = this.database.orm.select().from(canonEntries).where(eq(canonEntries.id, canonId)).get();
-        if (canon) {
-          await this.memory.indexSource({
-            projectId,
-            sourceType: 'CANON',
-            sourceId: canon.id,
-            text: `${canon.name}\n${canon.content}`,
-          });
-        }
-      }),
-    );
+      if (committed.changes !== 1) {
+        throw new ConflictException('Project interview was committed or changed concurrently');
+      }
+    }).immediate();
+    await this.indexCommittedProject(projectId);
     return { project: this.projects.get(projectId) };
   }
 
@@ -303,6 +339,22 @@ export class ProjectWizardService {
   private async generateNext(session: SessionRow) {
     const answers = parseJson<Record<string, unknown>>(session.answersJson, {});
     const transcript = parseJson<Array<Record<string, unknown>>>(session.transcriptJson, []);
+    if (
+      typeof answers.title === 'string' &&
+      answers.title.trim() &&
+      !transcript.some((entry) => (entry.question as Record<string, unknown> | undefined)?.field === 'targetEpisode')
+    ) {
+      const question: SetupQuestion = {
+        id: 'target-episode',
+        field: 'targetEpisode',
+        prompt: '몇 화에 완결하는 것을 목표로 할까요?',
+        inputType: 'text',
+        options: [],
+        required: false,
+      };
+      this.updateSession(session, { pendingQuestionJson: stringifyJson(question) });
+      return this.result(this.requireSession(session.id));
+    }
     const { result } = await this.ai.completeText({
       task: 'project_interview',
       promptId: 'project-interview',
@@ -333,11 +385,18 @@ export class ProjectWizardService {
         !session.titleAsked &&
         (requested.field !== 'title' ||
           !requested.required ||
-          !['text', 'long_text'].includes(requested.inputType))
+          !['text', 'long_text'].includes(requested.inputType) ||
+          !requested.suggestedAnswer?.trim())
       ) {
         throw new BadGatewayException(
           'AI interview must ask for the required title as a text question first',
         );
+      }
+      if (
+        ['title', 'targetEpisode'].includes(requested.field)
+        && transcript.some((entry) => (entry.question as Record<string, unknown> | undefined)?.field === requested.field)
+      ) {
+        throw new BadGatewayException(`AI interview attempted to ask reserved field ${requested.field} again`);
       }
       const question = requested;
       this.updateSession(session, {
@@ -352,6 +411,23 @@ export class ProjectWizardService {
     if (!session.titleAsked || typeof answers.title !== 'string' || !answers.title.trim()) {
       throw new BadGatewayException('AI interview attempted to finish before asking for the title');
     }
+    const targetRecord = transcript.find((entry) => {
+      const question = entry.question as Record<string, unknown> | undefined;
+      return question?.field === 'targetEpisode';
+    }) as AnswerRecord | undefined;
+    if (!targetRecord) {
+      throw new BadGatewayException('AI interview attempted to finish before collecting the target episode');
+    }
+    const targetSource = targetRecord.skipped ? 'AI' as const : 'USER' as const;
+    const requestedTarget = targetRecord.skipped ? null : this.parseTargetEpisode(targetRecord.answer);
+    const blueprintValidator = projectBlueprintValidator.superRefine((value, context) => {
+      if (value.targetEpisodeSource !== targetSource) {
+        context.addIssue({ code: 'custom', message: `targetEpisodeSource must be ${targetSource}`, path: ['targetEpisodeSource'] });
+      }
+      if (requestedTarget !== null && value.targetEpisode !== requestedTarget) {
+        context.addIssue({ code: 'custom', message: `targetEpisode must be ${requestedTarget}`, path: ['targetEpisode'] });
+      }
+    });
 
     const { value: blueprint } = await this.ai.completeJson<Blueprint>({
       task: 'project_blueprint',
@@ -361,12 +437,14 @@ export class ProjectWizardService {
         logline: session.logline,
         genre_tags: parseJson(session.genreTagsJson, []),
         interview_answers: transcript,
+        target_episode_answer: targetRecord.answer,
+        interview_completion: args,
       },
       schema: { name: 'project_blueprint', value: projectBlueprintSchema },
-      validator: projectBlueprintValidator,
+      validator: blueprintValidator,
       includeCore: false,
       includeMemoryContract: false,
-      maxTokens: 12_000,
+      maxTokens: 24_000,
     });
     this.updateSession(session, {
       blueprintJson: stringifyJson(blueprint),
@@ -380,6 +458,9 @@ export class ProjectWizardService {
     const inputType = ['text', 'long_text', 'single', 'multi'].includes(String(args.inputType))
       ? (args.inputType as SetupQuestion['inputType'])
       : 'text';
+    const suggestedAnswer = typeof args.suggestedAnswer === 'string' && args.suggestedAnswer.trim()
+      ? requireString(args.suggestedAnswer, 'question.suggestedAnswer', { max: 200 })
+      : undefined;
     return {
       id: requireString(args.id, 'question.id', { max: 100 }),
       field: requireString(args.field, 'question.field', { max: 100 }),
@@ -389,14 +470,27 @@ export class ProjectWizardService {
         ? stringArray(args.options.filter((item): item is string => typeof item === 'string'), 'question.options')
         : [],
       required: args.required === true,
+      ...(suggestedAnswer ? { suggestedAnswer } : {}),
     };
   }
 
   private validateBlueprint(blueprint: Blueprint): void {
     if (!blueprint.title.trim()) throw new BadRequestException('Blueprint title is required');
-    const span = blueprint.arc.endEpisode - blueprint.arc.startEpisode + 1;
-    if (span < 5 || span > 20) {
-      throw new BadRequestException('Blueprint arc must span between 5 and 20 episodes');
+    for (const [index, arc] of blueprint.arcs.entries()) {
+      const span = arc.endEpisode - arc.startEpisode + 1;
+      if (span < 5 || span > 20) {
+        throw new BadRequestException('Blueprint arcs must span between 5 and 20 episodes');
+      }
+      const expectedStart = index === 0 ? 1 : blueprint.arcs[index - 1]!.endEpisode + 1;
+      if (arc.startEpisode !== expectedStart) {
+        throw new BadRequestException('Blueprint arcs must be contiguous from episode 1');
+      }
+      if (arc.reversalPlan.some((beat) => beat.episode < arc.startEpisode || beat.episode > arc.endEpisode)) {
+        throw new BadRequestException('Blueprint reversal episodes must be inside their arc');
+      }
+    }
+    if (blueprint.arcs.at(-1)?.endEpisode !== blueprint.targetEpisode) {
+      throw new BadRequestException('Blueprint must cover every episode through the target ending');
     }
   }
 
@@ -415,7 +509,66 @@ export class ProjectWizardService {
   }
 
   private normalizeQuestion(question: SetupQuestion): SetupQuestion {
-    return { ...question, options: stringArray(question.options ?? [], 'question.options') };
+    return {
+      ...question,
+      options: stringArray(question.options ?? [], 'question.options'),
+      ...(question.suggestedAnswer?.trim() ? { suggestedAnswer: question.suggestedAnswer.trim() } : {}),
+    };
+  }
+
+  private parseTargetEpisode(answer: AnswerRecord['answer']): number | null {
+    const text = typeof answer === 'string' ? answer : Array.isArray(answer) ? answer.join(' ') : '';
+    const match = text.replaceAll(',', '').match(/^\s*(\d+)(?:\s*화)?\s*$/);
+    if (!match) return null;
+    const value = Number(match[1]);
+    return Number.isInteger(value) && value >= 5 && value <= 2_000 ? value : null;
+  }
+
+  private targetSourceFromTranscript(session: SessionRow): Blueprint['targetEpisodeSource'] | null {
+    const record = parseJson<AnswerRecord[]>(session.transcriptJson, [])
+      .find((entry) => entry.question.field === 'targetEpisode');
+    return record ? (record.skipped ? 'AI' : 'USER') : null;
+  }
+
+  private normalizeLegacyBlueprint(value: unknown): unknown {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    const record = value as Record<string, unknown>;
+    if (Array.isArray(record.arcs) || !record.arc || typeof record.arc !== 'object') return value;
+    const legacyArc = record.arc as Record<string, unknown>;
+    const { arc: _legacyArc, ...rest } = record;
+    return {
+      ...rest,
+      targetEpisode: legacyArc.endEpisode,
+      targetEpisodeSource: 'AI',
+      arcs: [legacyArc],
+    };
+  }
+
+  private parseStoredBlueprint(json: string | null): Blueprint | null {
+    const raw = this.normalizeLegacyBlueprint(parseJson<unknown>(json, null));
+    const parsed = projectBlueprintValidator.safeParse(raw);
+    return parsed.success ? parsed.data : null;
+  }
+
+  private async indexCommittedProject(projectId: string): Promise<void> {
+    const canon = this.database.orm.select().from(canonEntries).where(eq(canonEntries.projectId, projectId)).all()
+      .filter((entry) => ['ACTIVE', 'ACCEPTED'].includes(entry.status));
+    const activeArcs = this.database.orm.select().from(arcs).where(eq(arcs.projectId, projectId)).all()
+      .filter((arc) => arc.status === 'ACTIVE');
+    await Promise.all([
+      ...canon.map((entry) => this.memory.indexSource({
+        projectId,
+        sourceType: 'CANON',
+        sourceId: entry.id,
+        text: formatCanonMemory(entry),
+      })),
+      ...activeArcs.map((arc) => this.memory.indexSource({
+        projectId,
+        sourceType: 'ARC',
+        sourceId: arc.id,
+        text: formatArcMemory(arc),
+      })),
+    ]);
   }
 
   private assertExpectedState(session: SessionRow, expected: unknown): void {
@@ -438,7 +591,10 @@ export class ProjectWizardService {
   private result(session: SessionRow) {
     const storedQuestion = parseJson<SetupQuestion | null>(session.pendingQuestionJson, null);
     const pending = storedQuestion ? this.normalizeQuestion(storedQuestion) : null;
-    const blueprint = parseJson<Blueprint | null>(session.blueprintJson, null);
+    const blueprint = this.parseStoredBlueprint(session.blueprintJson);
+    if (!pending && !blueprint) {
+      throw new ConflictException('Project interview has no valid pending question or blueprint');
+    }
     return {
       history: parseJson<AnswerRecord[]>(session.transcriptJson, []).map((entry) => ({
         ...entry, question: this.normalizeQuestion(entry.question),

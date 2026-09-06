@@ -275,10 +275,14 @@ export class ChatService implements OnModuleInit {
         if (!before || !proposal.targetId) throw new BadRequestException('변경 대상이 없습니다.');
         const current = this.reads.getRecord(projectId, kind, proposal.targetId);
         this.assertWritable(projectId, kind, current);
+        this.assertArcOperation(kind, operation, current);
         if (current.revision !== before.revision) throw new ConflictException('검토 중 항목이 변경되었습니다. 최신 내용으로 다시 제안해 주세요.');
       }
       if (proposal.activeArcsJson !== null) {
-        const expected = parseJson<Array<{ id: string; revision: number }>>(proposal.activeArcsJson, []);
+        const expected = parseJson<Array<{ id: string; revision: number; replacementStatus: 'COMPLETE' | 'ARCHIVED' }>>(
+          proposal.activeArcsJson,
+          [],
+        );
         if (stringifyJson(this.activeArcs(projectId)) !== stringifyJson(expected)) throw new ConflictException('검토 중 활성 아크가 변경되었습니다. 다시 제안해 주세요.');
       }
       let result: Record<string, unknown>;
@@ -286,7 +290,7 @@ export class ChatService implements OnModuleInit {
       if (operation === 'DELETE') {
         if (kind === 'PROJECT') throw new BadRequestException('프로젝트 삭제는 채팅에서 지원하지 않습니다.');
         if (kind === 'CANON') this.canon.remove(projectId, proposal.targetId!);
-        else if (kind === 'ARC') this.arcs.remove(projectId, proposal.targetId!);
+        else if (kind === 'ARC') this.arcs.remove(projectId, proposal.targetId!, { expectedRevision: before!.revision });
         else this.improvements.remove(proposal.targetId!);
         result = { id: proposal.targetId, deleted: true };
       } else {
@@ -299,7 +303,9 @@ export class ChatService implements OnModuleInit {
         } else if (kind === 'CANON') {
           result = operation === 'CREATE' ? this.canon.persistCreate(projectId, input) : this.canon.persistUpdate(projectId, proposal.targetId!, input);
         } else if (kind === 'ARC') {
-          result = operation === 'CREATE' ? this.arcs.persistCreate(projectId, input) : this.arcs.persistUpdate(projectId, proposal.targetId!, input);
+          result = operation === 'CREATE'
+            ? this.arcs.persistCreate(projectId, { ...input, confirmProtected: true })
+            : this.arcs.persistUpdate(projectId, proposal.targetId!, { ...input, confirmProtected: true });
         } else {
           result = operation === 'CREATE'
             ? this.improvements.persistCreate({ ...input, scope: 'PROJECT', projectId, source: 'MANUAL' })
@@ -331,6 +337,7 @@ export class ChatService implements OnModuleInit {
     if (operation !== 'CREATE') {
       if (!before || !input.targetId) throw new BadGatewayException('AI가 조회하지 않은 항목의 변경을 제안했습니다.');
       this.assertWritable(projectId, kind, before);
+      this.assertArcOperation(kind, operation, before);
       const current = this.reads.getRecord(projectId, kind, input.targetId);
       if (current.revision !== before.revision) throw new ConflictException('답변 생성 중 항목이 변경되었습니다. 다시 시도해 주세요.');
     }
@@ -340,19 +347,31 @@ export class ChatService implements OnModuleInit {
         ...creationDefaults[kind], ...(before ? editableFields(kind, before) : {}), ...changes,
       }) as Record<string, unknown>;
       this.validateArc(kind, fields);
+      this.assertArcStatusTransition(kind, operation, before, fields);
       if (kind === 'IMPROVEMENT' && operation === 'CREATE' && fields.active !== true) throw new BadGatewayException('새 개선점은 활성 상태로 제안해 주세요.');
       after = { ...(before ?? {}), ...fields, ...(before ? { revision: before.revision + 1 } : {}) };
       if (kind === 'IMPROVEMENT') Object.assign(after, { scope: 'PROJECT', projectId });
     }
     const effects: Effect[] = [];
-    let activeArcs: Array<{ id: string; revision: number }> | null = null;
+    let activeArcs: Array<{
+      id: string;
+      revision: number;
+      replacementStatus: 'COMPLETE' | 'ARCHIVED';
+    }> | null = null;
     if (kind === 'ARC' && after?.status === 'ACTIVE') {
       activeArcs = this.activeArcs(projectId);
       const snapshotActive = [...snapshots.entries()].filter(([key, value]) => key.startsWith('ARC:') && value.status === 'ACTIVE')
         .map(([, value]) => ({ id: value.id, revision: value.revision })).sort((a, b) => a.id.localeCompare(b.id));
-      if (stringifyJson(snapshotActive) !== stringifyJson(activeArcs)) throw new ConflictException('답변 생성 중 활성 아크가 변경되었습니다.');
+      if (stringifyJson(snapshotActive) !== stringifyJson(
+        activeArcs.map(({ id: arcId, revision }) => ({ id: arcId, revision })),
+      )) throw new ConflictException('답변 생성 중 활성 아크가 변경되었습니다.');
       for (const arc of this.arcs.list(projectId).filter((arc) => arc.status === 'ACTIVE' && arc.id !== input.targetId)) {
-        effects.push({ label: `기존 활성 아크 “${arc.title}” 보관`, before: arc as RecordSnapshot, after: { ...arc, status: 'ARCHIVED', revision: arc.revision + 1 } });
+        const nextStatus = this.arcs.replacementStatus(projectId, arc);
+        effects.push({
+          label: `기존 현재 아크 “${arc.title}” ${nextStatus === 'COMPLETE' ? '완료' : '보관'}`,
+          before: arc as RecordSnapshot,
+          after: { ...arc, status: nextStatus, revision: arc.revision + 1 },
+        });
       }
     }
     return { id: id(), projectId, messageId, kind, operation, title: input.title, targetId: input.targetId,
@@ -369,15 +388,50 @@ export class ChatService implements OnModuleInit {
     }
   }
 
+  private assertArcOperation(kind: ChatKind, operation: ChatOperation, record: RecordSnapshot): void {
+    if (kind !== 'ARC') return;
+    if (['COMPLETE', 'ARCHIVED'].includes(String(record.status))) {
+      throw new BadRequestException('이전·보관 아크는 채팅에서 변경할 수 없습니다.');
+    }
+    if (operation === 'DELETE' && record.status !== 'PLANNED') {
+      throw new BadRequestException('대기 중인 미래 아크만 삭제할 수 있습니다.');
+    }
+  }
+
   private validateArc(kind: ChatKind, fields: Record<string, unknown>): void {
     if (kind !== 'ARC') return;
     const span = Number(fields.endEpisodeNumber) - Number(fields.startEpisodeNumber) + 1;
     if (span < 5 || span > 20) throw new BadRequestException('아크는 5~20화 범위여야 합니다.');
   }
 
+  private assertArcStatusTransition(
+    kind: ChatKind,
+    operation: ChatOperation,
+    before: RecordSnapshot | null,
+    fields: Record<string, unknown>,
+  ): void {
+    if (kind !== 'ARC') return;
+    const nextStatus = fields.status;
+    const allowed = operation === 'CREATE'
+      ? ['PLANNED', 'ACTIVE']
+      : before?.status === 'PLANNED'
+        ? ['PLANNED', 'ACTIVE']
+        : before?.status === 'ACTIVE'
+          ? ['ACTIVE']
+          : [];
+    if (!allowed.includes(String(nextStatus))) {
+      throw new BadRequestException('아크 상태 전이가 올바르지 않습니다.');
+    }
+  }
+
   private activeArcs(projectId: string) {
     return this.arcs.list(projectId).filter((arc) => arc.status === 'ACTIVE')
-      .map((arc) => ({ id: arc.id, revision: arc.revision })).sort((a, b) => a.id.localeCompare(b.id));
+      .map((arc) => ({
+        id: arc.id,
+        revision: arc.revision,
+        replacementStatus: this.arcs.replacementStatus(projectId, arc),
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id));
   }
 
   private latestThread(projectId: string) {

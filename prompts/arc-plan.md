@@ -1,6 +1,6 @@
 ---
 id: arc-plan
-version: 4
+version: 5
 task: arc_plan
 responseMode: json
 requiredVariables:
@@ -8,11 +8,15 @@ requiredVariables:
   - improvements
   - canon
   - previous_arcs
+  - current_arc
+  - future_arcs
   - current_scene
   - recent_summaries
   - open_foreshadowing
   - retrieved_memories
   - start_episode_number
+  - end_episode_number
+  - arc_to_revise
   - arc_request
 ---
 
@@ -29,6 +33,9 @@ requiredVariables:
 - 반전 계획은 reversalPlan의 회차별 항목으로만 작성한다. 각 항목의 episode는 아크 범위 안의 공개 회차, description은 그 회차의 구체적인 반전 내용이며, 별도의 반전 계획 개요는 작성하지 않는다.
 - 회차별 비트는 방향이지 완성 원고가 아니다. 각 비트에는 주된 사건, 감정 변화, 정보 공개, 끝 훅 중 필요한 요소를 간결히 담는다.
 - 이전 아크와 최근 요약에 이미 일어난 사건을 반복하지 않는다.
+- previous_arcs는 완료된 이전 흐름, current_arc는 보호해야 할 현재 방향, future_arcs는 아직 일어나지 않아 변경 가능한 대기 계획이다. 대기 아크를 확정 사건이나 Canon으로 취급하지 말고 사용자 요청과 실제 전개에 맞춰 대체 가능한 참고안으로만 사용한다.
+- arc_to_revise가 null이 아니면 그 대기 아크를 사용자 요청과 실제 전개에 맞춰 다시 제안한다. startEpisodeNumber와 endEpisodeNumber는 기존 범위를 정확히 유지하고 내용과 반전만 재설계한다.
+- arc_to_revise가 null이면 startEpisodeNumber는 start_episode_number와 정확히 같아야 한다. end_episode_number가 숫자이면 이번 제안이 넘을 수 없는 경계(목표 완결 또는 다음 대기 아크 직전)이므로 이를 넘지 않으며, 그 경계에 정확히 끝내거나 뒤의 빈 구간을 위해 최소 5화를 남긴다.
 - 직전 확정 장면에서 자연스럽게 출발하고, 검색 기억은 관련 과거 사건과 설정을 재확인하는 보조 근거로 사용한다.
 - 승인된 개선점은 플롯 구성, 속도, 감정선과 훅 설계에 적용하되 작품의 사실이나 새 Canon으로 취급하지 않는다.
 - 요청과 Canon이 충돌하면 Canon을 우선하고 충돌을 구조화 결과에 기록한다.
@@ -53,6 +60,14 @@ requiredVariables:
 {{previous_arcs}}
 </previous_arcs>
 
+<current_arc>
+{{current_arc}}
+</current_arc>
+
+<future_arcs>
+{{future_arcs}}
+</future_arcs>
+
 <current_scene>
 {{current_scene}}
 </current_scene>
@@ -72,6 +87,14 @@ requiredVariables:
 <start_episode_number>
 {{start_episode_number}}
 </start_episode_number>
+
+<end_episode_number>
+{{end_episode_number}}
+</end_episode_number>
+
+<arc_to_revise>
+{{arc_to_revise}}
+</arc_to_revise>
 
 <arc_request>
 {{arc_request}}

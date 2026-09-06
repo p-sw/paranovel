@@ -430,6 +430,7 @@ describe('backend core', () => {
                       inputType: 'text',
                       options: [],
                       required: true,
+                      suggestedAnswer: '달 없는 밤',
                     }),
                   },
                 },
@@ -442,7 +443,7 @@ describe('backend core', () => {
             runId: 'run-2',
             result: {
               content: '', usage: {}, model: 'test',
-              toolCalls: [{ id: 'tool-2', type: 'function', function: { name: 'ask_project_details', arguments: JSON.stringify({ id: 'tone', field: 'tone', prompt: '분위기는?', inputType: 'single', options: ['밝음', '어두움'], required: false }) } }],
+              toolCalls: [{ id: 'tool-2', type: 'function', function: { name: 'ask_project_details', arguments: JSON.stringify({ id: 'tone', field: 'tone', prompt: '분위기는?', inputType: 'single', options: ['밝음', '어두움'], required: false, suggestedAnswer: '' }) } }],
             },
           };
         }
@@ -462,15 +463,17 @@ describe('backend core', () => {
           genreTags: ['판타지'],
           details: '',
           defaultTargetChars: 5000,
+          targetEpisode: 5,
+          targetEpisodeSource: 'AI',
           canon: [],
-          arc: {
+          arcs: [{
             title: '달의 흔적',
             startEpisode: 1,
             endEpisode: 5,
             goal: '첫 흔적을 찾는다.',
             conflict: '추격자가 방해한다.',
             reversalPlan: [],
-          },
+          }],
         },
       })),
     };
@@ -488,8 +491,11 @@ describe('backend core', () => {
       answer: '달 없는 밤',
     });
     expect(titleAnswered.step).toMatchObject({ type: 'question', question: { required: false } });
-    const ready = await wizard.skip(started.session.id, {
+    const toneQuestion = await wizard.skip(started.session.id, {
       questionId: titleAnswered.step.type === 'question' ? titleAnswered.step.question.id : '',
+    });
+    const ready = await wizard.skip(started.session.id, {
+      questionId: toneQuestion.step.type === 'question' ? toneQuestion.step.question.id : '',
     });
     expect(ready.step.type).toBe('ready');
     const committed = await wizard.commit(started.session.id);

@@ -26,7 +26,7 @@ export class ArcsController {
 
   @Delete(':arcId')
   @HttpCode(204)
-  remove(@Param('projectId') projectId: string, @Param('arcId') arcId: string): void {
-    this.arcs.remove(projectId, arcId);
+  remove(@Param('projectId') projectId: string, @Param('arcId') arcId: string, @Body() body: unknown): void {
+    this.arcs.remove(projectId, arcId, body);
   }
 }

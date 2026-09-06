@@ -38,6 +38,6 @@ describe('mobile entry flows', () => {
 
     expect(screen.getByLabelText(/로그라인/)).toBeTruthy();
     expect(screen.queryByLabelText('소설 제목')).toBeNull();
-    expect(screen.getByText('제목은 다음 단계에서 AI가 반드시 직접 물어봐요.')).toBeTruthy();
+    expect(screen.getByText('다음 단계에서 AI가 작품 제목을 추천해요. 마음에 들지 않으면 바로 고칠 수 있어요.')).toBeTruthy();
   });
 });

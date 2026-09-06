@@ -24,6 +24,8 @@ export interface ProjectView {
   genreTags: string[];
   details: string;
   defaultTargetChars: number;
+  targetEpisode: number | null;
+  targetEpisodeSource: 'USER' | 'AI' | null;
   revision: number;
   episodeCount: number;
   lastEpisodeNumber: number | null;
@@ -61,8 +63,16 @@ export class ProjectsService {
     genreTags: string[];
     details?: string;
     defaultTargetChars?: number;
+    targetEpisode?: number;
+    targetEpisodeSource?: 'USER' | 'AI';
     id?: string;
   }): ProjectView {
+    if ((input.targetEpisode === undefined) !== (input.targetEpisodeSource === undefined)) {
+      throw new BadRequestException('targetEpisode and targetEpisodeSource must be supplied together');
+    }
+    if (input.targetEpisode !== undefined && (!Number.isInteger(input.targetEpisode) || input.targetEpisode < 5 || input.targetEpisode > 2_000)) {
+      throw new BadRequestException('targetEpisode must be between 5 and 2000');
+    }
     const stamp = now();
     const row = {
       id: input.id ?? id(),
@@ -71,6 +81,8 @@ export class ProjectsService {
       genreTagsJson: stringifyJson(input.genreTags),
       detailsJson: stringifyJson(input.details ?? ''),
       defaultTargetChars: input.defaultTargetChars ?? 5_000,
+      targetEpisode: input.targetEpisode ?? null,
+      targetEpisodeSource: input.targetEpisodeSource ?? null,
       nextEpisodeNumber: 1,
       revision: 1,
       createdAt: stamp,
@@ -155,6 +167,8 @@ export class ProjectsService {
       genreTags: parseJson(row.genreTagsJson, []),
       details: parseJson(row.detailsJson, row.detailsJson),
       defaultTargetChars: row.defaultTargetChars,
+      targetEpisode: row.targetEpisode,
+      targetEpisodeSource: row.targetEpisodeSource as 'USER' | 'AI' | null,
       revision: row.revision,
       episodeCount: aggregate?.count ?? 0,
       lastEpisodeNumber: last,

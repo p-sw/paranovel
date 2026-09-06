@@ -5,12 +5,12 @@ All routes use the `/api` global prefix. JSON errors contain `statusCode`, `erro
 ## Projects and setup
 
 - `GET /projects`, `GET|PATCH|DELETE /projects/:projectId`; PATCH requires `expectedRevision`.
-- `POST /project-sessions` — `{ logline, genreTags }`; title is deliberately rejected here and is always collected by the AI tool.
+- `POST /project-sessions` — `{ logline, genreTags }`; title is deliberately rejected here. The AI's first question must provide an editable title recommendation.
 - `GET /project-sessions/:sessionId` — includes ordered `history` and opaque `stateToken` alongside the current step. Reading previous questions does not modify the session.
-- `POST /project-sessions/:sessionId/respond` — `{ questionId, answer }`, `{ questionId, otherAnswer }`, or `{ questionId, skipOptional: true }`; required questions cannot be skipped. Choice answers must match the supplied options; nonempty `otherAnswer` is exclusive to choice questions and cannot accompany `answer`. New clients include zero-based `position` and `expectedState`; changing a previous answer invalidates later answers and the blueprint. An unchanged answer preserves them. Stale state returns 409.
+- `POST /project-sessions/:sessionId/respond` — `{ questionId, answer }`, `{ questionId, otherAnswer }`, or `{ questionId, skipOptional: true }`; required questions cannot be skipped. The optional target-episode question always follows the title: a whole number from 5 through 2,000 records a user ending, while skipping delegates the ending length to AI. Choice answers must match the supplied options; nonempty `otherAnswer` is exclusive to choice questions and cannot accompany `answer`. New clients include zero-based `position` and `expectedState`; changing a previous answer invalidates later answers and the blueprint. An unchanged answer preserves them. Stale state returns 409.
 - `POST /project-sessions/:sessionId/turn` — answer alias using `{ questionId, answer }`.
 - `POST /project-sessions/:sessionId/skip` — skip the pending optional question; body `{ questionId? }`.
-- `POST /project-sessions/:sessionId/commit` — optional `{ blueprint, expectedState }`; an edited blueprint is strictly validated, including its required title and 5–20 episode arc.
+- `POST /project-sessions/:sessionId/commit` — optional `{ blueprint, expectedState }`; an edited blueprint is strictly validated. It includes the reviewed title, detailed initial Canon, ending target/source, and one or more 5–20 episode arcs that cover episode 1 through the ending without gaps or overlaps. The first arc is committed as `ACTIVE`; later arcs are committed as `PLANNED`. Project, Canon, arcs, and the session transition commit atomically. Canon and the active arc are indexed afterward, and replaying a committed session retries that indexing safely.
 
 ## Project AI chat
 
@@ -56,8 +56,9 @@ Selective repair emits `MEMORY`, `REPAIRING`, and `CHECKING` stages, without rep
 
 - `GET|POST /projects/:projectId/canon`, `POST .../canon/generate`, `GET|PATCH|DELETE .../canon/:canonId`; PATCH requires `expectedRevision`.
   `CHARACTER_APPEARANCE` stores detailed freeform visual facts in `content`, separate from `CHARACTER`. AI-generated entries remain candidates until approved.
-- `GET|POST /projects/:projectId/arcs`, `GET .../arcs/current`, `POST .../arcs/plan`, `PATCH|DELETE .../arcs/:arcId`; the plan route returns a strict AI proposal and PATCH requires `expectedRevision`.
-  Activating a new arc archives the previously active arc.
+- `GET|POST /projects/:projectId/arcs`, `GET .../arcs/current`, `POST .../arcs/plan`, `PATCH|DELETE .../arcs/:arcId`; list results are ordered by episode range. New arcs may be `PLANNED` or `ACTIVE`. The plan route returns a strict AI proposal for the earliest writable range: it repairs a gap before later plans first, or revises the planned arc that starts there in place with `replaceArcId` and `replaceArcRevision`, preserving its exact range. A new plan cannot cross the next planned arc or the project's ending target, and must reach that boundary or leave at least five episodes for another arc.
+- Arc PATCH requires `expectedRevision`. `PLANNED` arcs are freely editable, but only the earliest contiguous planned arc may become `ACTIVE`; editing `ACTIVE` plan fields requires `confirmProtected: true`. `COMPLETE` and `ARCHIVED` arcs are read-only and cannot be reactivated. Activating a future arc marks the previous current arc `COMPLETE` when its range has been written, or `ARCHIVED` when it is replaced early; early replacement requires explicit confirmation.
+- Arc DELETE requires `{ expectedRevision }` and only removes a `PLANNED` future arc. Stale revisions and deletion of current or past arcs return 409.
 - `GET|POST /improvements`, `PATCH|DELETE /improvements/:improvementId`; PATCH requires `expectedRevision`.
 - `POST /improvement-candidates` — `{ source: 'EDITOR'|'COMPARISON', projectId?, original, revised }`; extracts improvements in the revised (after) manuscript relative to the original (before). For `COMPARISON`, the original can be an AI draft generated from a brief or a user-provided manuscript. Candidates are transient.
 - `POST /improvements/batch` — `{ projectId?, candidates }`; only this call persists accepted candidates. Optional `Idempotency-Key` (client UUID recommended) makes an identical retry return the original `{ improvements }`; reuse with a different body returns 409. Every candidate is validated before one atomic SQLite transaction.
