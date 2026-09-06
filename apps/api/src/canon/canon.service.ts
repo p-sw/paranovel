@@ -9,6 +9,7 @@ import { AiRunnerService } from '../ai/ai-runner.service';
 import { worldbuildingSchema, worldbuildingValidator } from '../ai/ai.schemas';
 import { DatabaseService } from '../database/database.service';
 import { canonEntries, episodes } from '../database/schema';
+import { formatCanonMemory } from '../memory/canon-memory';
 import { MemoryService } from '../memory/memory.service';
 import {
   assertEnum,
@@ -204,9 +205,10 @@ export class CanonService {
   private async index(row: typeof canonEntries.$inferSelect): Promise<void> {
     await this.memory.indexSource({
       projectId: row.projectId,
+      sideStoryGroupId: row.sideStoryGroupId,
       sourceType: 'CANON',
       sourceId: row.id,
-      text: `${row.category}: ${row.name}\n별칭: ${parseJson<string[]>(row.aliasesJson, []).join(', ')}\n${row.content}`,
+      text: formatCanonMemory(row),
     });
   }
 

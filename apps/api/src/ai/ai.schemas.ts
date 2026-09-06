@@ -14,9 +14,9 @@ const canonCategoryValidator = z.enum([
 ]);
 const canonDraftValidator = z.object({
   category: canonCategoryValidator,
-  name: z.string().min(1),
+  name: z.string().trim().min(1).max(200),
   aliases: z.array(z.string()),
-  content: z.string().min(1),
+  content: z.string().trim().min(1).max(50_000),
   metadata: z.record(z.string(), z.unknown()),
 });
 
@@ -82,57 +82,93 @@ export const worldbuildingValidator = z.object({
 
 export const projectBlueprintValidator = z
   .object({
-    title: z.string().trim().min(1),
-    logline: z.string().trim().min(1),
+    title: z.string().trim().min(1).max(200),
+    logline: z.string().trim().min(1).max(2_000),
     genreTags: z.array(z.string().trim().min(1)).min(1),
-    details: z.string(),
+    details: z.string().max(20_000),
     defaultTargetChars: z.number().int().min(500).max(30_000),
+    targetEpisode: z.number().int().min(5).max(2_000),
+    targetEpisodeSource: z.enum(['USER', 'AI']),
     canon: z.array(canonDraftValidator),
-    arc: z.object({
-      title: z.string().trim().min(1),
+    arcs: z.array(z.object({
+      title: z.string().trim().min(1).max(200),
       startEpisode: z.number().int().positive(),
       endEpisode: z.number().int().positive(),
-      goal: z.string().trim().min(1),
-      conflict: z.string().trim().min(1),
+      goal: z.string().trim().min(1).max(10_000),
+      conflict: z.string().trim().min(1).max(10_000),
       reversalPlan: z.array(
-        z.object({ episode: z.number().int().positive(), description: z.string().trim().min(1) }),
+        z.object({ episode: z.number().int().positive(), description: z.string().trim().min(1).max(10_000) }),
       ),
-    }),
+    })).min(1).max(100),
   })
-  .refine(
-    ({ arc }) => {
+  .superRefine((blueprint, context) => {
+    blueprint.arcs.forEach((arc, index) => {
       const span = arc.endEpisode - arc.startEpisode + 1;
-      return span >= 5 && span <= 20;
-    },
-    { message: 'Blueprint arc must span between 5 and 20 episodes', path: ['arc'] },
-  );
+      if (span < 5 || span > 20) {
+        context.addIssue({
+          code: 'custom', message: 'Blueprint arcs must span between 5 and 20 episodes', path: ['arcs', index],
+        });
+      }
+      const expectedStart = index === 0 ? 1 : blueprint.arcs[index - 1]!.endEpisode + 1;
+      if (arc.startEpisode !== expectedStart) {
+        context.addIssue({
+          code: 'custom', message: 'Blueprint arcs must be contiguous from episode 1', path: ['arcs', index, 'startEpisode'],
+        });
+      }
+      arc.reversalPlan.forEach((beat, beatIndex) => {
+        if (beat.episode < arc.startEpisode || beat.episode > arc.endEpisode) {
+          context.addIssue({
+            code: 'custom', message: 'Reversal episodes must be inside their arc', path: ['arcs', index, 'reversalPlan', beatIndex, 'episode'],
+          });
+        }
+      });
+    });
+    if (blueprint.arcs.at(-1)?.endEpisode !== blueprint.targetEpisode) {
+      context.addIssue({
+        code: 'custom', message: 'The final arc must end at targetEpisode', path: ['targetEpisode'],
+      });
+    }
+  });
 
 export const arcPlanValidator = z
   .object({
-    title: z.string().min(1),
+    title: z.string().trim().min(1).max(200),
     startEpisodeNumber: z.number().int().positive(),
     endEpisodeNumber: z.number().int().positive(),
-    goal: z.string().min(1),
-    conflict: z.string().min(1),
+    goal: z.string().trim().min(1).max(10_000),
+    conflict: z.string().trim().min(1).max(10_000),
     reversalPlan: z.array(
-      z.object({ episode: z.number().int().positive(), description: z.string().min(1) }),
+      z.object({ episode: z.number().int().positive(), description: z.string().trim().min(1).max(10_000) }),
     ),
     episodeDirections: z.array(
       z.object({
         episode: z.number().int().positive(),
-        title: z.string().min(1),
-        direction: z.string().min(1),
+        title: z.string().trim().min(1).max(200),
+        direction: z.string().trim().min(1).max(20_000),
       }),
     ),
     conflicts: z.array(z.string()),
   })
-  .refine(
-    (value) => {
+  .superRefine((value, context) => {
       const span = value.endEpisodeNumber - value.startEpisodeNumber + 1;
-      return span >= 5 && span <= 20;
-    },
-    { message: 'Arc plan must span between 5 and 20 episodes' },
-  );
+      if (span < 5 || span > 20) {
+        context.addIssue({ code: 'custom', message: 'Arc plan must span between 5 and 20 episodes' });
+      }
+      value.reversalPlan.forEach((beat, index) => {
+        if (beat.episode < value.startEpisodeNumber || beat.episode > value.endEpisodeNumber) {
+          context.addIssue({
+            code: 'custom', message: 'Reversal episodes must be inside their arc', path: ['reversalPlan', index, 'episode'],
+          });
+        }
+      });
+      value.episodeDirections.forEach((direction, index) => {
+        if (direction.episode < value.startEpisodeNumber || direction.episode > value.endEpisodeNumber) {
+          context.addIssue({
+            code: 'custom', message: 'Episode directions must be inside their arc', path: ['episodeDirections', index, 'episode'],
+          });
+        }
+      });
+    });
 
 export const episodeDirectionSchema: JsonSchema = {
   type: 'object',
@@ -262,9 +298,9 @@ export const episodeMemorySchema: JsonSchema = {
             type: 'string',
             enum: ['CHARACTER', 'CHARACTER_APPEARANCE', 'LOCATION', 'ORGANIZATION', 'ABILITY', 'RULE', 'TIMELINE', 'OTHER'],
           },
-          name: { type: 'string' },
+          name: { type: 'string', minLength: 1, maxLength: 200 },
           aliases: stringArray,
-          content: { type: 'string' },
+          content: { type: 'string', minLength: 1, maxLength: 50000 },
           metadata: { type: 'object', additionalProperties: true },
         },
         required: ['category', 'name', 'aliases', 'content', 'metadata'],
@@ -308,9 +344,9 @@ export const worldbuildingSchema: JsonSchema = {
             type: 'string',
             enum: ['CHARACTER', 'CHARACTER_APPEARANCE', 'LOCATION', 'ORGANIZATION', 'ABILITY', 'RULE', 'TIMELINE', 'OTHER'],
           },
-          name: { type: 'string' },
+          name: { type: 'string', minLength: 1, maxLength: 200 },
           aliases: stringArray,
-          content: { type: 'string' },
+          content: { type: 'string', minLength: 1, maxLength: 50000 },
           metadata: { type: 'object', additionalProperties: true },
         },
         required: ['category', 'name', 'aliases', 'content', 'metadata'],
@@ -325,51 +361,61 @@ export const projectBlueprintSchema: JsonSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    title: { type: 'string' },
-    logline: { type: 'string' },
-    genreTags: stringArray,
-    details: { type: 'string' },
+    title: { type: 'string', minLength: 1, maxLength: 200 },
+    logline: { type: 'string', minLength: 1, maxLength: 2000 },
+    genreTags: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } },
+    details: { type: 'string', maxLength: 20000 },
     defaultTargetChars: { type: 'integer', minimum: 500, maximum: 30000 },
+    targetEpisode: { type: 'integer', minimum: 5, maximum: 2000 },
+    targetEpisodeSource: { type: 'string', enum: ['USER', 'AI'] },
     canon: worldbuildingSchema.properties
       ? (worldbuildingSchema.properties as Record<string, unknown>).suggestions
       : { type: 'array' },
-    arc: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        title: { type: 'string' },
-        startEpisode: { type: 'integer', minimum: 1 },
-        endEpisode: { type: 'integer', minimum: 1 },
-        goal: { type: 'string' },
-        conflict: { type: 'string' },
-        reversalPlan: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              episode: { type: 'integer', minimum: 1 },
-              description: { type: 'string' },
+    arcs: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 100,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          title: { type: 'string', minLength: 1, maxLength: 200 },
+          startEpisode: { type: 'integer', minimum: 1 },
+          endEpisode: { type: 'integer', minimum: 1 },
+          goal: { type: 'string', minLength: 1, maxLength: 10000 },
+          conflict: { type: 'string', minLength: 1, maxLength: 10000 },
+          reversalPlan: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                episode: { type: 'integer', minimum: 1 },
+                description: { type: 'string', minLength: 1, maxLength: 10000 },
+              },
+              required: ['episode', 'description'],
             },
-            required: ['episode', 'description'],
           },
         },
+        required: ['title', 'startEpisode', 'endEpisode', 'goal', 'conflict', 'reversalPlan'],
       },
-      required: ['title', 'startEpisode', 'endEpisode', 'goal', 'conflict', 'reversalPlan'],
     },
   },
-  required: ['title', 'logline', 'genreTags', 'details', 'defaultTargetChars', 'canon', 'arc'],
+  required: [
+    'title', 'logline', 'genreTags', 'details', 'defaultTargetChars',
+    'targetEpisode', 'targetEpisodeSource', 'canon', 'arcs',
+  ],
 };
 
 export const arcPlanSchema: JsonSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    title: { type: 'string' },
+    title: { type: 'string', minLength: 1, maxLength: 200 },
     startEpisodeNumber: { type: 'integer', minimum: 1 },
     endEpisodeNumber: { type: 'integer', minimum: 1 },
-    goal: { type: 'string' },
-    conflict: { type: 'string' },
+    goal: { type: 'string', minLength: 1, maxLength: 10000 },
+    conflict: { type: 'string', minLength: 1, maxLength: 10000 },
     reversalPlan: {
       type: 'array',
       items: {
@@ -377,7 +423,7 @@ export const arcPlanSchema: JsonSchema = {
         additionalProperties: false,
         properties: {
           episode: { type: 'integer', minimum: 1 },
-          description: { type: 'string' },
+          description: { type: 'string', minLength: 1, maxLength: 10000 },
         },
         required: ['episode', 'description'],
       },
@@ -389,8 +435,8 @@ export const arcPlanSchema: JsonSchema = {
         additionalProperties: false,
         properties: {
           episode: { type: 'integer', minimum: 1 },
-          title: { type: 'string' },
-          direction: { type: 'string' },
+          title: { type: 'string', minLength: 1, maxLength: 200 },
+          direction: { type: 'string', minLength: 1, maxLength: 20000 },
         },
         required: ['episode', 'title', 'direction'],
       },
@@ -426,8 +472,9 @@ export const projectInterviewTools: ToolDefinition[] = [
           inputType: { type: 'string', enum: ['text', 'long_text', 'single', 'multi'] },
           options: stringArray,
           required: { type: 'boolean' },
+          suggestedAnswer: { type: 'string', maxLength: 200 },
         },
-        required: ['id', 'field', 'prompt', 'inputType', 'options', 'required'],
+        required: ['id', 'field', 'prompt', 'inputType', 'options', 'required', 'suggestedAnswer'],
       },
     },
   },

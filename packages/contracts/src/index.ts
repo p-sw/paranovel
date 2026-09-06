@@ -58,12 +58,22 @@ export const projectSchema = z.object({
   genreTags: z.array(z.string().min(1)),
   details: z.string().optional(),
   defaultTargetChars: z.number().int().positive().default(5000),
+  targetEpisode: z.number().int().min(5).max(2_000).nullable().optional(),
+  targetEpisodeSource: z.enum(['USER', 'AI']).nullable().optional(),
   revision: z.number().int().positive(),
   nextEpisodeNumber: z.number().int().positive().optional(),
   episodeCount: z.number().int().nonnegative().optional(),
   lastEpisodeNumber: z.number().int().positive().nullable().optional(),
   createdAt: isoDateSchema,
   updatedAt: isoDateSchema,
+}).superRefine((project, context) => {
+  if ((project.targetEpisode == null) !== (project.targetEpisodeSource == null)) {
+    context.addIssue({
+      code: 'custom',
+      message: '목표 완결 회차와 결정 주체는 함께 있어야 합니다.',
+      path: ['targetEpisode'],
+    });
+  }
 });
 export type Project = z.infer<typeof projectSchema>;
 
@@ -74,6 +84,7 @@ export const setupQuestionSchema = z.object({
   options: z.array(z.string()).default([]),
   required: z.boolean(),
   field: z.string().optional(),
+  suggestedAnswer: z.string().max(200).optional(),
 });
 export type SetupQuestion = z.infer<typeof setupQuestionSchema>;
 
@@ -97,35 +108,73 @@ export type SetupAnswerRequest = z.infer<typeof setupAnswerRequestSchema>;
 
 export const canonDraftSchema = z.object({
   category: canonCategorySchema,
-  name: z.string().min(1),
+  name: z.string().trim().min(1).max(200),
   aliases: z.array(z.string()).default([]),
-  content: z.string().min(1),
+  content: z.string().trim().min(1).max(50_000),
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
 
 export const arcBeatSchema = z.object({
   id: idSchema.optional(),
   episode: z.number().int().positive(),
-  description: z.string().min(1),
+  description: z.string().trim().min(1).max(10_000),
 });
 
 export const arcDraftSchema = z.object({
-  title: z.string().min(1),
+  title: z.string().trim().min(1).max(200),
   startEpisode: z.number().int().positive(),
   endEpisode: z.number().int().positive(),
-  goal: z.string().min(1),
-  conflict: z.string().min(1),
+  goal: z.string().trim().min(1).max(10_000),
+  conflict: z.string().trim().min(1).max(10_000),
   reversalPlan: z.array(arcBeatSchema).default([]),
 });
 
 export const projectBlueprintSchema = z.object({
-  title: z.string().min(1),
-  logline: z.string().min(1),
+  title: z.string().trim().min(1).max(200),
+  logline: z.string().trim().min(1).max(2_000),
   genreTags: z.array(z.string().min(1)).min(1),
-  details: z.string().default(''),
+  details: z.string().max(20_000).default(''),
   defaultTargetChars: z.number().int().min(500).max(30_000).default(5_000),
+  targetEpisode: z.number().int().min(5).max(2_000),
+  targetEpisodeSource: z.enum(['USER', 'AI']),
   canon: z.array(canonDraftSchema).default([]),
-  arc: arcDraftSchema,
+  arcs: z.array(arcDraftSchema).min(1).max(100),
+}).superRefine((blueprint, context) => {
+  blueprint.arcs.forEach((arc, index) => {
+    const span = arc.endEpisode - arc.startEpisode + 1;
+    if (span < 5 || span > 20) {
+      context.addIssue({
+        code: 'custom',
+        message: '각 아크는 5화에서 20화 사이여야 합니다.',
+        path: ['arcs', index],
+      });
+    }
+    const expectedStart = index === 0 ? 1 : blueprint.arcs[index - 1]!.endEpisode + 1;
+    if (arc.startEpisode !== expectedStart) {
+      context.addIssue({
+        code: 'custom',
+        message: '아크는 1화부터 빈 구간 없이 이어져야 합니다.',
+        path: ['arcs', index, 'startEpisode'],
+      });
+    }
+    arc.reversalPlan.forEach((beat, beatIndex) => {
+      if (beat.episode < arc.startEpisode || beat.episode > arc.endEpisode) {
+        context.addIssue({
+          code: 'custom',
+          message: '반전 회차는 해당 아크 범위 안이어야 합니다.',
+          path: ['arcs', index, 'reversalPlan', beatIndex, 'episode'],
+        });
+      }
+    });
+  });
+  const last = blueprint.arcs.at(-1);
+  if (last && last.endEpisode !== blueprint.targetEpisode) {
+    context.addIssue({
+      code: 'custom',
+      message: '마지막 아크는 목표 완결 회차에 끝나야 합니다.',
+      path: ['targetEpisode'],
+    });
+  }
 });
 export type ProjectBlueprint = z.infer<typeof projectBlueprintSchema>;
 
@@ -223,6 +272,20 @@ export const arcSchema = arcDraftSchema.extend({
   revision: z.number().int().positive(),
   createdAt: isoDateSchema,
   updatedAt: isoDateSchema,
+}).superRefine((arc, context) => {
+  const span = arc.endEpisode - arc.startEpisode + 1;
+  if (span < 5 || span > 20) {
+    context.addIssue({ code: 'custom', message: '아크는 5화에서 20화 사이여야 합니다.' });
+  }
+  arc.reversalPlan.forEach((beat, index) => {
+    if (beat.episode < arc.startEpisode || beat.episode > arc.endEpisode) {
+      context.addIssue({
+        code: 'custom',
+        message: '반전 회차는 해당 아크 범위 안이어야 합니다.',
+        path: ['reversalPlan', index, 'episode'],
+      });
+    }
+  });
 });
 export type Arc = z.infer<typeof arcSchema>;
 

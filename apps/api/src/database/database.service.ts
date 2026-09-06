@@ -338,6 +338,20 @@ ALTER TABLE episodes_with_incomplete RENAME TO episodes;
 CREATE INDEX idx_episodes_project ON episodes(project_id, number);
 `;
 
+const PROJECT_TARGET_EPISODE_MIGRATION = `
+ALTER TABLE projects ADD COLUMN target_episode INTEGER
+  CHECK (target_episode IS NULL OR (typeof(target_episode) = 'integer' AND target_episode BETWEEN 5 AND 2000));
+ALTER TABLE projects ADD COLUMN target_episode_source TEXT
+  CHECK (
+    (target_episode IS NULL AND target_episode_source IS NULL)
+    OR (
+      target_episode IS NOT NULL
+      AND target_episode_source IS NOT NULL
+      AND target_episode_source IN ('USER','AI')
+    )
+  );
+`;
+
 const SIDE_STORIES_MIGRATION = `
 CREATE TABLE side_story_groups (
   id TEXT PRIMARY KEY,
@@ -485,7 +499,8 @@ export class DatabaseService implements OnApplicationShutdown {
       { version: 10, sql: EPISODE_SLOT_COUNTER_MIGRATION },
       { version: 11, sql: EDITOR_AI_MIGRATION },
       { version: 12, sql: INCOMPLETE_EPISODE_MIGRATION, rebuildsReferencedTable: true },
-      { version: 13, sql: SIDE_STORIES_MIGRATION, rebuildsReferencedTable: true },
+      { version: 13, sql: PROJECT_TARGET_EPISODE_MIGRATION },
+      { version: 14, sql: SIDE_STORIES_MIGRATION, rebuildsReferencedTable: true },
     ];
     this.connection.exec(
       'CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)',

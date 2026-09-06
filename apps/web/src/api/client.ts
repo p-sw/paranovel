@@ -44,6 +44,18 @@ export class ApiError extends Error {
 
 type JsonOptions = Omit<RequestInit, 'body'> & { body?: unknown };
 
+type ArcMutableFields = Pick<Arc, 'title' | 'startEpisode' | 'endEpisode' | 'goal' | 'conflict' | 'reversalPlan'>;
+type ArcWritableStatus = Extract<Arc['status'], 'PLANNED' | 'ACTIVE'>;
+type CreateArcInput = ArcMutableFields & {
+  status?: ArcWritableStatus;
+  confirmProtected?: boolean;
+};
+type UpdateArcInput = Partial<ArcMutableFields> & {
+  expectedRevision: number;
+  status?: ArcWritableStatus;
+  confirmProtected?: boolean;
+};
+
 async function json<T>(path: string, options: JsonOptions = {}): Promise<T> {
   const response = await fetch(`/api${path}`, {
     ...options,
@@ -413,15 +425,7 @@ export const api = {
         method: 'POST',
         body: request?.trim() ? { request: request.trim() } : {},
       }),
-    create: (projectId: string, input: {
-      title: string;
-      startEpisode: number;
-      endEpisode: number;
-      goal: string;
-      conflict: string;
-      reversalPlan: Array<{ id?: string; episode: number; description: string }>;
-      status?: Arc['status'];
-    }) =>
+    create: (projectId: string, input: CreateArcInput) =>
       json<Arc>(`/projects/${projectId}/arcs`, {
         method: 'POST',
         body: {
@@ -430,7 +434,7 @@ export const api = {
           endEpisodeNumber: input.endEpisode,
         },
       }),
-    update: (projectId: string, arcId: string, input: Partial<Arc> & { expectedRevision: number }) => {
+    update: (projectId: string, arcId: string, input: UpdateArcInput) => {
       const { startEpisode, endEpisode, ...rest } = input;
       return json<Arc>(`/projects/${projectId}/arcs/${arcId}`, {
         method: 'PATCH',
@@ -441,8 +445,11 @@ export const api = {
         },
       });
     },
-    remove: (projectId: string, arcId: string) =>
-      json<void>(`/projects/${projectId}/arcs/${arcId}`, { method: 'DELETE' }),
+    remove: (projectId: string, arcId: string, expectedRevision: number) =>
+      json<void>(`/projects/${projectId}/arcs/${arcId}`, {
+        method: 'DELETE',
+        body: { expectedRevision },
+      }),
   },
   improvements: {
     list: (projectId?: string) =>

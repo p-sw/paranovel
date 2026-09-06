@@ -8,6 +8,8 @@ export const projects = sqliteTable('projects', {
   genreTagsJson: text('genre_tags_json').notNull(),
   detailsJson: text('details_json').notNull(),
   defaultTargetChars: integer('default_target_chars').notNull(),
+  targetEpisode: integer('target_episode'),
+  targetEpisodeSource: text('target_episode_source'),
   nextEpisodeNumber: integer('next_episode_number').notNull(),
   revision: integer('revision').notNull(),
   createdAt: text('created_at').notNull(),

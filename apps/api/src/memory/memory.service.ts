@@ -8,6 +8,7 @@ import { and, eq, isNull, or } from 'drizzle-orm';
 import { OpenRouterGateway } from '../ai/openrouter.gateway';
 import { DatabaseService } from '../database/database.service';
 import { formatArcMemory } from './arc-memory';
+import { formatCanonMemory } from './canon-memory';
 import {
   arcs,
   canonEntries,
@@ -82,6 +83,7 @@ interface IndexedSourceSnapshot {
   flowPosition: number | null;
   fingerprint: string | null;
   projectId: string | null | undefined;
+  status?: string;
 }
 
 interface RankedMemoryRow {
@@ -127,6 +129,9 @@ export class MemoryService {
     const pieces = chunkText(input.text);
     const source = this.indexedSourceSnapshot(input.sourceType, input.sourceId);
     if (source.fingerprint !== null && input.projectId !== source.projectId) {
+      return;
+    }
+    if (input.sourceType === 'ARC' && !['ACTIVE', 'COMPLETE'].includes(source.status ?? '')) {
       return;
     }
     if (input.sideStoryGroupId !== undefined && source.fingerprint !== null) {
@@ -308,6 +313,12 @@ export class MemoryService {
              JOIN memory_chunks m ON m.id = f.chunk_id
              WHERE memory_chunks_fts MATCH ? AND (m.project_id = ? OR m.project_id IS NULL)
                AND (${flow.sql})
+               AND (m.source_type != 'ARC' OR EXISTS (
+                 SELECT 1 FROM arcs searchable_arc
+                 WHERE searchable_arc.id = m.source_id
+                   AND searchable_arc.project_id = ?
+                   AND searchable_arc.status IN ('ACTIVE', 'COMPLETE')
+               ))
              ORDER BY bm25(memory_chunks_fts)
              LIMIT ?`,
           )
@@ -315,6 +326,7 @@ export class MemoryService {
             match,
             projectId,
             ...flow.params,
+            projectId,
             candidateLimit,
           ) as RankedMemoryRow[];
         addRanked(rows.filter((row) => this.memoryRowAllowed(row, narrative)), 1);
@@ -348,6 +360,12 @@ export class MemoryService {
                    ${partition.boundary === undefined
                      ? ''
                      : `AND v.flow_position ${partition.inclusive ? '<=' : '<'} ?`}
+                   AND (m.source_type != 'ARC' OR EXISTS (
+                     SELECT 1 FROM arcs searchable_arc
+                     WHERE searchable_arc.id = m.source_id
+                       AND searchable_arc.project_id = ?
+                       AND searchable_arc.status IN ('ACTIVE', 'COMPLETE')
+                   ))
                  ORDER BY v.distance`,
               )
               .all(
@@ -356,6 +374,7 @@ export class MemoryService {
                 partition.projectKey,
                 partition.flowKey,
                 ...(partition.boundary === undefined ? [] : [BigInt(partition.boundary)]),
+                projectId,
               ) as Array<RankedMemoryRow & { distance: number }>;
           const rows = this.vectorFlowPartitions(projectId, narrative)
             .flatMap(searchPartition)
@@ -378,6 +397,7 @@ export class MemoryService {
         const source = this.database.orm.select({ arc: arcs, ordinal: memoryChunks.ordinal }).from(arcs)
           .innerJoin(memoryChunks, and(eq(memoryChunks.id, row.id), eq(memoryChunks.sourceId, arcs.id)))
           .where(and(eq(arcs.id, row.sourceId), eq(arcs.projectId, projectId))).get();
+        if (source && !['ACTIVE', 'COMPLETE'].includes(source.arc.status)) return [];
         const content = source ? chunkText(formatArcMemory(source.arc))[source.ordinal] : undefined;
         return content ? [{ ...row, content, score }] : [];
       });
@@ -468,6 +488,8 @@ export class MemoryService {
               logline: project.logline,
               genreTags: parseJson(project.genreTagsJson, []),
               details: parseJson(project.detailsJson, project.detailsJson),
+              targetEpisode: project.targetEpisode,
+              targetEpisodeSource: project.targetEpisodeSource,
             }
           : {},
       ),
@@ -839,7 +861,7 @@ export class MemoryService {
       const row = this.database.orm.select().from(arcs).where(eq(arcs.id, sourceId)).get();
       if (!row) return { flowKey: 'MAIN', flowPosition: null, fingerprint: '__MISSING__', projectId: undefined };
       return { flowKey: row.sideStoryGroupId ? `GROUP:${row.sideStoryGroupId}` : 'MAIN', flowPosition: null,
-        projectId: row.projectId, fingerprint: stringifyJson({ projectId: row.projectId,
+        projectId: row.projectId, status: row.status, fingerprint: stringifyJson({ projectId: row.projectId,
           groupId: row.sideStoryGroupId, revision: row.revision, status: row.status }) };
     }
     if (sourceType === 'IMPROVEMENT') {
@@ -911,10 +933,11 @@ export class MemoryService {
         projectId,
         sourceType: 'CANON',
         sourceId: entry.id,
-        text: `${entry.category}: ${entry.name}\n${entry.content}`,
+        text: formatCanonMemory(entry),
       });
     }
     for (const arc of this.database.orm.select().from(arcs).where(eq(arcs.projectId, projectId)).all()) {
+      if (!['ACTIVE', 'COMPLETE'].includes(arc.status)) continue;
       sources.push({
         projectId,
         sourceType: 'ARC',

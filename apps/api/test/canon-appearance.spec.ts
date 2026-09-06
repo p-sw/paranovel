@@ -131,7 +131,8 @@ describe('character appearance canon', () => {
     expect(episodeMemoryValidator.parse(extractedMemory).canonCandidates).toEqual([appearance]);
     expect(projectBlueprintValidator.parse({
       title: '기록의 문', logline: '기억을 읽는 기록관', genreTags: ['판타지'], details: '', defaultTargetChars: 5000,
-      canon: [appearance], arc: { title: '첫 기록', startEpisode: 1, endEpisode: 8, goal: '기록을 찾는다', conflict: '왕실의 방해', reversalPlan: [] },
+      targetEpisode: 8, targetEpisodeSource: 'USER', canon: [appearance],
+      arcs: [{ title: '첫 기록', startEpisode: 1, endEpisode: 8, goal: '기록을 찾는다', conflict: '왕실의 방해', reversalPlan: [] }],
     }).canon).toEqual([appearance]);
     for (const [schema, field] of [[worldbuildingSchema, 'suggestions'], [projectBlueprintSchema, 'canon'], [episodeMemorySchema, 'canonCandidates']] as const) {
       const properties = schema.properties as Record<string, { items: { properties: { category: { enum: string[] } } } }>;

@@ -275,9 +275,9 @@ describe('side-story API', () => {
   });
 });
 
-it('migrates a v12 database to v13 without losing episode dependents', () => {
+it('migrates a v13 project-target database to v14 without losing episode dependents', () => {
   const directory = mkdtempSync(join(tmpdir(), 'paranovel-side-story-migration-'));
-  const dbPath = join(directory, 'v12.sqlite');
+  const dbPath = join(directory, 'v13.sqlite');
   let legacy: Database.Database | undefined;
   let migrated: DatabaseService | undefined;
   try {
@@ -286,13 +286,14 @@ it('migrates a v12 database to v13 without losing episode dependents', () => {
     legacy.exec(`
       CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
       WITH RECURSIVE versions(version) AS (
-        SELECT 1 UNION ALL SELECT version + 1 FROM versions WHERE version < 12
+        SELECT 1 UNION ALL SELECT version + 1 FROM versions WHERE version < 13
       ) INSERT INTO schema_migrations SELECT version, '2026-09-01' FROM versions;
 
       CREATE TABLE projects (
         id TEXT PRIMARY KEY, title TEXT NOT NULL, logline TEXT NOT NULL,
         genre_tags_json TEXT NOT NULL DEFAULT '[]', details_json TEXT NOT NULL DEFAULT '{}',
         default_target_chars INTEGER NOT NULL DEFAULT 5000,
+        target_episode INTEGER, target_episode_source TEXT,
         next_episode_number INTEGER NOT NULL DEFAULT 1, revision INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT
       );
@@ -362,8 +363,10 @@ it('migrates a v12 database to v13 without losing episode dependents', () => {
         error TEXT, run_id TEXT, created_at TEXT NOT NULL
       );
 
-      INSERT INTO projects (id, title, logline, next_episode_number, created_at, updated_at)
-        VALUES ('project', '기록관', '문을 연다.', 2, '2026-09-01', '2026-09-01');
+      INSERT INTO projects (
+        id, title, logline, target_episode, target_episode_source,
+        next_episode_number, created_at, updated_at
+      ) VALUES ('project', '기록관', '문을 연다.', 20, 'USER', 2, '2026-09-01', '2026-09-01');
       INSERT INTO episodes (id, project_id, number, title, direction, content, status, created_at, updated_at)
         VALUES ('episode', 'project', 1, '첫 회차', '문을 연다.', '문이 열렸다.', 'CONFIRMED', '2026-09-01', '2026-09-01');
       INSERT INTO episode_idempotency VALUES ('project', 'request', 'episode', 'hash', '2026-09-01');
@@ -406,12 +409,14 @@ it('migrates a v12 database to v13 without losing episode dependents', () => {
       .toEqual({ side_story_group_id: null });
     expect(migrated.connection.prepare('SELECT side_story_group_id FROM arcs').get())
       .toEqual({ side_story_group_id: null });
+    expect(migrated.connection.prepare('SELECT target_episode, target_episode_source FROM projects').get())
+      .toEqual({ target_episode: 20, target_episode_source: 'USER' });
     expect(migrated.connection.prepare('SELECT source_type, flow_key, flow_position FROM memory_chunks ORDER BY source_type').all())
       .toEqual([
         { source_type: 'CANON', flow_key: 'SHARED', flow_position: null },
         { source_type: 'EPISODE', flow_key: 'MAIN', flow_position: 1 },
       ]);
-    expect(migrated.connection.prepare('SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 13').get())
+    expect(migrated.connection.prepare('SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 14').get())
       .toEqual({ count: 1 });
     expect(migrated.connection.pragma('foreign_key_check')).toEqual([]);
   } finally {
