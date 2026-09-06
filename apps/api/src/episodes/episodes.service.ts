@@ -1,4 +1,3 @@
-import { flushHighlightFileCleanup } from '../highlights/highlight-storage.service';
 import {
   BadGatewayException,
   BadRequestException,
@@ -214,7 +213,6 @@ export class EpisodesService {
     this.memory.removeSource('EPISODE', episodeId);
     this.memory.removeSource('EPISODE_SUMMARY', episodeId);
     this.database.orm.delete(episodes).where(eq(episodes.id, episodeId)).run();
-    flushHighlightFileCleanup(this.database);
     this.invalidateFrom(projectId, current.number + 1);
   }
 

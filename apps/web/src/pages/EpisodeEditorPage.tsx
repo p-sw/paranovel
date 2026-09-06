@@ -43,7 +43,6 @@ import type {
 } from '../types';
 import { Badge, Button, ErrorState, FieldError, IconButton, Sheet, Spinner } from '../components/Ui';
 import CandidateEditor from '../components/CandidateEditor';
-import EpisodeHighlightWorkspace from '../components/EpisodeHighlightWorkspace';
 import { defaultCandidateSelection } from '../candidateSelection';
 import {
   clearEpisodeDraftBackup,
@@ -76,7 +75,6 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
   const dirtyWhileSavingRef = useRef(false);
   const initializedRef = useRef(false);
   const recoveryPendingRef = useRef(false);
-  const capturingHighlightRef = useRef(false);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [revision, setRevision] = useState(0);
   const [saveState, setSaveState] = useState<SaveState>('idle');
@@ -86,8 +84,6 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
   const [replacementOpen, setReplacementOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
   const [recoveryBackup, setRecoveryBackup] = useState<EpisodeDraftBackup | null>(null);
-  const [capturingHighlight, setCapturingHighlight] = useState(false);
-  const [reading, setReading] = useState(false);
   const [lastReplacement, setLastReplacement] = useState<{
     start: number;
     original: string;
@@ -124,7 +120,6 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
   }, [episodeId, episodeQuery.data, episodeQuery.isFetching]);
 
   const updateDraft = (patch: Partial<Draft>) => {
-    if (capturingHighlightRef.current) return;
     setDraft((current) => {
       const next = { ...current, ...patch };
       draftRef.current = next;
@@ -197,27 +192,6 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
     }
   }, [episodeId, episodeQuery.data, projectId, queryClient]);
 
-  const captureHighlightSource = async (): Promise<Episode> => {
-    if (capturingHighlightRef.current) throw new Error('원고를 저장하고 있어요. 잠시 기다려 주세요.');
-    capturingHighlightRef.current = true;
-    setCapturingHighlight(true);
-    try {
-      let saved = await saveNow();
-      // saveNow may have saved an older snapshot while a newer edit was
-      // waiting behind it. A paid image must use the fully drained draft.
-      while (saved && (
-        draftRef.current.title !== savedRef.current.title ||
-        draftRef.current.direction !== savedRef.current.direction ||
-        draftRef.current.content !== savedRef.current.content
-      )) saved = await saveNow();
-      if (!saved) throw new Error('원고를 불러온 뒤 다시 시도해 주세요.');
-      return { ...saved, ...savedRef.current, revision: revisionRef.current };
-    } finally {
-      capturingHighlightRef.current = false;
-      setCapturingHighlight(false);
-    }
-  };
-
   const latestSaveNowRef = useRef(saveNow);
   latestSaveNowRef.current = saveNow;
 
@@ -285,7 +259,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
 
   const selected = Boolean(selection && selection.end > selection.start && selection.text);
   const isBusy = continuationOpen;
-  const editorLocked = isBusy || Boolean(recoveryBackup) || capturingHighlight;
+  const editorLocked = isBusy || Boolean(recoveryBackup);
 
   const restoreBackup = () => {
     if (!recoveryBackup) return;
@@ -363,26 +337,16 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
           </section>
         ) : null}
 
-        <EpisodeHighlightWorkspace
-          projectId={projectId}
-          episodeId={episodeId}
-          content={draft.content}
-          reading={reading}
-          onReadingChange={(value) => { setReading(value); setSelection(null); }}
-          captureSource={captureHighlightSource}
-          disabled={editorLocked || replacementOpen}
-        >
-          {(preview) => <div className="editor-paper">
+        <div className="editor-paper">
           <input
             className="editor-title-input"
             aria-label="회차 제목"
             value={draft.title}
             onChange={(event) => updateDraft({ title: event.target.value })}
             placeholder="회차 제목"
-            readOnly={reading}
             disabled={editorLocked}
           />
-          {preview ?? <textarea
+          <textarea
             ref={textareaRef}
             className="story-editor"
             aria-label="회차 본문"
@@ -394,16 +358,15 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
             onSelect={captureSelection}
             onPointerUp={captureSelection}
             onKeyUp={captureSelection}
-          />}
-        </div>}
-        </EpisodeHighlightWorkspace>
+          />
+        </div>
 
-        {!reading && <footer className="editor-actionbar">
+        <footer className="editor-actionbar">
           <div className="hidden text-xs text-muted sm:block">{characterCount(draft.content)}자</div>
           {selected ? (
             <Button
               className="editor-ai-action"
-              disabled={editorLocked}
+              disabled={Boolean(recoveryBackup)}
               onPointerDown={(event: ReactPointerEvent<HTMLButtonElement>) => {
                 event.preventDefault();
                 captureSelection();
@@ -416,7 +379,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
           ) : (
             <Button
               className="editor-ai-action"
-              disabled={editorLocked}
+              disabled={Boolean(recoveryBackup)}
               onPointerDown={(event: ReactPointerEvent<HTMLButtonElement>) => {
                 event.preventDefault();
                 captureSelection();
@@ -433,11 +396,11 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
           <IconButton label="장면과 기억 보기" className="sm:hidden" onClick={() => setContextOpen(true)}>
             <PanelRightOpen className="size-5" />
           </IconButton>
-        </footer>}
+        </footer>
       </section>
 
       <aside className="editor-context-panel">
-        <ContextPanel disabled={capturingHighlight} projectId={projectId} episode={{ ...episode, ...draft, revision }} onDirectionChange={(direction) => updateDraft({ direction })} onFinalize={async () => {
+        <ContextPanel projectId={projectId} episode={{ ...episode, ...draft, revision }} onDirectionChange={(direction) => updateDraft({ direction })} onFinalize={async () => {
           await saveNow();
           const finalized = await api.episodes.finalize(projectId, episodeId, revisionRef.current);
           revisionRef.current = finalized.revision;
@@ -449,7 +412,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
       </aside>
 
       <Sheet open={contextOpen} onOpenChange={setContextOpen} title="장면과 기억" wide>
-        <ContextPanel disabled={capturingHighlight} projectId={projectId} episode={{ ...episode, ...draft, revision }} onDirectionChange={(direction) => updateDraft({ direction })} onFinalize={async () => {
+        <ContextPanel projectId={projectId} episode={{ ...episode, ...draft, revision }} onDirectionChange={(direction) => updateDraft({ direction })} onFinalize={async () => {
           await saveNow();
           const finalized = await api.episodes.finalize(projectId, episodeId, revisionRef.current);
           revisionRef.current = finalized.revision;
@@ -550,13 +513,11 @@ function ContextPanel({
   episode,
   onDirectionChange,
   onFinalize,
-  disabled,
 }: {
   projectId: string;
   episode: Episode;
   onDirectionChange: (value: string) => void;
   onFinalize: () => Promise<void>;
-  disabled?: boolean;
 }) {
   const [finalizing, setFinalizing] = useState(false);
   const [error, setError] = useState('');
@@ -565,7 +526,7 @@ function ContextPanel({
   const fresh = summary?.sourceRevision === episode.revision && !summary?.stale;
 
   return (
-    <fieldset className="min-w-0" disabled={disabled}><Tabs.Root defaultValue="scene" className="context-tabs">
+    <Tabs.Root defaultValue="scene" className="context-tabs">
       <Tabs.List className="tabs-list" aria-label="회차 컨텍스트">
         <Tabs.Trigger className="tabs-trigger" value="scene"><MapPin className="size-4" /> 장면</Tabs.Trigger>
         <Tabs.Trigger className="tabs-trigger" value="memory"><History className="size-4" /> 회차 기억</Tabs.Trigger>
@@ -630,7 +591,7 @@ function ContextPanel({
         {finalizeIssues.length ? <div className="warning-box danger mt-3" role="alert"><strong>정합성 차단 이슈를 먼저 고쳐 주세요</strong><ul>{finalizeIssues.map((issue, index) => <li key={`${issue.explanation}-${index}`}>{issue.explanation}</li>)}</ul></div> : null}
         <FieldError>{error}</FieldError>
       </Tabs.Content>
-    </Tabs.Root></fieldset>
+    </Tabs.Root>
   );
 }
 

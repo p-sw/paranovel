@@ -1,5 +1,5 @@
 import { aiStreamEventSchema } from '@paranovel/contracts';
-import type { ChatHistory, ChatProposal, HighlightState } from '@paranovel/contracts';
+import type { ChatHistory, ChatProposal } from '@paranovel/contracts';
 import type {
   Arc,
   ArcPlanProposal,
@@ -151,23 +151,6 @@ async function ndjson(
 }
 
 export const api = {
-  highlights: {
-    get: (projectId: string, episodeId: string) =>
-      json<HighlightState>(`/projects/${projectId}/episodes/${episodeId}/highlight`),
-    generate: (projectId: string, episodeId: string, expectedRevision: number, idempotencyKey: string) =>
-      json<HighlightState>(`/projects/${projectId}/episodes/${episodeId}/highlight/generate`, {
-        method: 'POST', body: { expectedRevision }, headers: { 'Idempotency-Key': idempotencyKey },
-      }),
-    place: (projectId: string, episodeId: string, input: {
-      expectedEpisodeRevision: number; expectedImageId: string; afterParagraphId: number;
-    }) => json<HighlightState>(`/projects/${projectId}/episodes/${episodeId}/highlight/placement`, {
-      method: 'PATCH', body: input,
-    }),
-    remove: (projectId: string, episodeId: string, expectedImageId: string) =>
-      json<HighlightState>(`/projects/${projectId}/episodes/${episodeId}/highlight`, {
-        method: 'DELETE', body: { expectedImageId },
-      }),
-  },
   chat: {
     history: (projectId: string) => json<ChatHistory>(`/projects/${projectId}/chat/messages`),
     send: (projectId: string, input: { content: string; clientMessageId: string }) =>

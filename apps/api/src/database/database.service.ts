@@ -5,7 +5,6 @@ import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { schema } from './schema';
-import { EPISODE_HIGHLIGHT_MIGRATION } from './highlight-migration';
 
 const INITIAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -300,7 +299,8 @@ export class DatabaseService implements OnApplicationShutdown {
       { version: 4, sql: AI_RUN_OBSERVABILITY_MIGRATION },
       { version: 5, sql: PROJECT_CHAT_MIGRATION },
       { version: 6, sql: CHARACTER_APPEARANCE_MIGRATION },
-      { version: 7, sql: EPISODE_HIGHLIGHT_MIGRATION },
+      // Versions 7 and 8 remain reserved in existing database histories.
+      // The retired feature's stored tables and data are left untouched.
     ];
     this.connection.exec(
       'CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)',

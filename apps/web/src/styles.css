@@ -192,21 +192,6 @@
   .editor-paper { @apply mx-auto flex min-h-0 w-full max-w-[860px] flex-1 flex-col bg-surface shadow-sm; }
   .editor-title-input { @apply mx-5 mt-6 shrink-0 border-0 border-b border-line bg-transparent pb-4 font-story text-2xl font-bold outline-none placeholder:text-stone-300 sm:mx-10 sm:mt-9 sm:text-3xl; }
   .story-editor { @apply min-h-0 w-full flex-1 resize-none border-0 bg-transparent px-5 py-5 font-story text-[17px] leading-[2] text-ink outline-none placeholder:text-stone-300 disabled:opacity-70 sm:px-10 sm:py-7 sm:text-lg; }
-  .highlight-toolbar { @apply flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line bg-surface px-3 py-2; }
-  .highlight-view-switch, .highlight-actions { @apply flex flex-wrap items-center gap-1; }
-  .highlight-notices { @apply max-h-40 shrink-0 space-y-2 overflow-y-auto border-b border-line bg-paper px-4 py-3 text-xs leading-5 text-muted; }
-  .highlight-notices > p { @apply flex flex-wrap items-center gap-1.5; }
-  .highlight-text-action { @apply inline-flex min-h-8 items-center gap-1 font-semibold text-plum-700 underline; }
-  .episode-reading-preview { @apply min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-10 sm:py-7; }
-  .episode-reading-prose { @apply whitespace-pre-wrap font-story text-[17px] leading-[2] text-ink sm:text-lg; overflow-wrap: anywhere; }
-  .highlight-figure { @apply my-6; white-space: normal; }
-  .highlight-figure img { @apply mx-auto h-auto max-h-[80dvh] max-w-full rounded-xl object-contain; }
-  .highlight-unplaced { @apply mt-8 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900; }
-  .highlight-paragraph-choices { @apply space-y-3; }
-  .highlight-paragraph-choice { @apply flex cursor-pointer items-start gap-3 rounded-xl border border-line p-4 hover:border-plum-500; }
-  .highlight-paragraph-choice input { @apply mt-1 size-4 shrink-0 accent-plum-600; }
-  .highlight-paragraph-choice strong { @apply block text-xs font-bold text-muted; }
-  .highlight-paragraph-choice span span { @apply mt-2 block whitespace-pre-wrap font-story text-sm leading-6; overflow-wrap: anywhere; }
   .editor-actionbar { @apply z-20 flex min-h-16 shrink-0 items-center justify-between gap-2 border-t border-line bg-surface px-3 pb-[env(safe-area-inset-bottom)] sm:px-5; }
   .editor-ai-action { @apply mx-auto min-w-52; }
   .editor-context-panel { @apply hidden min-h-0 overflow-y-auto border-l border-line bg-surface lg:block; }

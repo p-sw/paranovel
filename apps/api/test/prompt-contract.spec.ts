@@ -29,7 +29,6 @@ const variables: Record<string, unknown> = {
   episode_direction: '기록관이 닫힌 문에 도착한다.',
   episode_number: 1,
   episode_text: '기록관은 문 앞에 섰다.',
-  episode_paragraphs: [{ id: 1, text: '기록관은 문 앞에 섰다.' }],
   previous_episode_memories: '[]',
   previous_paragraph: '기록관은 숨을 골랐다.',
   text_before_cursor: '기록관은 숨을 골랐다.',

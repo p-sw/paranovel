@@ -155,37 +155,6 @@ export class AiRunnerService {
     return this.execute(input, (request) => this.gateway.complete(request));
   }
 
-  async completeTool<T>(
-    input: PromptRunInput & {
-      tool: ToolDefinition;
-      validator: ZodType<T>;
-      validateValue?: (value: T) => boolean;
-    },
-  ): Promise<{ runId: string; value: T }> {
-    let value: T | undefined;
-    const { runId } = await this.execute({ ...input, tools: [input.tool], toolChoice: 'required' }, async (request) => {
-      let usage: CompletionUsage = {};
-      // Only planning is retried. The caller executes the paid image API once,
-      // after tool name, schema and placement have all been validated.
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        let result: CompletionResult;
-        try { result = await this.gateway.complete(request); }
-        catch { throw new BadGatewayException('이미지 장면 분석 요청을 처리하지 못했습니다.'); }
-        usage = addUsage(usage, result.usage);
-        const call = result.toolCalls.length === 1 ? result.toolCalls[0] : undefined;
-        if (call?.function.name !== input.tool.function.name) continue;
-        try {
-          const parsed = input.validator.parse(JSON.parse(call.function.arguments));
-          if (input.validateValue && !input.validateValue(parsed)) continue;
-          value = parsed;
-          return { ...result, usage };
-        } catch { /* A malformed tool plan is safe to ask for once more. */ }
-      }
-      throw new BadGatewayException('AI가 올바른 이미지 생성 계획을 반환하지 못했습니다.');
-    });
-    return { runId, value: value as T };
-  }
-
   async completeJson<T>(
     input: PromptRunInput & { validator: ZodType<T> },
   ): Promise<{ runId: string; value: T }> {
