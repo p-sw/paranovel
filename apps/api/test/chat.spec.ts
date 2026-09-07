@@ -8,11 +8,14 @@ import type { ChatHistory, ConversationStreamEvent } from '@paranovel/contracts'
 import { ArcsService } from '../src/arcs/arcs.service';
 import { CanonService } from '../src/canon/canon.service';
 import { ChatReadToolsService } from '../src/chat/chat-read-tools.service';
+import { ChatEpisodeToolsService } from '../src/chat/chat-episode-tools.service';
 import { ChatService } from '../src/chat/chat.service';
 import { chatOutputSchema, chatOutputValidator, type ChatOutput } from '../src/chat/chat.schemas';
 import { generateImageTagsTool, ImageTagToolService } from '../src/chat/image-tag-tool.service';
 import { DatabaseService } from '../src/database/database.service';
 import { chatMessages, chatProposals, chatThreads, episodes } from '../src/database/schema';
+import { EditorAiService } from '../src/episodes/editor-ai.service';
+import { EpisodesService } from '../src/episodes/episodes.service';
 import { ImprovementsService } from '../src/improvements/improvements.service';
 import { MemoryService } from '../src/memory/memory.service';
 import { ProjectsService } from '../src/projects/projects.service';
@@ -32,10 +35,14 @@ describe('project chat', () => {
   let improvements: ImprovementsService;
   let memory: MemoryService;
   let reads: ChatReadToolsService;
+  let episodeService: EpisodesService;
+  let editor: EditorAiService;
+  let episodeTools: ChatEpisodeToolsService;
   let chat: ChatService;
   let projectId: string;
   const completeChat = vi.fn();
   const completeJson = vi.fn();
+  const streamText = vi.fn();
   const infoLog = vi.fn();
   const errorLog = vi.fn();
   const embeddings = vi.fn(async (texts: string[]) => texts.map(() => [0, 1, 0, 1]));
@@ -50,16 +57,20 @@ describe('project chat', () => {
     database = new DatabaseService();
     memory = new MemoryService(database, { embeddings } as never);
     projects = new ProjectsService(database);
-    const ai = { completeChat, completeJson, chatModel: () => 'test-chat-model' } as unknown as AiRunnerService;
+    const ai = { completeChat, completeJson, streamText, chatModel: () => 'test-chat-model' } as unknown as AiRunnerService;
     canon = new CanonService(database, memory, ai);
     arcs = new ArcsService(database, memory, ai);
     improvements = new ImprovementsService(database, ai, memory);
     const imageTags = new ImageTagToolService(projects, canon, ai);
     reads = new ChatReadToolsService(database, projects, canon, arcs, improvements, memory, { isConfigured: () => false } as never, imageTags);
-    chat = new ChatService(database, ai, projects, canon, arcs, improvements, memory, reads);
+    episodeService = new EpisodesService(database, projects, memory, ai);
+    editor = new EditorAiService(database, episodeService, memory, ai);
+    episodeTools = new ChatEpisodeToolsService(database, episodeService, editor);
+    chat = new ChatService(database, ai, projects, canon, arcs, improvements, memory, reads, episodeTools);
     projectId = projects.createInternal({ title: '기록의 문', logline: '기억을 읽는 기록관', genreTags: ['판타지'] }).id;
     completeChat.mockReset();
     completeJson.mockReset();
+    streamText.mockReset();
     embeddings.mockClear();
   });
 
@@ -69,6 +80,145 @@ describe('project chat', () => {
     completeChat.mockResolvedValueOnce({ runId: 'chat-run', value: { reply: '검토할 내용을 준비했습니다.', proposals } });
     return chat.send(projectId, { content, clientMessageId }, undefined, threadId);
   }
+
+  it('plans and refines across chat turns, then delegates writing and review while preserving the draft separately', async () => {
+    const firstPlan = { title: '닫힌 기록실', direction: '하린이 기록실의 비밀을 발견한다.', conflicts: [] };
+    completeJson.mockResolvedValueOnce({ runId: 'plan-run', value: firstPlan });
+    completeChat.mockImplementationOnce(async (input) => {
+      expect(input.task).toBe('project_chat');
+      expect(input.readTools.map((tool: { function: { name: string } }) => tool.function.name))
+        .toEqual(expect.arrayContaining(['plan_episode', 'write_episode', 'edit_episode']));
+      expect(input.parallelToolNames).not.toEqual(expect.arrayContaining(['plan_episode']));
+      expect(input.parallelToolNames).not.toEqual(expect.arrayContaining(['write_episode']));
+      expect(input.parallelToolNames).not.toEqual(expect.arrayContaining(['edit_episode']));
+      const task = await input.readTool('plan_episode', JSON.stringify({ instruction: '기록실의 비밀을 찾는 회차를 구상해 줘', title: null, direction: null }));
+      expect(task).toMatchObject({ kind: 'DIRECTION', status: 'COMPLETE', title: firstPlan.title, direction: firstPlan.direction, episodeId: null });
+      return { runId: 'plan-chat', value: { reply: '기록실에서 비밀을 찾는 방향을 준비했어요.', proposals: [] } };
+    });
+    const planned = await chat.send(projectId, { content: '기록실의 비밀을 찾는 회차를 구상해 줘', clientMessageId: 'plan-episode' });
+    expect(planned.messages[1]?.episodeTasks).toMatchObject([{ kind: 'DIRECTION', status: 'COMPLETE', title: firstPlan.title }]);
+    expect(episodeService.list(projectId)).toHaveLength(0);
+    expect(completeJson.mock.calls[0]?.[0]).toMatchObject({ task: 'episode_direction', promptId: 'episode-direction' });
+
+    const refinedPlan = { title: '문 너머의 발소리', direction: '하린이 기록실에 숨고 문밖의 추격자를 피한다.', conflicts: [] };
+    completeJson.mockResolvedValueOnce({ runId: 'refine-run', value: refinedPlan });
+    completeChat.mockImplementationOnce(async (input) => {
+      expect(JSON.stringify(input.history)).toContain(firstPlan.direction);
+      const task = await input.readTool('plan_episode', JSON.stringify({ instruction: '비밀 발견보다 추격의 긴장감을 높여 줘', title: firstPlan.title, direction: firstPlan.direction }));
+      expect(task).toMatchObject({ kind: 'DIRECTION', status: 'COMPLETE', title: refinedPlan.title, direction: refinedPlan.direction });
+      return { runId: 'refine-chat', value: { reply: '추격자를 피하는 방향으로 바꿨어요.', proposals: [] } };
+    });
+    await chat.send(projectId, { content: '비밀 발견보다 추격의 긴장감을 높여 줘', clientMessageId: 'refine-episode' });
+    expect(completeJson.mock.calls[1]?.[0]).toMatchObject({ task: 'episode_direction_refine', promptId: 'episode-direction-refine' });
+    expect(episodeService.list(projectId)).toHaveLength(0);
+
+    const draft = '하린은 기록실 문을 닫았다.\n문밖에서 발소리가 멎었다.';
+    streamText.mockImplementationOnce(async (input, onDelta) => {
+      expect(input).toMatchObject({ task: 'episode_draft', promptId: 'episode-draft', variables: { episode_title: refinedPlan.title, episode_direction: refinedPlan.direction } });
+      onDelta('하린은 기록실 문을 닫았다.\n');
+      onDelta('문밖에서 발소리가 멎었다.');
+      return { runId: 'draft-run', result: { content: draft, toolCalls: [], usage: {}, model: 'test-writer' } };
+    });
+    completeJson.mockResolvedValueOnce({ runId: 'review-run', value: { issues: [] } });
+    const events: ConversationStreamEvent<ChatHistory>[] = [];
+    completeChat.mockImplementationOnce(async (input) => {
+      expect(JSON.stringify(input.history)).toContain(refinedPlan.direction);
+      const args = JSON.stringify({ title: refinedPlan.title, direction: refinedPlan.direction, targetChars: null });
+      const task = await input.readTool('write_episode', args);
+      expect(task).toMatchObject({ kind: 'WRITE', status: 'COMPLETE', title: refinedPlan.title, blocked: false });
+      expect(task).not.toHaveProperty('content');
+      expect(await input.readTool('write_episode', args)).toEqual(task);
+      input.onEvent({ type: 'delta', text: '새 회차 초안을 저장했어요.' });
+      return { runId: 'write-chat', value: { reply: '새 회차 초안을 저장했어요.', proposals: [] } };
+    });
+    const body = { content: '좋아. 그 방향대로 새 회차를 써 줘', clientMessageId: 'write-episode' };
+    const written = await chat.send(projectId, body, undefined, undefined, (event) => events.push(event));
+    const message = written.messages.at(-1)!;
+    expect(message).toMatchObject({ status: 'COMPLETE', content: '새 회차 초안을 저장했어요.', proposals: [],
+      episodeTasks: [{ kind: 'WRITE', status: 'COMPLETE', content: draft, title: refinedPlan.title }] });
+    expect(episodeService.list(projectId)).toMatchObject([{ id: message.episodeTasks[0]!.episodeId, content: draft, status: 'DRAFT', revision: 2 }]);
+    expect(streamText).toHaveBeenCalledOnce();
+    expect(completeJson.mock.calls[2]?.[0]).toMatchObject({ task: 'continuity_review', promptId: 'continuity-review', variables: { candidate_text: draft } });
+    expect(events.filter((event) => event.type === 'delta')).toEqual([{ type: 'delta', text: '새 회차 초안을 저장했어요.' }]);
+    expect(events).toContainEqual({ type: 'episode_task', task: expect.objectContaining({ kind: 'WRITE', status: 'COMPLETE', content: draft }) });
+    expect(chat.history(projectId)).toEqual(written);
+    expect(await chat.send(projectId, body)).toEqual(written);
+    expect(streamText).toHaveBeenCalledOnce();
+    await ask([], 'discuss-written', '다음 회차의 도입은 어떻게 이어 갈까?');
+    const history = JSON.stringify(completeChat.mock.calls.at(-1)![0].history);
+    expect(history).toContain(message.episodeTasks[0]!.episodeId);
+    expect(history).toContain(refinedPlan.title);
+  });
+
+  it('routes chat edits through Editor AI and exposes the same preview and application state on later turns', async () => {
+    const original = '하린은 문을 바라보았다.\n복도는 조용했다.';
+    const replacement = '하린은 문고리를 쥔 채 숨을 죽였다.';
+    const episode = await episodeService.create(projectId, { title: '닫힌 문', direction: '추격자를 피한다.', content: original });
+    const instruction = '첫 문장에서 하린의 긴장감을 높여 줘';
+    const events: ConversationStreamEvent<ChatHistory>[] = [];
+    completeChat.mockImplementationOnce(async (input) => {
+      const read = await input.readTool('read_project_record', JSON.stringify({ kind: 'EPISODE', id: episode.id, episodeNumber: null, offset: 0 }));
+      expect(read).toMatchObject({ id: episode.id, revision: 1, content: original });
+      const args = JSON.stringify({ episodeId: episode.id, expectedRevision: 1, instruction });
+      const task = await input.readTool('edit_episode', args);
+      expect(task).toMatchObject({ kind: 'EDIT', status: 'COMPLETE', episodeId: episode.id, editStatus: 'PENDING' });
+      expect(task).not.toHaveProperty('editorMessage');
+      expect(await input.readTool('edit_episode', args)).toEqual(task);
+      return { runId: 'parent-edit-chat', value: { reply: '첫 문장의 수정안을 준비했어요. 비교한 뒤 적용해 주세요.', proposals: [] } };
+    }).mockImplementationOnce(async (input) => {
+      expect(input).toMatchObject({ task: 'episode_editor', promptId: 'episode-editor', episodeId: episode.id, modelRole: 'WRITING',
+        variables: { episode_context: { editingMode: 'AUTO' } } });
+      expect(JSON.stringify(input.history)).toContain(instruction);
+      expect(input.readTools.map((tool: { function: { name: string } }) => tool.function.name)).not.toContain('write_episode');
+      expect(await input.readTool('replace_text', JSON.stringify({ title: '긴장감 높이기', original: '하린은 문을 바라보았다.', replacement })))
+        .toHaveProperty('status', 'PREVIEW_READY');
+      input.onEvent({ type: 'delta', text: '인물의 행동으로 긴장을 드러냈어요.' });
+      return { runId: 'child-editor', value: { reply: '인물의 행동으로 긴장을 드러냈어요.' } };
+    });
+    const result = await chat.send(projectId, { content: '기존 1화의 첫 문장에서 긴장감을 높여 줘', clientMessageId: 'edit-episode' }, undefined, undefined, (event) => events.push(event));
+    const task = result.messages[1]!.episodeTasks[0]!;
+    expect(task.editorMessage).toMatchObject({ status: 'COMPLETE', edit: { original: '하린은 문을 바라보았다.', replacement, status: 'PENDING' } });
+    expect(episodeService.get(projectId, episode.id)).toMatchObject({ content: original, revision: 1 });
+    expect(editor.history(projectId, episode.id).messages.at(-1)?.id).toBe(task.editorMessage!.id);
+    expect(events.filter((event) => event.type === 'delta')).toEqual([]);
+    expect(events).toContainEqual({ type: 'episode_task', task: expect.objectContaining({ kind: 'EDIT', status: 'COMPLETE', content: '인물의 행동으로 긴장을 드러냈어요.' }) });
+    expect(completeChat).toHaveBeenCalledTimes(2);
+    const applied = editor.apply(projectId, episode.id, task.editorMessage!.id);
+    expect(applied.episode).toMatchObject({ content: original.replace('하린은 문을 바라보았다.', replacement), revision: 2 });
+    expect(chat.history(projectId).messages[1]!.episodeTasks[0]!.editorMessage?.edit?.status).toBe('APPLIED');
+    await ask([], 'discuss-edited', '같은 부분을 더 짧게 다듬을까?');
+    const modelHistory = JSON.stringify(completeChat.mock.calls.at(-1)![0].history);
+    expect(modelHistory).toContain('APPLIED');
+    expect(modelHistory).toContain(episode.id);
+  });
+
+  it('replays a completed child draft when a failed parent chat turn is retried', async () => {
+    const draft = '하린은 기록실로 들어갔다.';
+    streamText.mockImplementationOnce(async (_input, onDelta) => {
+      onDelta(draft);
+      return { runId: 'child-write', result: { content: draft, toolCalls: [], usage: {}, model: 'writer' } };
+    });
+    completeJson.mockResolvedValueOnce({ runId: 'review', value: { issues: [] } });
+    const args = JSON.stringify({ title: '기록실', direction: '숨겨진 기록을 찾는다.', targetChars: null });
+    completeChat.mockImplementationOnce(async (input) => {
+      expect(await input.readTool('write_episode', args)).toMatchObject({ status: 'COMPLETE', kind: 'WRITE' });
+      throw new Error('parent reply failed after saving the child result');
+    });
+    const body = { content: '기록실에 들어가는 새 회차를 써 줘', clientMessageId: 'retry-write' };
+    await expect(chat.send(projectId, body)).rejects.toThrow(BadGatewayException);
+    const failed = chat.history(projectId).messages[1]!;
+    expect(failed).toMatchObject({ status: 'FAILED', episodeTasks: [{ status: 'COMPLETE', content: draft }] });
+    completeChat.mockImplementationOnce(async (input) => {
+      expect(input.history).toContainEqual(expect.objectContaining({ role: 'system', content: expect.stringContaining(failed.episodeTasks[0]!.episodeId!) }));
+      expect(await input.readTool('write_episode', args)).toMatchObject({ id: failed.episodeTasks[0]!.id, status: 'COMPLETE' });
+      return { runId: 'retried-parent', value: { reply: '저장된 초안을 확인해 주세요.', proposals: [] } };
+    });
+    const retried = await chat.send(projectId, body);
+    expect(retried.messages).toHaveLength(2);
+    expect(retried.messages[1]).toMatchObject({ id: failed.id, status: 'COMPLETE', episodeTasks: [{ id: failed.episodeTasks[0]!.id, status: 'COMPLETE' }] });
+    expect(episodeService.list(projectId)).toHaveLength(1);
+    expect(streamText).toHaveBeenCalledOnce();
+  });
 
   it('streams a pending turn, keeps proposals unavailable until complete, and replays the saved answer', async () => {
     const events: ConversationStreamEvent<ChatHistory>[] = [];
@@ -358,7 +508,7 @@ describe('project chat', () => {
       });
     }));
     const runner = new AiRunnerService(database, new PromptRegistryService(), new OpenRouterGateway(), { isConfigured: () => false } as never);
-    const service = new ChatService(database, runner, projects, canon, arcs, improvements, memory, reads);
+    const service = new ChatService(database, runner, projects, canon, arcs, improvements, memory, reads, episodeTools);
     const history = await service.send(projectId, { content: '작품을 설명해 줘', clientMessageId: 'wire' });
     expect(history.messages[1]!.status).toBe('COMPLETE');
     expect(bodies).toHaveLength(2);
@@ -624,7 +774,7 @@ describe('project chat', () => {
     vi.stubEnv('AI_CHAT_MODEL', 'openai/gpt-5.6-luna');
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: { message: 'Provider rejected this request' } }, { status: 401 })));
     const runner = new AiRunnerService(database, new PromptRegistryService(), new OpenRouterGateway(), { isConfigured: () => false } as never);
-    const service = new ChatService(database, runner, projects, canon, arcs, improvements, memory, reads);
+    const service = new ChatService(database, runner, projects, canon, arcs, improvements, memory, reads, episodeTools);
     await expect(service.send(projectId, { content: 'private request', clientMessageId: 'upstream-failure' }))
       .rejects.toThrow('AI 답변을 만들지 못했습니다. 같은 메시지를 다시 시도해 주세요.');
     const message = service.history(projectId).messages[1]!;
@@ -825,7 +975,10 @@ describe('chat model runner', () => {
     const imageTagCall = vi.spyOn(imageTags, 'call');
     const reads = new ChatReadToolsService(database, projects, canon, arcs, improvements, memory, { isConfigured: () => false } as never, imageTags);
     const readCall = vi.spyOn(reads, 'call');
-    const chat = new ChatService(database, runner, projects, canon, arcs, improvements, memory, reads);
+    const episodeService = new EpisodesService(database, projects, memory, runner);
+    const editor = new EditorAiService(database, episodeService, memory, runner);
+    const episodeTools = new ChatEpisodeToolsService(database, episodeService, editor);
+    const chat = new ChatService(database, runner, projects, canon, arcs, improvements, memory, reads, episodeTools);
     const projectId = projects.createInternal({ title: '달의 문', logline: '달빛 아래 기록관', genreTags: ['판타지'] }).id;
     const appearance = canon.persistCreate(projectId, {
       category: 'CHARACTER_APPEARANCE', name: '하린', content: '허리까지 오는 은발', status: 'ACTIVE',

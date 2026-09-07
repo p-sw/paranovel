@@ -461,6 +461,19 @@ CREATE INDEX idx_memory_project_flow
   ON memory_chunks(project_id, flow_key, flow_position, source_type);
 `;
 
+const CHAT_EPISODE_TASKS_MIGRATION = `
+CREATE TABLE chat_episode_tasks (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('DIRECTION','WRITE','EDIT')),
+  request_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('PENDING','COMPLETE','FAILED')),
+  task_json TEXT NOT NULL,
+  UNIQUE(message_id, kind)
+);
+`;
+
 @Injectable()
 export class DatabaseService implements OnApplicationShutdown {
   readonly connection: Database.Database;
@@ -501,6 +514,7 @@ export class DatabaseService implements OnApplicationShutdown {
       { version: 12, sql: INCOMPLETE_EPISODE_MIGRATION, rebuildsReferencedTable: true },
       { version: 13, sql: PROJECT_TARGET_EPISODE_MIGRATION },
       { version: 14, sql: SIDE_STORIES_MIGRATION, rebuildsReferencedTable: true },
+      { version: 15, sql: CHAT_EPISODE_TASKS_MIGRATION },
     ];
     this.connection.exec(
       'CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)',

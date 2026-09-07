@@ -430,7 +430,8 @@ export class EpisodesService {
     }).immediate();
   }
 
-  async propose(projectId: string, body: unknown) {
+  async propose(projectId: string, body: unknown, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const input = (body ?? {}) as Record<string, unknown>;
     const hint = optionalString(input.hint, 'hint', 5_000) ?? '';
     const episode = this.requestedDraftEpisode(projectId, input);
@@ -439,6 +440,7 @@ export class EpisodesService {
     await this.refreshStalePredecessors(projectId, episode, narrativeContext);
     const flowRevision = this.sideFlowRevision(projectId, episode, narrativeContext);
     const memory = await this.assembleDraftMemory(projectId, hint, episode?.id, narrativeContext);
+    signal?.throwIfAborted();
     if (orderRevision) this.assertOrderRevision(projectId, orderRevision);
     if (flowRevision) this.assertSideFlowRevision(projectId, flowRevision, episode, narrativeContext);
     const { value } = await this.ai.completeJson<{
@@ -447,6 +449,7 @@ export class EpisodesService {
       conflicts: string[];
     }>({
       task: 'episode_direction',
+      signal,
       promptId: 'episode-direction',
       projectId,
       episodeId: episode?.id,
@@ -457,12 +460,14 @@ export class EpisodesService {
       validator: episodeDirectionValidator,
       maxTokens: 3_000,
     });
+    signal?.throwIfAborted();
     if (orderRevision) this.assertOrderRevision(projectId, orderRevision);
     if (flowRevision) this.assertSideFlowRevision(projectId, flowRevision, episode, narrativeContext);
     return value;
   }
 
-  async refine(projectId: string, body: unknown) {
+  async refine(projectId: string, body: unknown, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     this.projects.get(projectId);
     const input = (body ?? {}) as Record<string, unknown>;
     // Keep the user's formatting intact while validating required, bounded text.
@@ -482,6 +487,7 @@ export class EpisodesService {
       episode?.id,
       narrativeContext,
     );
+    signal?.throwIfAborted();
     if (orderRevision) this.assertOrderRevision(projectId, orderRevision);
     if (flowRevision) this.assertSideFlowRevision(projectId, flowRevision, episode, narrativeContext);
     const { value } = await this.ai.completeJson<{
@@ -490,6 +496,7 @@ export class EpisodesService {
       conflicts: string[];
     }>({
       task: 'episode_direction_refine',
+      signal,
       promptId: 'episode-direction-refine',
       projectId,
       episodeId: episode?.id,
@@ -502,6 +509,7 @@ export class EpisodesService {
       validator: episodeDirectionValidator,
       maxTokens: Math.max(3_000, (title.length + direction.length) * 2 + 1_000),
     });
+    signal?.throwIfAborted();
     if (orderRevision) this.assertOrderRevision(projectId, orderRevision);
     if (flowRevision) this.assertSideFlowRevision(projectId, flowRevision, episode, narrativeContext);
     return value;

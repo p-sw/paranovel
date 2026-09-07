@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { ChatHistory, ChatMessage, ChatProposal, ChatThread } from '@paranovel/contracts';
+import type { ChatEpisodeTask, ChatHistory, ChatMessage, ChatProposal, ChatThread, EditorAiMessage, Episode } from '@paranovel/contracts';
 import { api, ApiError } from '../api/client';
 import ChatPage from './ChatPage';
 
@@ -20,6 +20,20 @@ const userMessage: ChatMessage = {
 const assistantMessage: ChatMessage = {
   ...userMessage, id: 'assistant-1', role: 'assistant', content: '기억을 대가로 하는 설정을 제안합니다.', proposals: [proposal],
 };
+const episode: Episode = { id: 'episode-1', projectId: 'story', number: 1, title: '새로운 문', direction: '문을 열고 나아간다.',
+  content: '그는 문을 열었다.', revision: 1, status: 'DRAFT', summary: null, createdAt: thread.createdAt, updatedAt: thread.updatedAt };
+const editorMessage: EditorAiMessage = {
+  id: 'editor-assistant-1', projectId: 'story', episodeId: episode.id, clientMessageId: 'editor-turn-1', role: 'assistant',
+  content: '주인공의 망설임을 드러냈어요.', status: 'COMPLETE', request: null, error: null, createdAt: thread.createdAt,
+  edit: { title: '망설임을 드러내는 문장', start: 0, end: episode.content.length, original: episode.content,
+    replacement: '그는 망설이다 문고리를 움켜쥐었다.', baseRevision: 1, status: 'PENDING' },
+};
+const writeTask: ChatEpisodeTask = {
+  id: 'task-1', projectId: 'story', messageId: assistantMessage.id, kind: 'WRITE', status: 'COMPLETE',
+  episodeId: episode.id, title: episode.title, direction: episode.direction, content: episode.content,
+  error: null, editorMessage: null, issues: [], blocked: false,
+};
+const editTask: ChatEpisodeTask = { ...writeTask, kind: 'EDIT', direction: null, content: '', editorMessage };
 
 function renderPage(projectId = 'story', cachedHistory?: ChatHistory) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -34,10 +48,180 @@ beforeEach(() => {
   vi.spyOn(api.chat, 'history').mockResolvedValue({ thread, messages: [] });
   vi.spyOn(api.chat, 'send').mockResolvedValue({ thread, messages: [userMessage, assistantMessage] });
   vi.spyOn(api.chat, 'apply').mockResolvedValue({ proposal: { ...proposal, status: 'APPLIED', appliedAt: '2026-09-06T01:00:00.000Z' } });
+  vi.spyOn(api.episodes, 'get').mockResolvedValue(episode);
+  vi.spyOn(api.editorAi, 'apply').mockResolvedValue({
+    episode: { ...episode, content: editorMessage.edit!.replacement, revision: 2 },
+    message: { ...editorMessage, edit: { ...editorMessage.edit!, status: 'APPLIED' } },
+  });
 });
 afterEach(() => vi.restoreAllMocks());
 
 describe('project AI chat', () => {
+  it('keeps a live episode task through parent resets and history refreshes, then shows its saved manuscript and continuity issues once', async () => {
+    let finish!: (history: ChatHistory) => void;
+    let emit!: NonNullable<Parameters<typeof api.chat.send>[3]>;
+    let turn!: Parameters<typeof api.chat.send>[1];
+    vi.mocked(api.chat.send).mockImplementationOnce((_project, input, _thread, callback) => {
+      turn = input;
+      emit = callback!;
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    const { client } = renderPage();
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: '다음 회차를 써 줘' } });
+    fireEvent.click(screen.getByRole('button', { name: '보내기' }));
+    await waitFor(() => expect(emit).toBeDefined());
+    const live: ChatEpisodeTask = { ...writeTask, status: 'PENDING', content: '그는 문을', stage: 'WRITING' };
+    act(() => {
+      emit({ type: 'episode_task', task: live }, '');
+      emit({ type: 'delta', text: '회차 집필을 시작했어요.' }, '');
+      emit({ type: 'reset' }, '');
+    });
+    expect(screen.getByText('그는 문을')).toBeInTheDocument();
+    expect(screen.queryByText('회차 집필을 시작했어요.')).not.toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '회차 집필: 새로운 문' })).toHaveTextContent('본문을 쓰고 있어요.');
+    const pendingHistory: ChatHistory = { thread, messages: [
+      { ...userMessage, content: turn.content, clientMessageId: turn.clientMessageId },
+      { ...assistantMessage, content: '', status: 'PENDING', clientMessageId: turn.clientMessageId, proposals: [], episodeTasks: [{ ...live, content: '' }] },
+    ] };
+    act(() => client.setQueryData(['chat', 'story', thread.id], pendingHistory));
+    expect(screen.getAllByRole('region', { name: '회차 집필: 새로운 문' })).toHaveLength(1);
+    expect(screen.getByText('그는 문을')).toBeInTheDocument();
+    const completed: ChatEpisodeTask = { ...writeTask, blocked: true, issues: [{
+      category: 'CANON', severity: 'BLOCKING', explanation: '잠긴 문의 열쇠가 필요합니다.', excerpt: episode.content,
+      repairInstruction: '열쇠를 얻는 장면을 추가하세요.', evidenceRefs: [],
+    }] };
+    act(() => emit({ type: 'episode_task', task: completed }, ''));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['episodes', 'story'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['projects'] });
+    const complete: ChatHistory = { ...pendingHistory, messages: pendingHistory.messages.map((message) => message.role === 'assistant'
+      ? { ...message, status: 'COMPLETE', content: '회차를 저장했어요.', episodeTasks: [completed] } : message) };
+    await act(async () => finish(complete));
+    const card = within(screen.getByRole('region', { name: '회차 집필: 새로운 문' }));
+    expect(card.getByText('회차 저장됨')).toBeInTheDocument();
+    expect(card.getByRole('alert')).toHaveTextContent('잠긴 문의 열쇠가 필요합니다.');
+    expect(card.getByRole('link', { name: '에디터에서 열기' })).toHaveAttribute('href', '/projects/story/episodes/episode-1');
+    expect(screen.getAllByRole('region', { name: '회차 집필: 새로운 문' })).toHaveLength(1);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('restores conversational direction results and failed episode work even when the parent response failed', async () => {
+    vi.mocked(api.chat.history).mockResolvedValue({ thread, messages: [{ ...assistantMessage, content: '', proposals: [], status: 'FAILED', error: '최종 답변이 끊겼어요.', episodeTasks: [
+      { ...writeTask, id: 'direction-task', kind: 'DIRECTION', episodeId: null, content: '문을 열 열쇠의 출처를 확인해 주세요.' },
+      { ...writeTask, status: 'FAILED', content: '작성하다 남은 본문', error: '회차 생성을 완료하지 못했어요.' },
+    ] }] });
+    renderPage();
+    const direction = within(await screen.findByRole('region', { name: '회차 구상: 새로운 문' }));
+    expect(direction.getByText(episode.direction)).toBeInTheDocument();
+    expect(direction.getByText(/대화로 방향을 더 다듬거나/)).toBeInTheDocument();
+    expect(direction.getByText('구상 참고 사항')).toBeInTheDocument();
+    expect(direction.getByText('문을 열 열쇠의 출처를 확인해 주세요.')).toBeInTheDocument();
+    expect(direction.queryByText(/회차 본문/)).not.toBeInTheDocument();
+    const failed = within(screen.getByRole('region', { name: '회차 집필: 새로운 문' }));
+    expect(failed.getByRole('alert')).toHaveTextContent('회차 생성을 완료하지 못했어요.');
+    expect(failed.getByText('작성하다 남은 본문')).toBeInTheDocument();
+    expect(failed.getByRole('link', { name: '에디터에서 열기' })).toBeInTheDocument();
+  });
+
+  it.each(['FAILED', 'COMPLETE'] as const)('restores a %s task after the stream misses its terminal event and shows fresh progress on retry', async (status) => {
+    let fail!: (error: Error) => void;
+    let emit!: NonNullable<Parameters<typeof api.chat.send>[3]>;
+    let turn!: Parameters<typeof api.chat.send>[1];
+    vi.mocked(api.chat.send).mockImplementation((_project, input, _thread, callback) => {
+      turn = input;
+      emit = callback!;
+      return new Promise((_resolve, reject) => { fail = reject; });
+    });
+    const { unmount } = renderPage();
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: '다음 회차를 써 줘' } });
+    fireEvent.click(screen.getByRole('button', { name: '보내기' }));
+    await waitFor(() => expect(emit).toBeDefined());
+    const live: ChatEpisodeTask = { ...writeTask, status: 'PENDING', content: '작성 중인 본문', stage: 'WRITING' };
+    act(() => emit({ type: 'episode_task', task: live }, ''));
+    const restored: ChatEpisodeTask = { ...writeTask, status, content: '서버에 보존된 본문',
+      error: status === 'FAILED' ? '회차 작업이 중단되었습니다.' : null };
+    vi.mocked(api.chat.history).mockResolvedValue({ thread, messages: [
+      { ...userMessage, content: turn.content, clientMessageId: turn.clientMessageId },
+      { ...assistantMessage, content: '', status: 'FAILED', clientMessageId: turn.clientMessageId, proposals: [], episodeTasks: [restored] },
+    ] });
+    await act(async () => fail(new Error('최종 답변의 연결이 끊겼어요.')));
+    const card = within(await screen.findByRole('region', { name: '회차 집필: 새로운 문' }));
+    expect(await card.findByText('서버에 보존된 본문')).toBeInTheDocument();
+    expect(card.queryByRole('status')).not.toBeInTheDocument();
+    expect(card.getByText(status === 'FAILED' ? '작업 실패' : '회차 저장됨')).toBeInTheDocument();
+    if (status === 'FAILED') {
+      expect(card.getByRole('alert')).toHaveTextContent('회차 작업이 중단되었습니다.');
+      fireEvent.click(screen.getByRole('button', { name: '답변 다시 시도' }));
+      await waitFor(() => expect(api.chat.send).toHaveBeenCalledTimes(2));
+      act(() => emit({ type: 'episode_task', task: { ...live, content: '다시 작성하는 본문' } }, ''));
+      expect(card.getByRole('status')).toHaveTextContent('본문을 쓰고 있어요.');
+      expect(card.getByText('다시 작성하는 본문')).toBeInTheDocument();
+      expect(card.queryByRole('alert')).not.toBeInTheDocument();
+    }
+    unmount();
+  });
+
+  it('reuses the editor preview and applies a chat edit through editor AI only after acceptance, preserving the result against an older history read', async () => {
+    let finishHistory!: (history: ChatHistory) => void;
+    vi.mocked(api.chat.history).mockImplementation(() => new Promise((resolve) => { finishHistory = resolve; }));
+    const oldHistory: ChatHistory = { thread, messages: [{ ...assistantMessage, proposals: [], episodeTasks: [editTask] }] };
+    const { client } = renderPage('story', oldHistory);
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
+    const card = within(screen.getByRole('region', { name: '회차 편집: 새로운 문' }));
+    expect(card.getByRole('region', { name: '수정 전' })).toHaveTextContent(episode.content);
+    expect(card.getByRole('region', { name: '수정 후' })).toHaveTextContent(editorMessage.edit!.replacement);
+    expect(api.editorAi.apply).not.toHaveBeenCalled();
+    fireEvent.click(card.getByRole('button', { name: '수락하고 적용' }));
+    expect(await card.findByText('적용됨')).toBeInTheDocument();
+    expect(api.editorAi.apply).toHaveBeenCalledExactlyOnceWith('story', episode.id, editorMessage.id);
+    expect(api.chat.apply).not.toHaveBeenCalled();
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['episodes', 'story'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['episode-order', 'story'] });
+    await act(async () => finishHistory(oldHistory));
+    expect(card.getByText('적용됨')).toBeInTheDocument();
+    expect(card.queryByRole('button', { name: '수락하고 적용' })).not.toBeInTheDocument();
+  });
+
+  it('disables a restored edit when the episode revision has changed', async () => {
+    vi.mocked(api.episodes.get).mockResolvedValue({ ...episode, revision: 2 });
+    vi.mocked(api.chat.history).mockResolvedValue({ thread, messages: [{ ...assistantMessage, proposals: [], episodeTasks: [editTask] }] });
+    renderPage();
+    expect(await screen.findByText('원고가 변경되어 적용할 수 없어요. 현재 원고를 기준으로 다시 요청해 주세요.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '수락하고 적용' })).toBeDisabled();
+    expect(api.editorAi.apply).not.toHaveBeenCalled();
+  });
+
+  it('preserves a completed subagent edit and its applied state when the parent stream fails before history is restored', async () => {
+    let fail!: (error: Error) => void;
+    let emit!: NonNullable<Parameters<typeof api.chat.send>[3]>;
+    vi.mocked(api.chat.send).mockImplementationOnce((_project, _input, _thread, callback) => {
+      emit = callback!;
+      return new Promise((_resolve, reject) => { fail = reject; });
+    });
+    renderPage();
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: '첫 회차를 다듬어 줘' } });
+    fireEvent.click(screen.getByRole('button', { name: '보내기' }));
+    await waitFor(() => expect(emit).toBeDefined());
+    act(() => emit({ type: 'episode_task', task: editTask }, ''));
+    expect(screen.getByRole('button', { name: '수락하고 적용' })).toBeDisabled();
+    await act(async () => fail(new Error('최종 답변의 연결이 끊겼어요.')));
+    expect(screen.getByText('최종 답변의 연결이 끊겼어요.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '수락하고 적용' }));
+    expect(await screen.findByText('수정 적용됨')).toBeInTheDocument();
+    expect(screen.getByText('적용됨')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '수락하고 적용' })).not.toBeInTheDocument();
+    expect(api.editorAi.apply).toHaveBeenCalledExactlyOnceWith('story', episode.id, editorMessage.id);
+  });
+
+  it('leaves an edit unapplied and explains a revision conflict reported during acceptance', async () => {
+    vi.mocked(api.chat.history).mockResolvedValue({ thread, messages: [{ ...assistantMessage, proposals: [], episodeTasks: [editTask] }] });
+    vi.mocked(api.editorAi.apply).mockRejectedValue(new ApiError('stale', 409));
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: '수락하고 적용' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('채팅에서 현재 원고를 기준으로 다시 수정해 달라고 요청해 주세요.');
+    expect(screen.queryByText('적용됨')).not.toBeInTheDocument();
+  });
+
   it('renders live text and simultaneous tools, survives history refreshes, and reviews proposals only at completion', async () => {
     let finish!: (history: ChatHistory) => void;
     let emit!: NonNullable<Parameters<typeof api.chat.send>[3]>;

@@ -9,6 +9,6 @@ import { EditorAiService } from './editor-ai.service';
   imports: [ProjectsModule],
   controllers: [EpisodesController, EditorAiController],
   providers: [EpisodesService, EditorAiService],
-  exports: [EpisodesService],
+  exports: [EpisodesService, EditorAiService],
 })
 export class EpisodesModule {}

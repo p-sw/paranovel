@@ -13,6 +13,7 @@ import { MemoryService } from '../memory/memory.service';
 import { ProjectsService } from '../projects/projects.service';
 import { sanitizeLogText, serializeError } from '../shared/error-log';
 import { id, now, parseJson, stringifyJson } from '../shared/utils';
+import { ChatEpisodeToolsService } from './chat-episode-tools.service';
 import { ChatReadToolsService, type RecordSnapshot, type SnapshotMap } from './chat-read-tools.service';
 import { chatOutputSchema, chatOutputValidator, creationDefaults, editableFields, editableValidators, type ChatKind, type ChatOperation, type ChatOutput } from './chat.schemas';
 import { IMAGE_TAG_TOOL_NAME, isImageTagToolResult, type ImageTagToolResult } from './image-tag-tool.service';
@@ -51,6 +52,7 @@ export class ChatService implements OnModuleInit {
     private readonly improvements: ImprovementsService,
     private readonly memory: MemoryService,
     private readonly reads: ChatReadToolsService,
+    private readonly episodeTools: ChatEpisodeToolsService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -109,6 +111,7 @@ export class ChatService implements OnModuleInit {
       role: message.role as 'user' | 'assistant', content: message.content,
       status: message.status as 'PENDING' | 'COMPLETE' | 'FAILED', createdAt: message.createdAt,
       proposals: proposals.filter((proposal) => proposal.messageId === message.id).map((proposal) => this.proposalView(proposal)),
+      episodeTasks: this.episodeTools.history(projectId, message.id),
       ...(message.error ? { error: message.error } : {}),
     })) };
   }
@@ -180,10 +183,14 @@ export class ChatService implements OnModuleInit {
       const { snapshots, catalog } = this.reads.snapshot(projectId);
       context.stage = 'history';
       const history = this.modelHistory(projectId, turn.threadId, input.clientMessageId);
+      const recovery = this.episodeTools.recoveryContext(projectId, turn.id);
+      if (recovery.length) history.splice(Math.max(0, history.length - 1), 0, {
+        role: 'system', content: `동일 사용자 요청을 다시 처리하고 있습니다. 아래 회차 작업은 이미 실행되었습니다. 완료 작업을 새로 만들지 말고 결과를 설명하세요. 실패 작업만 원래 인자로 재시도할 수 있습니다.\n${stringifyJson(recovery)}`,
+      });
       context.stage = 'ai';
       let imageTagAttempts = 0;
       let imageTagResult: ImageTagToolResult | undefined;
-      const readTools = this.reads.definitions();
+      const readTools = [...this.reads.definitions(), ...this.episodeTools.definitions()];
       const result = await this.ai.completeChat({
         task: 'project_chat', promptId: 'project-chat', projectId, modelRole: 'CHAT',
         history, signal, maxTokens: 12_000, toolMaxTokens: 8_000,
@@ -196,11 +203,23 @@ export class ChatService implements OnModuleInit {
         },
         schema: { name: 'project_chat_reply', value: chatOutputSchema }, validator: chatOutputValidator,
         readTools, onEvent,
-        parallelToolNames: readTools.filter((tool) => tool.function.name !== IMAGE_TAG_TOOL_NAME).map((tool) => tool.function.name),
+        parallelToolNames: readTools.filter((tool) => tool.function.name !== IMAGE_TAG_TOOL_NAME && !this.episodeTools.has(tool.function.name)).map((tool) => tool.function.name),
         resolveAfterTools: () => imageTagResult
           ? { reply: imageTagResult.tagString, proposals: [] }
           : undefined,
         readTool: async (name, args) => {
+          if (this.episodeTools.has(name)) {
+            const task = await this.episodeTools.call(projectId, turn.id, name, args, signal, onEvent);
+            // The child owns manuscript text. Give the parent IDs and outcome,
+            // keeping full text in the persistent card and episode read tool.
+            if ('id' in task) return { id: task.id, kind: task.kind, status: task.status, episodeId: task.episodeId,
+              title: task.title, direction: task.direction, blocked: task.blocked, issues: task.issues,
+              ...(task.kind === 'DIRECTION' ? { conflicts: task.content } : {}),
+              editStatus: task.editorMessage?.edit?.status ?? null,
+              message: task.kind === 'EDIT' ? '수정안이 준비되었습니다. 사용자가 비교 후 적용해야 원고가 변경됩니다.'
+                : task.kind === 'WRITE' ? '회차 초안을 저장했습니다. 확정은 별도입니다.' : '회차 구상을 준비했습니다. 아직 본문은 생성하지 않았습니다.' };
+            return task;
+          }
           if (name === IMAGE_TAG_TOOL_NAME) {
             if (imageTagResult) return imageTagResult;
             if (imageTagAttempts >= MAX_IMAGE_TAG_TOOL_ATTEMPTS) {
@@ -224,7 +243,7 @@ export class ChatService implements OnModuleInit {
       const output: ChatOutput = imageTagResult
         ? { reply: imageTagResult.tagString, proposals: [] }
         : result.value;
-      // No entity is changed while preparing proposals. Persist the complete turn atomically.
+      // Episode subagents persist their own results. Commit configuration proposals and the parent reply together.
       context.stage = 'proposal_transaction';
       this.database.connection.transaction(() => {
         this.projects.get(projectId);
@@ -459,9 +478,10 @@ export class ChatService implements OnModuleInit {
     // A retried turn stays at its original position and must not see later turns.
     const currentIndex = stored.findIndex((message) => message.role === 'user' && message.clientMessageId === currentClientId);
     const all = currentIndex >= 0 ? stored.slice(0, currentIndex + 1) : stored;
-    const eligible = all.filter((message) => message.status === 'COMPLETE' && (message.role === 'assistant'
-      || message.clientMessageId === currentClientId
-      || all.some((other) => other.clientMessageId === message.clientMessageId && other.role === 'assistant' && other.status === 'COMPLETE')));
+    const hasOutcome = (message: typeof stored[number]) => message.status === 'COMPLETE' || message.episodeTasks.length > 0;
+    const eligible = all.filter((message) => message.role === 'assistant' ? hasOutcome(message)
+      : message.status === 'COMPLETE' && (message.clientMessageId === currentClientId
+        || all.some((other) => other.clientMessageId === message.clientMessageId && other.role === 'assistant' && hasOutcome(other))));
     const current = eligible.find((message) => message.role === 'user' && message.clientMessageId === currentClientId);
     const candidates = [...eligible.filter((message) => message !== current), ...(current ? [current] : [])].slice(-20);
     const selected: ModelMessage[] = [];
@@ -470,7 +490,10 @@ export class ChatService implements OnModuleInit {
       const proposalSummary = message.proposals.map((proposal) => ({ id: proposal.id, kind: proposal.kind, operation: proposal.operation,
         title: proposal.title, status: proposal.status, targetId: proposal.targetId,
         changes: proposal.after ? editableFields(proposal.kind, proposal.after) : null }));
-      const content = `${message.content}${proposalSummary.length ? `\n[이 메시지의 변경 제안과 현재 적용 상태]\n${stringifyJson(proposalSummary)}` : ''}`;
+      const tasks = message.episodeTasks.map((task) => ({ id: task.id, kind: task.kind, status: task.status,
+        episodeId: task.episodeId, title: task.title, direction: task.direction, error: task.error,
+        editStatus: task.editorMessage?.edit?.status ?? null, blocked: task.blocked }));
+      const content = `${message.content}${proposalSummary.length ? `\n[이 메시지의 변경 제안과 현재 적용 상태]\n${stringifyJson(proposalSummary)}` : ''}${tasks.length ? `\n[회차 서브에이전트 작업 결과]\n${stringifyJson(tasks)}` : ''}`;
       if (characters + content.length > 40_000) break;
       selected.unshift({ role: message.role, content });
       characters += content.length;

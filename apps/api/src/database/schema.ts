@@ -285,7 +285,18 @@ export const editorAiMessages = sqliteTable('editor_ai_messages', {
   createdAt: text('created_at').notNull(),
 });
 
+export const chatEpisodeTasks = sqliteTable('chat_episode_tasks', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  messageId: text('message_id').notNull(),
+  kind: text('kind').notNull(),
+  requestJson: text('request_json').notNull(),
+  status: text('status').notNull(),
+  taskJson: text('task_json').notNull(),
+});
+
 export const schema = {
+  chatEpisodeTasks,
   editorAiMessages,
   chatThreads,
   chatMessages,

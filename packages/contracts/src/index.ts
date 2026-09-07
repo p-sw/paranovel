@@ -522,6 +522,36 @@ export const chatProposalSchema = z.object({
 });
 export type ChatProposal = z.infer<typeof chatProposalSchema>;
 
+export const editorAiMessageSchema: z.ZodType<EditorAiMessage> = z.object({
+    id: idSchema, projectId: idSchema, episodeId: idSchema, clientMessageId: idSchema,
+    role: z.enum(['user', 'assistant']), content: z.string(),
+    status: z.enum(['PENDING', 'COMPLETE', 'FAILED']),
+    request: z.object({
+      content: z.string(), clientMessageId: idSchema, expectedRevision: z.number().int().nonnegative(),
+      selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), text: z.string() }),
+    }).nullable(),
+    edit: z.object({
+      title: z.string(), start: z.number().int().nonnegative(), end: z.number().int().nonnegative(),
+      original: z.string(), replacement: z.string(), baseRevision: z.number().int().nonnegative(),
+      status: z.enum(['PENDING', 'APPLIED']),
+    }).nullable(),
+    error: z.string().nullable(), createdAt: isoDateSchema,
+});
+export const editorAiHistorySchema: z.ZodType<EditorAiHistory> = z.object({ messages: z.array(editorAiMessageSchema) });
+
+
+export const chatEpisodeTaskSchema = z.object({
+  id: idSchema, projectId: idSchema, messageId: idSchema,
+  kind: z.enum(['DIRECTION', 'WRITE', 'EDIT']),
+  status: z.enum(['PENDING', 'COMPLETE', 'FAILED']),
+  episodeId: idSchema.nullable(), title: z.string(), direction: z.string().nullable(),
+  content: z.string(), error: z.string().nullable(),
+  editorMessage: editorAiMessageSchema.nullable(),
+  issues: z.array(continuityIssueSchema), blocked: z.boolean(),
+  stage: z.enum(['MEMORY', 'WRITING', 'CHECKING', 'REPAIRING']).optional(),
+});
+export type ChatEpisodeTask = z.infer<typeof chatEpisodeTaskSchema>;
+
 export const chatMessageSchema = z.object({
   id: idSchema,
   projectId: idSchema,
@@ -531,6 +561,7 @@ export const chatMessageSchema = z.object({
   status: z.enum(['PENDING', 'COMPLETE', 'FAILED']),
   createdAt: isoDateSchema,
   proposals: z.array(chatProposalSchema),
+  episodeTasks: z.array(chatEpisodeTaskSchema).optional(),
   error: z.string().optional(),
 });
 export type ChatMessage = z.infer<typeof chatMessageSchema>;
@@ -551,25 +582,9 @@ export type ChatThreadSummary = z.infer<typeof chatThreadSummarySchema>;
 export const chatHistorySchema = z.object({ thread: chatThreadSchema.nullable(), messages: z.array(chatMessageSchema) });
 export type ChatHistory = z.infer<typeof chatHistorySchema>;
 
-export const editorAiHistorySchema: z.ZodType<EditorAiHistory> = z.object({
-  messages: z.array(z.object({
-    id: idSchema, projectId: idSchema, episodeId: idSchema, clientMessageId: idSchema,
-    role: z.enum(['user', 'assistant']), content: z.string(),
-    status: z.enum(['PENDING', 'COMPLETE', 'FAILED']),
-    request: z.object({
-      content: z.string(), clientMessageId: idSchema, expectedRevision: z.number().int().nonnegative(),
-      selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), text: z.string() }),
-    }).nullable(),
-    edit: z.object({
-      title: z.string(), start: z.number().int().nonnegative(), end: z.number().int().nonnegative(),
-      original: z.string(), replacement: z.string(), baseRevision: z.number().int().nonnegative(),
-      status: z.enum(['PENDING', 'APPLIED']),
-    }).nullable(),
-    error: z.string().nullable(), createdAt: isoDateSchema,
-  })),
-});
 
 const conversationProgressSchemas = [
+  z.object({ type: z.literal('episode_task'), task: chatEpisodeTaskSchema }),
   z.object({ type: z.literal('delta'), text: z.string() }),
   z.object({ type: z.literal('reset') }),
   z.object({ type: z.literal('tool_start'), callId: z.string(), name: z.string() }),
