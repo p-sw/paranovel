@@ -159,8 +159,8 @@ describe('episode editing AI', () => {
       }
       return { runId: 'invalid-ranges', value: { reply: '수정안을 준비하지 못했어요.' } };
     });
-    const history = await editor.send(projectId, episodeId, request({ selection: { start: 0, end: 0, text: '' } }));
-    expect(history.messages[1]?.edit).toBeNull();
+    await expect(editor.send(projectId, episodeId, request({ selection: { start: 0, end: 0, text: '' } }))).rejects.toThrow(BadGatewayException);
+    expect(editor.history(projectId, episodeId).messages[1]).toMatchObject({ status: 'FAILED', edit: null });
     expect(episodes.get(projectId, episodeId)).toMatchObject({ content: original, revision: 1 });
   });
 
@@ -186,6 +186,22 @@ describe('episode editing AI', () => {
     const applied = editor.apply(projectId, episodeId, history.messages[1]!.id);
     expect(applied.episode).toMatchObject({ content: combined, revision: 2 });
     expect(editor.apply(projectId, episodeId, history.messages[1]!.id)).toEqual(applied);
+  });
+
+  it('rejects a boundary edit that would cancel the actual change from earlier edits', async () => {
+    const target = await episodes.create(projectId, { title: '상쇄되는 수정', direction: '', content: '가나다' });
+    completeChat.mockImplementationOnce(async (input) => {
+      expect(input.completionRequirement()).toContain('실제 텍스트 변경');
+      expect(await input.readTool('replace_text', JSON.stringify({ title: '첫 글자 삭제', original: '가', replacement: '' })))
+        .toHaveProperty('status', 'PREVIEW_READY');
+      expect(input.completionRequirement()).toBeUndefined();
+      expect(await input.readTool('insert_at_cursor', JSON.stringify({ title: '원문 복구', replacement: '가' })))
+        .toHaveProperty('error', '모든 수정안을 합치면 현재 원고와 같습니다. 실제 본문이 달라지는 수정안을 작성해 주세요.');
+      return { runId: 'net-change', value: { reply: '첫 글자를 덜어내는 수정안을 준비했어요.' } };
+    });
+    const history = await editor.send(projectId, target.id, request({ selection: { start: 0, end: 0, text: '' } }));
+    expect(history.messages[1]?.edit).toMatchObject({ original: '가', replacement: '' });
+    expect(editor.apply(projectId, target.id, history.messages[1]!.id).episode.content).toBe('나다');
   });
 
   it.each([0, 2, 4])('orders adjacent replacements and a boundary insertion deterministically at cursor %s', async (cursor) => {
@@ -334,7 +350,7 @@ describe('episode editing AI', () => {
     expect(editor.apply(projectId, episodeId, history.messages[1]!.id).episode.content).toBe(original.replace(selected, ''));
   });
 
-  it('supports dialogue without edits and refines the previous proposal with its application state', async () => {
+  it('includes an edit in conversational requests and refines the previous proposal with its application state', async () => {
     answer();
     const first = await editor.send(projectId, episodeId, request());
     answer('하린은 움찔했다.');
@@ -343,11 +359,11 @@ describe('episode editing AI', () => {
     expect(JSON.stringify(followup)).toContain(replacement);
     expect(JSON.stringify(followup)).toContain('PENDING');
     editor.apply(projectId, episodeId, first.messages[1]!.id);
-    completeChat.mockResolvedValueOnce({ runId: 'discussion', value: { reply: '다음 장면에서는 문 안쪽의 소리로 갈등을 이어갈 수 있어요.' } });
+    answer('\n문 안쪽에서 낮은 소리가 울렸다.');
     const current = episodes.get(projectId, episodeId);
     const result = await editor.send(projectId, episodeId, request({ content: '다음 전개는 어떻게 할까?', clientMessageId: 'discuss', expectedRevision: current.revision,
       selection: { start: current.content.length, end: current.content.length, text: '' } }));
-    expect(result.messages.at(-1)?.edit).toBeNull();
+    expect(result.messages.at(-1)?.edit).toMatchObject({ original: '', replacement: '\n문 안쪽에서 낮은 소리가 울렸다.' });
     expect(JSON.stringify(completeChat.mock.calls.at(-1)![0].history)).toContain('APPLIED');
     expect(episodes.get(projectId, episodeId)).toEqual(current);
   });
@@ -380,7 +396,7 @@ describe('episode editing AI', () => {
     expect(() => editor.history(foreign, episodeId)).toThrow(NotFoundException);
     expect(() => editor.apply(foreign, episodeId, first.messages[1]!.id)).toThrow(NotFoundException);
     await expect(editor.send(foreign, episodeId, request())).rejects.toThrow(NotFoundException);
-    completeChat.mockResolvedValueOnce({ runId: 'other', value: { reply: '새 회차입니다.' } });
+    answer('새 회차의 첫 장면.');
     await editor.send(projectId, otherEpisode.id, request({ content: '새 회차를 구상해줘', selection: { start: 0, end: 0, text: '' } }));
     expect(JSON.stringify(completeChat.mock.calls.at(-1)![0].history)).not.toContain(selected);
   });
@@ -547,6 +563,7 @@ describe('episode editing AI', () => {
           synopsis: '새로 확정한 분기 기억',
         }),
       ]));
+      await input.readTool('replace_selection', JSON.stringify({ title: '최신 분기 기억 반영', replacement }));
       return { runId: 'refreshed-editor-context', value: { reply: '최신 분기 기억을 반영했어요.' } };
     });
 
@@ -606,7 +623,7 @@ describe('episode editing AI', () => {
   it('places a retried older request after later completed discussion in the model context', async () => {
     completeChat.mockRejectedValueOnce(new Error('Temporary failure'));
     await expect(editor.send(projectId, episodeId, request())).rejects.toThrow(BadGatewayException);
-    completeChat.mockResolvedValueOnce({ runId: 'discussion', value: { reply: '다음 장면의 전개를 함께 고민해 볼게요.' } });
+    answer('하린은 문 안쪽에서 들리는 소리에 귀를 기울였다.');
     await editor.send(projectId, episodeId, request({ clientMessageId: 'later-turn', content: '다음 장면은 어떻게 할까?' }));
     answer();
     await editor.send(projectId, episodeId, request());
@@ -644,6 +661,76 @@ describe('episode editing AI', () => {
     expect(complete.mock.calls[0]![0].messages[0]?.content).toContain('편집 AI');
     expect(complete.mock.calls.at(-1)![0].messages.some((message) => message.role === 'tool' && message.content?.includes('PREVIEW_READY'))).toBe(true);
     expect(database.connection.prepare('SELECT model, status FROM ai_runs').get()).toEqual({ model: 'test/writer', status: 'SUCCEEDED' });
+  });
+
+  it.each([true, false])('keeps requesting a real edit after narration and an unchanged tool result (streaming: %s)', async (streaming) => {
+    const reply = '선택한 문장의 수정안을 준비했어요.';
+    let attempt = 0;
+    const complete = vi.fn(async (input: CompletionRequest) => {
+      attempt += 1;
+      expect(editor.history(projectId, episodeId).messages[1]?.status).toBe('PENDING');
+      const toolCalls = attempt === 2 || attempt === 3 ? [{
+        id: `edit-${attempt}`, type: 'function' as const,
+        function: { name: 'replace_selection', arguments: JSON.stringify({ title: '수정', replacement: attempt === 2 ? selected : replacement }) },
+      }] : [];
+      return { model: input.model, usage: { promptTokens: 2, completionTokens: 1 },
+        content: JSON.stringify({ reply: input.schema ? reply : '설명만 하고 끝내려는 답변' }), toolCalls };
+    });
+    const streamText = vi.fn(async (input: CompletionRequest, onDelta: (text: string) => void) => {
+      const result = await complete(input);
+      onDelta(result.content);
+      return result;
+    });
+    const runner = new AiRunnerService(database, new PromptRegistryService(), { complete, streamText } as never, { isConfigured: () => false } as never);
+    const integrated = new EditorAiService(database, episodes, memory, runner);
+    const events: ConversationStreamEvent<EditorAiHistory>[] = [];
+    const history = await integrated.send(projectId, episodeId, request(), undefined, streaming ? (event) => events.push(event) : undefined);
+    expect(complete).toHaveBeenCalledTimes(5);
+    expect(complete.mock.calls.map(([input]) => input.toolChoice)).toEqual(['required', 'required', 'required', 'auto', 'none']);
+    expect(complete.mock.calls[1]![0].messages.at(-1)?.content).toContain('아직 실제 텍스트 변경');
+    expect(complete.mock.calls[2]![0].messages.some((message) => message.role === 'tool' && message.content?.includes('수정할 새 본문'))).toBe(true);
+    expect(history.messages[1]).toMatchObject({ status: 'COMPLETE', content: reply, edit: { replacement, status: 'PENDING' } });
+    expect(events.filter((event) => event.type === 'delta')).toEqual(streaming ? [{ type: 'delta', text: reply }] : []);
+    expect(episodes.get(projectId, episodeId)).toMatchObject({ content: original, revision: 1 });
+    expect(database.connection.prepare('SELECT status, input_tokens AS inputTokens, output_tokens AS outputTokens FROM ai_runs').get())
+      .toEqual({ status: 'SUCCEEDED', inputTokens: 10, outputTokens: 5 });
+  });
+
+  it.each(['no-tools', 'read-only', 'unchanged'] as const)('fails rather than completing after repeated %s responses', async (mode) => {
+    const complete = vi.fn(async (input: CompletionRequest) => {
+      const toolCalls = mode === 'no-tools' ? [] : [{
+        id: `call-${complete.mock.calls.length}`, type: 'function' as const,
+        function: mode === 'read-only'
+          ? { name: 'read_manuscript', arguments: JSON.stringify({ start: 0, length: original.length }) }
+          : { name: 'replace_text', arguments: JSON.stringify({ title: '동일한 본문', original: selected, replacement: selected }) },
+      }];
+      return { model: input.model, usage: {}, content: JSON.stringify({ reply: '완료했다고 주장하는 답변' }), toolCalls };
+    });
+    const runner = new AiRunnerService(database, new PromptRegistryService(), { complete } as never, { isConfigured: () => false } as never);
+    const integrated = new EditorAiService(database, episodes, memory, runner);
+    const input = request({ selection: { start: 0, end: 0, text: '' } });
+    await expect(integrated.send(projectId, episodeId, input)).rejects.toThrow(BadGatewayException);
+    expect(complete).toHaveBeenCalledTimes(4);
+    expect(complete.mock.calls.every(([request]) => request.tools && request.toolChoice === 'required')).toBe(true);
+    const message = integrated.history(projectId, episodeId).messages[1]!;
+    expect(message).toMatchObject({ status: 'FAILED', content: '', edit: null });
+    expect(() => integrated.apply(projectId, episodeId, message.id)).toThrow(NotFoundException);
+    expect(database.connection.prepare('SELECT status FROM ai_runs').get()).toEqual({ status: 'FAILED' });
+    expect(episodes.get(projectId, episodeId)).toMatchObject({ content: original, revision: 1 });
+  });
+
+  it('honors cancellation while retrying an unmet edit requirement', async () => {
+    const controller = new AbortController();
+    const complete = vi.fn(async (input: CompletionRequest) => {
+      controller.abort(new Error('cancelled'));
+      return { model: input.model, usage: {}, content: '설명만 반환', toolCalls: [] };
+    });
+    const runner = new AiRunnerService(database, new PromptRegistryService(), { complete } as never, { isConfigured: () => false } as never);
+    const integrated = new EditorAiService(database, episodes, memory, runner);
+    await expect(integrated.send(projectId, episodeId, request(), controller.signal)).rejects.toThrow(BadGatewayException);
+    expect(complete).toHaveBeenCalledOnce();
+    expect(integrated.history(projectId, episodeId).messages[1]).toMatchObject({ status: 'FAILED', edit: null });
+    expect(database.connection.prepare('SELECT status FROM ai_runs').get()).toEqual({ status: 'CANCELLED' });
   });
 
   it('stages every independent edit from one real model tool-call batch', async () => {
@@ -704,7 +791,7 @@ describe('episode editing AI', () => {
       expect(body).toMatchObject({ model: 'test/writer', stream: streaming, provider: { require_parameters: true } });
       expect(body).not.toHaveProperty('parallel_tool_calls');
     }
-    expect(requests[0]).toMatchObject({ tool_choice: 'auto', tools: [{ type: 'function', function: { name: 'replace_selection' } }] });
+    expect(requests[0]).toMatchObject({ tool_choice: 'required', tools: [{ type: 'function', function: { name: 'replace_selection' } }] });
     expect(requests.at(-1)).toMatchObject({ response_format: { type: 'json_schema', json_schema: { name: 'episode_editor_reply', strict: true } } });
     expect(events).toEqual(streaming ? [
       { type: 'start', messageId: message.id },

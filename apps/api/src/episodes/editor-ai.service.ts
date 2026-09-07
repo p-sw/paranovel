@@ -15,6 +15,7 @@ import {
 } from './editor-ai.schemas';
 
 const FAILED_REPLY = '편집 AI가 답변을 완료하지 못했습니다. 다시 시도해 주세요.';
+const REQUIRED_EDIT = '아직 실제 텍스트 변경이 있는 수정안이 없습니다. 읽기나 설명만으로는 완료할 수 없습니다. 제공된 편집 도구로 현재 원고와 다른 본문 수정안을 준비한 뒤 답변하세요. 도구 오류가 있으면 원인을 바로잡고 다시 호출하세요.';
 type MessageRow = typeof editorAiMessages.$inferSelect;
 type StoredEditorAiEdit = EditorAiEdit & { baseFlowRevision?: string };
 type ManuscriptEdit = Pick<EditorAiEdit, 'title' | 'start' | 'end' | 'original' | 'replacement'>;
@@ -45,9 +46,12 @@ function combineEdits(manuscript: string, edits: ManuscriptEdit[], baseRevision:
     parts.push(manuscript.slice(position, edit.start), edit.replacement);
     position = edit.end;
   }
+  const original = manuscript.slice(start, end);
+  const replacement = parts.join('');
+  if (original === replacement) return null;
   return {
     title: ordered.length === 1 ? ordered[0]!.title : `${ordered.length}곳 수정`,
-    start, end, original: manuscript.slice(start, end), replacement: parts.join(''),
+    start, end, original, replacement,
     baseRevision, status: 'PENDING',
   };
 }
@@ -146,6 +150,7 @@ export class EditorAiService implements OnModuleInit {
         },
         history: this.modelHistory(projectId, episodeId, input.clientMessageId),
         schema: { name: 'episode_editor_reply', value: editorReplySchema }, validator: editorReplyValidator,
+        completionRequirement: () => combineEdits(turn.episode.content, staged, turn.episode.revision) ? undefined : REQUIRED_EDIT,
         readTools,
         readTool: async (name, argumentsJson) => {
           signal?.throwIfAborted();
@@ -188,6 +193,9 @@ export class EditorAiService implements OnModuleInit {
           if (stagedLength - (target.end - target.start) + edit.replacement.length > 1_000_000) {
             return { error: '원고는 1,000,000자 이하여야 합니다.' };
           }
+          if (!combineEdits(manuscript, [...staged, candidate], turn.episode.revision)) {
+            return { error: '모든 수정안을 합치면 현재 원고와 같습니다. 실제 본문이 달라지는 수정안을 작성해 주세요.' };
+          }
           staged.push(candidate);
           return { status: 'PREVIEW_READY', title: edit.title, start: target.start, end: target.end,
             editCount: staged.length,
@@ -203,10 +211,11 @@ export class EditorAiService implements OnModuleInit {
         this.episodes.get(projectId, episodeId);
       }
       const edit: StoredEditorAiEdit | null = combineEdits(turn.episode.content, staged, turn.episode.revision);
-      if (edit && baseFlowRevision !== undefined) edit.baseFlowRevision = baseFlowRevision;
+      if (!edit) throw new BadGatewayException(REQUIRED_EDIT);
+      if (baseFlowRevision !== undefined) edit.baseFlowRevision = baseFlowRevision;
       this.database.orm.update(editorAiMessages).set({
         content: result.value.reply, status: 'COMPLETE', error: null, runId: result.runId,
-        editJson: edit ? stringifyJson(edit) : null,
+        editJson: stringifyJson(edit),
       }).where(eq(editorAiMessages.id, turn.assistantId)).run();
       return this.history(projectId, episodeId);
     } catch (error) {

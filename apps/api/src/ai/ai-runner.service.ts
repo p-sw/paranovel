@@ -119,6 +119,8 @@ export class AiRunnerService {
       readTools: ToolDefinition[];
       readTool: (name: string, argumentsJson: string) => Promise<unknown>;
       resolveAfterTools?: () => T | undefined;
+      // Return a corrective instruction until tools have produced the required result.
+      completionRequirement?: () => string | undefined;
       toolMaxTokens?: number;
       onEvent?: (event: ChatStreamEvent) => void;
       // Only independent tools belong here. All other calls are ordering barriers.
@@ -158,10 +160,18 @@ export class AiRunnerService {
         input.signal?.throwIfAborted();
         const response = await complete({
           ...request, messages: [...messages], schema: undefined,
-          tools: input.readTools, toolChoice: 'auto', maxTokens: input.toolMaxTokens ?? 2_000,
+          tools: input.readTools, toolChoice: input.completionRequirement?.() ? 'required' : 'auto',
+          maxTokens: input.toolMaxTokens ?? 2_000,
         }, () => undefined);
         usage = addUsage(usage, response.usage);
-        if (!response.toolCalls.length) break;
+        input.signal?.throwIfAborted();
+        if (!response.toolCalls.length) {
+          const requirement = input.completionRequirement?.();
+          if (!requirement) break;
+          messages.push(response.assistantMessage ?? { role: 'assistant', content: response.content || null });
+          messages.push({ role: 'user', content: requirement });
+          continue;
+        }
         messages.push(response.assistantMessage ?? {
           role: 'assistant', content: response.content || null, tool_calls: response.toolCalls,
         });
@@ -185,7 +195,7 @@ export class AiRunnerService {
             // Sequential tools can produce an authoritative reply (e.g. images).
             // Finish before starting later calls or another model round.
             const terminalValue = input.resolveAfterTools?.();
-            if (terminalValue !== undefined) {
+            if (terminalValue !== undefined && !input.completionRequirement?.()) {
               value = input.validator.parse(terminalValue);
               const reply = (value as { reply?: unknown } | null)?.reply;
               if (typeof reply === 'string' && reply) input.onEvent?.({ type: 'delta', text: reply });
@@ -193,7 +203,11 @@ export class AiRunnerService {
             }
           }
         }
+        const requirement = input.completionRequirement?.();
+        if (requirement) messages.push({ role: 'user', content: requirement });
       }
+      const requirement = input.completionRequirement?.();
+      if (requirement) throw new BadGatewayException(`AI did not satisfy required tool outcome: ${requirement}`);
       let lastError: unknown;
       for (let attempt = 0; attempt < 2; attempt += 1) {
         input.signal?.throwIfAborted();
