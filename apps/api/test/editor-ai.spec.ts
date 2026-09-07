@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import type { ConversationStreamEvent, EditorAiHistory, EditorAiInput } from '@paranovel/contracts';
 import { AiRunnerService } from '../src/ai/ai-runner.service';
 import type { CompletionRequest } from '../src/ai/ai.types';
+import { OpenRouterGateway } from '../src/ai/openrouter.gateway';
 import { DatabaseService } from '../src/database/database.service';
 import { chatMessages, editorAiMessages, episodeSummaries } from '../src/database/schema';
 import { EditorAiService } from '../src/episodes/editor-ai.service';
@@ -48,7 +49,7 @@ describe('episode editing AI', () => {
     episodeId = (await episodes.create(projectId, { title: '닫힌 문', direction: '비밀을 찾는다.', content: original })).id;
   });
 
-  afterEach(() => { database.onApplicationShutdown(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+  afterEach(() => { database.onApplicationShutdown(); vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 
   function request(overrides: Partial<EditorAiInput> = {}): EditorAiInput {
     return {
@@ -664,5 +665,54 @@ describe('episode editing AI', () => {
     expect(results).toHaveLength(2);
     expect(results.map((message) => JSON.parse(message.content!).status)).toEqual(['PREVIEW_READY', 'PREVIEW_READY']);
     expect(integrated.apply(projectId, episodeId, result.messages[1]!.id).episode.content).toBe(`어둠이 짙어졌다.\n${selected}\n발소리가 멎었다.`);
+  });
+
+  it.each([true, false])('stages an edit through an endpoint without parallel-tool controls (streaming: %s)', async (streaming) => {
+    vi.stubEnv('OPENROUTER_API_KEY', 'test-key');
+    vi.stubEnv('AI_WRITING_MODEL', 'test/writer');
+    const reply = '선택한 부분의 수정안을 준비했어요.';
+    const requests: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as {
+        model: string; messages: CompletionRequest['messages']; stream: boolean;
+        tools?: CompletionRequest['tools']; response_format?: unknown;
+        provider?: { require_parameters?: boolean };
+      };
+      requests.push(body);
+      if (body.provider?.require_parameters && 'parallel_tool_calls' in body) {
+        return Response.json({ error: { message: 'No endpoints found that can handle the requested parameters.' } }, { status: 404 });
+      }
+      const toolCalls = body.tools && !body.messages.some((message) => message.role === 'tool')
+        ? [{ id: 'edit-call', type: 'function', function: { name: 'replace_selection', arguments: JSON.stringify({ title: '긴장감', replacement }) } }]
+        : [];
+      const message = { role: 'assistant', content: body.response_format ? JSON.stringify({ reply }) : '', tool_calls: toolCalls };
+      if (!body.stream) return Response.json({ model: body.model, choices: [{ message }] });
+      return new Response(`data: ${JSON.stringify({ model: body.model, choices: [{ index: 0,
+        delta: { ...message, tool_calls: toolCalls.map((call, index) => ({ ...call, index })) },
+        finish_reason: toolCalls.length ? 'tool_calls' : 'stop',
+      }] })}\n\ndata: [DONE]\n\n`, { headers: { 'Content-Type': 'text/event-stream' } });
+    }));
+    const runner = new AiRunnerService(database, new PromptRegistryService(), new OpenRouterGateway(), { isConfigured: () => false } as never);
+    const integrated = new EditorAiService(database, episodes, memory, runner);
+    const events: ConversationStreamEvent<EditorAiHistory>[] = [];
+    const history = await integrated.send(projectId, episodeId, request(), undefined, streaming ? (event) => events.push(event) : undefined);
+    const message = history.messages[1]!;
+    expect(message).toMatchObject({ content: reply, status: 'COMPLETE', edit: { original: selected, replacement, status: 'PENDING' } });
+    expect(episodes.get(projectId, episodeId)).toMatchObject({ content: original, revision: 1 });
+    expect(requests).toHaveLength(3);
+    for (const body of requests) {
+      expect(body).toMatchObject({ model: 'test/writer', stream: streaming, provider: { require_parameters: true } });
+      expect(body).not.toHaveProperty('parallel_tool_calls');
+    }
+    expect(requests[0]).toMatchObject({ tool_choice: 'auto', tools: [{ type: 'function', function: { name: 'replace_selection' } }] });
+    expect(requests.at(-1)).toMatchObject({ response_format: { type: 'json_schema', json_schema: { name: 'episode_editor_reply', strict: true } } });
+    expect(events).toEqual(streaming ? [
+      { type: 'start', messageId: message.id },
+      { type: 'tool_start', callId: 'edit-call', name: 'replace_selection' },
+      { type: 'tool_end', callId: 'edit-call', name: 'replace_selection' },
+      { type: 'delta', text: reply },
+    ] : []);
+    expect(database.connection.prepare('SELECT model, status FROM ai_runs').get()).toEqual({ model: 'test/writer', status: 'SUCCEEDED' });
+    expect(integrated.apply(projectId, episodeId, message.id).episode).toMatchObject({ content: original.replace(selected, replacement), revision: 2 });
   });
 });

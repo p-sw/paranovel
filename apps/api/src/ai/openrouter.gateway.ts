@@ -238,7 +238,8 @@ export class OpenRouterGateway {
     if (request.tools) {
       body.tools = request.tools;
       body.tool_choice = request.toolChoice ?? 'required';
-      body.parallel_tool_calls = true;
+      // Leave parallel tool calls at the provider default. Requiring this optional
+      // control excludes tool-capable endpoints that do not advertise it.
       body.provider = { require_parameters: true };
     }
 

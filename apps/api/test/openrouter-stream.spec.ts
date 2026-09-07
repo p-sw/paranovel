@@ -47,7 +47,8 @@ describe('OpenRouter streaming', () => {
       ] });
     expect(onDelta.mock.calls).toEqual([['안녕 🌙']]);
     const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
-    expect(body).toMatchObject({ stream: true, parallel_tool_calls: true, stream_options: { include_usage: true } });
+    expect(body).toMatchObject({ stream: true, provider: { require_parameters: true }, stream_options: { include_usage: true } });
+    expect(body).not.toHaveProperty('parallel_tool_calls');
   });
 
   it('delivers text before completion and cancels an open reader on abort', async () => {
