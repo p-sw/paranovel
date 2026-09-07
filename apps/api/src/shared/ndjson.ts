@@ -31,6 +31,8 @@ export async function sendNdjson<T extends { type: string }>(
       } as unknown as T);
     }
   } finally {
+    request.off('aborted', abort);
+    response.off('close', abort);
     if (!response.writableEnded) response.end();
   }
 }

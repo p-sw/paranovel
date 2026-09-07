@@ -74,7 +74,7 @@ describe('chat rooms and history navigation', () => {
     expect(log.getByText(firstHistory.messages[1].content)).toBeInTheDocument();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: '문의 기원을 설명해 줘' } });
     fireEvent.click(screen.getByRole('button', { name: '보내기' }));
-    await waitFor(() => expect(api.chat.send).toHaveBeenCalledWith('story', expect.objectContaining({ content: '문의 기원을 설명해 줘' }), first.id));
+    await waitFor(() => expect(api.chat.send).toHaveBeenCalledWith('story', expect.objectContaining({ content: '문의 기원을 설명해 줘' }), first.id, expect.any(Function), expect.any(AbortSignal)));
   });
 
   it('opens a fresh room without showing the previous draft or a late response from the previous room', async () => {
@@ -93,7 +93,8 @@ describe('chat rooms and history navigation', () => {
     const completed = { ...firstHistory, messages: [...firstHistory.messages, { ...firstHistory.messages[1], id: 'late-answer', content: '이전 방의 늦은 답변' }] };
     await act(async () => finish(completed));
     expect(screen.queryByText('이전 방의 늦은 답변')).not.toBeInTheDocument();
-    expect(client.getQueryData(['chat', 'story', first.id])).toEqual(completed);
+    expect(vi.mocked(api.chat.send).mock.calls[0]![4]?.aborted).toBe(true);
+    expect(client.getQueryData(['chat', 'story', first.id])).toEqual(firstHistory);
     expect(screen.getByRole('textbox')).toHaveValue('');
   });
 

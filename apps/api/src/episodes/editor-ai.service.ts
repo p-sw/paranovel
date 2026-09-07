@@ -1,6 +1,6 @@
 import { BadGatewayException, BadRequestException, ConflictException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { and, eq, sql } from 'drizzle-orm';
-import type { EditorAiEdit, EditorAiHistory, EditorAiInput, EditorAiMessage } from '@paranovel/contracts';
+import type { ConversationStreamEvent, EditorAiEdit, EditorAiHistory, EditorAiInput, EditorAiMessage } from '@paranovel/contracts';
 import { AiRunnerService } from '../ai/ai-runner.service';
 import type { ChatMessage } from '../ai/ai.types';
 import { DatabaseService } from '../database/database.service';
@@ -17,9 +17,39 @@ import {
 const FAILED_REPLY = '편집 AI가 답변을 완료하지 못했습니다. 다시 시도해 주세요.';
 type MessageRow = typeof editorAiMessages.$inferSelect;
 type StoredEditorAiEdit = EditorAiEdit & { baseFlowRevision?: string };
+type ManuscriptEdit = Pick<EditorAiEdit, 'title' | 'start' | 'end' | 'original' | 'replacement'>;
 
 function splitsCharacter(content: string, offset: number) {
   return /[\uD800-\uDBFF]/.test(content[offset - 1] ?? '') && /[\uDC00-\uDFFF]/.test(content[offset] ?? '');
+}
+
+function editsOverlap(left: ManuscriptEdit, right: ManuscriptEdit) {
+  if (left.start === left.end) {
+    return right.start === right.end
+      ? left.start === right.start
+      : right.start < left.start && left.start < right.end;
+  }
+  if (right.start === right.end) return left.start < right.start && right.start < left.end;
+  return left.start < right.end && right.start < left.end;
+}
+
+function combineEdits(manuscript: string, edits: ManuscriptEdit[], baseRevision: number): EditorAiEdit | null {
+  if (!edits.length) return null;
+  // At a shared boundary, an insertion precedes the replacement starting there.
+  const ordered = [...edits].sort((left, right) => left.start - right.start || left.end - right.end);
+  const start = ordered[0]!.start;
+  const end = ordered.at(-1)!.end;
+  const parts: string[] = [];
+  let position = start;
+  for (const edit of ordered) {
+    parts.push(manuscript.slice(position, edit.start), edit.replacement);
+    position = edit.end;
+  }
+  return {
+    title: ordered.length === 1 ? ordered[0]!.title : `${ordered.length}곳 수정`,
+    start, end, original: manuscript.slice(start, end), replacement: parts.join(''),
+    baseRevision, status: 'PENDING',
+  };
 }
 
 @Injectable()
@@ -43,7 +73,10 @@ export class EditorAiService implements OnModuleInit {
     return { messages: this.rows(projectId, episodeId).map((row) => this.view(row)) };
   }
 
-  async send(projectId: string, episodeId: string, body: unknown, signal?: AbortSignal): Promise<EditorAiHistory> {
+  async send(
+    projectId: string, episodeId: string, body: unknown, signal?: AbortSignal,
+    onEvent?: (event: ConversationStreamEvent<EditorAiHistory>) => void,
+  ): Promise<EditorAiHistory> {
     const parsed = editorAiInput.safeParse(body);
     if (!parsed.success) throw new BadRequestException('메시지와 원고의 선택 범위를 확인해 주세요.');
     const input = parsed.data;
@@ -70,9 +103,13 @@ export class EditorAiService implements OnModuleInit {
       }
       return { replay: false as const, assistantId, episode };
     }).immediate();
-    if (turn.replay) return this.history(projectId, episodeId);
+    if (turn.replay) {
+      onEvent?.({ type: 'start', messageId: turn.assistantId });
+      return this.history(projectId, episodeId);
+    }
 
     try {
+      onEvent?.({ type: 'start', messageId: turn.assistantId });
       const baseFlowRevision = await this.episodes.prepareEditorAiFlowRevision(
         projectId,
         episodeId,
@@ -84,13 +121,13 @@ export class EditorAiService implements OnModuleInit {
         this.episodes.assertSideFlowRevisionForEpisode(projectId, episodeId, baseFlowRevision);
       }
       const { start, end } = input.selection;
-      const staged: { edit: StoredEditorAiEdit | null } = { edit: null };
+      const staged: ManuscriptEdit[] = [];
       const hasSelection = end > start;
       const tool = editorTool(hasSelection);
       const readTools = hasSelection ? [tool] : [tool, replaceTextTool, readManuscriptTool];
       const result = await this.ai.completeChat({
         task: 'episode_editor', promptId: 'episode-editor', projectId, episodeId, modelRole: 'WRITING',
-        signal, maxTokens: 12_000, toolMaxTokens: 16_000,
+        signal, onEvent, parallelToolNames: [readManuscriptTool.function.name], maxTokens: 12_000, toolMaxTokens: 16_000,
         variables: {
           project_context: memory.projectContext, writing_direction: memory.writingDirection,
           canon: memory.canon, current_arc: memory.currentArc,
@@ -125,7 +162,6 @@ export class EditorAiService implements OnModuleInit {
             if (splitsCharacter(manuscript, to)) to += 1;
             return { start: from, end: to, text: manuscript.slice(from, to), totalCharacters: manuscript.length };
           }
-          if (staged.edit) return { error: '수정안은 이미 준비되었습니다. 추가 수정은 다음 대화에서 요청받으세요.' };
           let target = input.selection;
           let edit: { title: string; replacement: string };
           if (name === replaceTextTool.function.name) {
@@ -144,18 +180,18 @@ export class EditorAiService implements OnModuleInit {
             edit = parsedEdit.data;
           }
           if (edit.replacement === target.text) return { error: '수정할 새 본문을 작성해 주세요.' };
-          if (manuscript.length - (target.end - target.start) + edit.replacement.length > 1_000_000) {
+          const candidate: ManuscriptEdit = { ...edit, start: target.start, end: target.end, original: target.text };
+          if (staged.some((previous) => editsOverlap(previous, candidate))) {
+            return { error: '이미 준비한 수정 범위와 겹치거나 같은 커서에 다시 삽입할 수 없습니다. 현재 원고의 서로 겹치지 않는 범위를 지정해 주세요.' };
+          }
+          const stagedLength = staged.reduce((length, previous) => length + previous.replacement.length - (previous.end - previous.start), manuscript.length);
+          if (stagedLength - (target.end - target.start) + edit.replacement.length > 1_000_000) {
             return { error: '원고는 1,000,000자 이하여야 합니다.' };
           }
-          staged.edit = {
-            ...edit, start: target.start, end: target.end, original: target.text,
-            baseRevision: turn.episode.revision, status: 'PENDING',
-            ...(baseFlowRevision !== undefined
-              ? { baseFlowRevision }
-              : {}),
-          };
+          staged.push(candidate);
           return { status: 'PREVIEW_READY', title: edit.title, start: target.start, end: target.end,
-            message: '전후 비교 카드에 표시할 수정안을 준비했습니다. 사용자가 수락하고 적용해야 원고에 반영됩니다.' };
+            editCount: staged.length,
+            message: '전후 비교 카드에 표시할 수정안을 준비했습니다. 여러 수정은 하나의 카드로 합쳐지며 사용자가 수락하고 적용해야 원고에 반영됩니다.' };
         },
       }, (runId) => {
         this.database.orm.update(editorAiMessages).set({ runId }).where(eq(editorAiMessages.id, turn.assistantId)).run();
@@ -166,9 +202,11 @@ export class EditorAiService implements OnModuleInit {
       } else {
         this.episodes.get(projectId, episodeId);
       }
+      const edit: StoredEditorAiEdit | null = combineEdits(turn.episode.content, staged, turn.episode.revision);
+      if (edit && baseFlowRevision !== undefined) edit.baseFlowRevision = baseFlowRevision;
       this.database.orm.update(editorAiMessages).set({
         content: result.value.reply, status: 'COMPLETE', error: null, runId: result.runId,
-        editJson: staged.edit ? stringifyJson(staged.edit) : null,
+        editJson: edit ? stringifyJson(edit) : null,
       }).where(eq(editorAiMessages.id, turn.assistantId)).run();
       return this.history(projectId, episodeId);
     } catch (error) {

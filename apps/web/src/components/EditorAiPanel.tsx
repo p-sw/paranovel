@@ -6,6 +6,8 @@ import { api, messageOf } from '../api/client';
 import { characterCount, createIdempotencyKey } from '../lib';
 import type { SelectionSnapshot } from '../types';
 import { Button, ErrorState, IconButton, Spinner } from './Ui';
+import { ConversationReply } from './ConversationReply';
+import { useConversationStream } from '../useConversationStream';
 
 type Turn = { content: string; clientMessageId: string; request?: EditorAiInput };
 
@@ -36,6 +38,7 @@ export default function EditorAiPanel({ projectId, episodeId, open, disabled, di
   const sending = useRef(false);
   const applying = useRef(false);
   const follow = useRef(true);
+  const stream = useConversationStream(`${projectId}:${episodeId}`);
   const queryKey = ['editor-ai', projectId, episodeId];
   const query = useQuery({
     queryKey, queryFn: () => api.editorAi.history(projectId, episodeId), enabled: open, staleTime: 0,
@@ -44,17 +47,21 @@ export default function EditorAiPanel({ projectId, episodeId, open, disabled, di
   const messages = query.data?.messages ?? [];
   const sendMutation = useMutation({
     mutationFn: async (turn: Turn) => {
+      const { onEvent, signal } = stream.start();
       const request = turn.request ?? await prepareRequest(turn.content, turn.clientMessageId);
+      signal.throwIfAborted();
       setLocalTurn({ ...turn, request });
-      return api.editorAi.send(projectId, episodeId, request);
+      return api.editorAi.send(projectId, episodeId, request, onEvent, signal);
     },
     onSuccess: async (history) => {
+      if (stream.isAborted()) return;
       await client.cancelQueries({ queryKey, exact: true });
       client.setQueryData(queryKey, history);
       setLocalTurn(null);
       setSendError('');
     },
     onError: (error) => {
+      if (stream.isAborted()) return;
       setSendError(messageOf(error));
       void client.invalidateQueries({ queryKey });
     },
@@ -66,8 +73,9 @@ export default function EditorAiPanel({ projectId, episodeId, open, disabled, di
     onError: (error, { id }) => setApplyErrors((errors) => ({ ...errors, [id]: messageOf(error) })),
     onSettled: () => { applying.current = false; },
   });
-  const pending = sendMutation.isPending || messages.some((message) => message.status === 'PENDING');
+  const pending = sendMutation.isPending || messages.some((message) => message.status === 'PENDING' && !(sendError && message.clientMessageId === localTurn?.clientMessageId));
   const localNotSaved = localTurn && !messages.some((message) => message.clientMessageId === localTurn.clientMessageId);
+  const localAssistantMissing = localTurn && !messages.some((message) => message.role === 'assistant' && message.clientMessageId === localTurn.clientMessageId);
   const unsentFailure = Boolean(localNotSaved && sendError && !pending);
   const selected = Boolean(selection?.text);
   const selectionStale = Boolean(selected && selection && selection.content !== content);
@@ -75,7 +83,7 @@ export default function EditorAiPanel({ projectId, episodeId, open, disabled, di
 
   useLayoutEffect(() => {
     if (open && follow.current && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [messages, localTurn, pending, open]);
+  }, [messages, localTurn, pending, open, stream.progress]);
   useLayoutEffect(() => {
     if (open) inputRef.current?.focus({ preventScroll: true });
   }, [open]);
@@ -128,12 +136,18 @@ export default function EditorAiPanel({ projectId, episodeId, open, disabled, di
               <Button key={suggestion} size="sm" variant="secondary" onClick={() => { setDraft(suggestion); inputRef.current?.focus(); }}>{suggestion}</Button>)}
           </div>
         </div> : null}
-        {messages.map((message) => <article key={message.id} className={`editor-ai-message editor-ai-message-${message.role}`} aria-label={message.role === 'user' ? '내 편집 요청' : '편집 AI 답변'}>
-          <p className="chat-speaker">{message.role === 'user' ? '나' : '편집 AI'}</p>
-          {message.request?.selection.text ? <details className="editor-ai-source"><summary>선택한 원문 · {characterCount(message.request.selection.text)}자</summary><p>{message.request.selection.text}</p></details> : null}
-          {message.status === 'PENDING' ? <p className="chat-processing" role="status"><Sparkles className="size-4 animate-pulse" />원고를 읽고 답변을 쓰고 있어요.</p>
-            : message.status === 'FAILED' ? <>
-              <p className="text-sm text-red-700" role="alert">{localTurn?.clientMessageId === message.clientMessageId && sendError ? sendError : message.error || '답변을 완료하지 못했습니다.'}</p>
+        {messages.map((message) => {
+          const localAssistant = message.role === 'assistant' && message.clientMessageId === localTurn?.clientMessageId && (sendMutation.isPending || message.status !== 'COMPLETE');
+          const streaming = localAssistant && sendMutation.isPending;
+          const failed = !streaming && (message.status === 'FAILED' || (localAssistant && Boolean(sendError)));
+          return <article key={message.id} className={`editor-ai-message editor-ai-message-${message.role}`} aria-label={message.role === 'user' ? '내 편집 요청' : '편집 AI 답변'}>
+            <p className="chat-speaker">{message.role === 'user' ? '나' : '편집 AI'}</p>
+            {message.request?.selection.text ? <details className="editor-ai-source"><summary>선택한 원문 · {characterCount(message.request.selection.text)}자</summary><p>{message.request.selection.text}</p></details> : null}
+            {localAssistant ? <ConversationReply progress={stream.progress} pending={streaming} className="editor-ai-message-text" fallback="원고를 읽고 답변을 쓰고 있어요." />
+              : message.status === 'PENDING' ? <p className="chat-processing" role="status"><Sparkles className="size-4 animate-pulse" />원고를 읽고 답변을 쓰고 있어요.</p>
+                : message.status === 'COMPLETE' ? <p className="editor-ai-message-text">{message.content}</p> : null}
+            {failed ? <>
+              <p className="text-sm text-red-700" role="alert">{localAssistant && sendError ? sendError : message.error || '답변을 완료하지 못했습니다.'}</p>
               <div className="mt-2 flex flex-wrap gap-1">
                 <Button size="sm" variant="secondary" disabled={busy} onClick={() => {
                   const request = messages.find((item) => item.role === 'user' && item.clientMessageId === message.clientMessageId)?.request;
@@ -144,29 +158,29 @@ export default function EditorAiPanel({ projectId, episodeId, open, disabled, di
                   if (user) restoreInput(user.content);
                 }}>현재 원고로 다시 요청</Button>
               </div>
-            </> : <p className="editor-ai-message-text">{message.content}</p>}
-          {message.edit ? <EditCard edit={message.edit} stale={dirty || message.edit.baseRevision !== revision} disabled={busy}
-            autoSelected={!messages.find((item) => item.role === 'user' && item.clientMessageId === message.clientMessageId)?.request?.selection.text}
-            applying={applyMutation.isPending && applyMutation.variables?.id === message.id} error={applyErrors[message.id]}
-            onApply={() => {
-              if (applying.current || sending.current || busy) return;
-              applying.current = true;
-              applyMutation.mutate({ id: message.id, edit: message.edit! });
-            }} /> : null}
-        </article>)}
-        {localNotSaved ? <>
-          <article className="editor-ai-message editor-ai-message-user"><p className="chat-speaker">나</p><p className="editor-ai-message-text">{localTurn.content}</p></article>
-          <div className="editor-ai-message editor-ai-message-assistant">
-            {pending ? <p className="chat-processing" role="status"><Sparkles className="size-4 animate-pulse" />원고를 읽고 답변을 쓰고 있어요.</p> : <>
-              <p className="text-sm text-red-700" role="alert">{sendError}</p>
-              <div className="mt-2 flex flex-wrap gap-1">
-                <Button size="sm" variant="secondary" disabled={busy} onClick={() => send(localTurn)}>전송 다시 시도</Button>
-                <Button size="sm" variant="ghost" disabled={busy} onClick={() => restoreInput(localTurn.content)}>입력 수정</Button>
-              </div>
-            </>}
-          </div>
-        </> : null}
-        {sendError && !localNotSaved && !messages.some((message) => message.status === 'FAILED') ? <p role="alert" className="text-sm text-red-700">{sendError}</p> : null}
+            </> : null}
+            {!streaming && message.status === 'COMPLETE' && message.edit ? <EditCard edit={message.edit} stale={dirty || message.edit.baseRevision !== revision} disabled={busy}
+              autoSelected={!messages.find((item) => item.role === 'user' && item.clientMessageId === message.clientMessageId)?.request?.selection.text}
+              applying={applyMutation.isPending && applyMutation.variables?.id === message.id} error={applyErrors[message.id]}
+              onApply={() => {
+                if (applying.current || sending.current || busy) return;
+                applying.current = true;
+                applyMutation.mutate({ id: message.id, edit: message.edit! });
+              }} /> : null}
+          </article>;
+        })}
+        {localNotSaved ? <article className="editor-ai-message editor-ai-message-user"><p className="chat-speaker">나</p><p className="editor-ai-message-text">{localTurn.content}</p></article> : null}
+        {localAssistantMissing ? <div className="editor-ai-message editor-ai-message-assistant" aria-label="편집 AI 답변">
+          <p className="chat-speaker">편집 AI</p>
+          <ConversationReply progress={stream.progress} pending={sendMutation.isPending} className="editor-ai-message-text" fallback="원고를 읽고 답변을 쓰고 있어요." />
+          {!sendMutation.isPending ? <>
+            <p className="text-sm text-red-700" role="alert">{sendError}</p>
+            <div className="mt-2 flex flex-wrap gap-1">
+              <Button size="sm" variant="secondary" disabled={busy} onClick={() => send(localTurn)}>전송 다시 시도</Button>
+              <Button size="sm" variant="ghost" disabled={busy} onClick={() => restoreInput(localTurn.content)}>입력 수정</Button>
+            </div>
+          </> : null}
+        </div> : null}
       </div>
       {awayFromBottom ? <Button className="chat-latest" variant="secondary" size="sm" onClick={() => {
         follow.current = true;

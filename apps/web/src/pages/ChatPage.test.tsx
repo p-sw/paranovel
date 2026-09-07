@@ -38,6 +38,78 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('project AI chat', () => {
+  it('renders live text and simultaneous tools, survives history refreshes, and reviews proposals only at completion', async () => {
+    let finish!: (history: ChatHistory) => void;
+    let emit!: NonNullable<Parameters<typeof api.chat.send>[3]>;
+    let turn!: Parameters<typeof api.chat.send>[1];
+    vi.mocked(api.chat.send).mockImplementationOnce((_project, input, _thread, callback) => {
+      turn = input;
+      emit = callback!;
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    const { client } = renderPage();
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: userMessage.content } });
+    fireEvent.click(screen.getByRole('button', { name: '보내기' }));
+    await waitFor(() => expect(emit).toBeDefined());
+    act(() => {
+      emit({ type: 'delta', text: '설정을 살펴보고 있어요.' }, '');
+      emit({ type: 'tool_start', callId: 'one', name: 'search_canon' }, '');
+      emit({ type: 'tool_start', callId: 'two', name: 'read_episode' }, '');
+    });
+    expect(screen.getByText('설정을 살펴보고 있어요.')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('도구 2개');
+    const complete = { thread, messages: [
+      { ...userMessage, clientMessageId: turn.clientMessageId },
+      { ...assistantMessage, clientMessageId: turn.clientMessageId },
+    ] };
+    act(() => client.setQueryData(['chat', 'story', thread.id], complete));
+    expect(screen.getAllByText('설정을 살펴보고 있어요.')).toHaveLength(1);
+    expect(screen.queryByText(assistantMessage.content)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '변경안 적용' })).not.toBeInTheDocument();
+    act(() => emit({ type: 'tool_end', callId: 'one', name: 'search_canon' }, ''));
+    expect(screen.getByRole('status')).toHaveTextContent('도구 1개');
+    act(() => {
+      emit({ type: 'reset' }, '');
+      emit({ type: 'delta', text: '기억을 대가로 ' }, '');
+      emit({ type: 'delta', text: '하는 설정을 제안합니다.' }, '');
+    });
+    expect(screen.queryByText('설정을 살펴보고 있어요.')).not.toBeInTheDocument();
+    expect(screen.getByText(assistantMessage.content)).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('답변을 쓰고 있어요.');
+    await act(async () => finish(complete));
+    expect(screen.getByRole('button', { name: '변경안 적용' })).toBeEnabled();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(api.chat.apply).not.toHaveBeenCalled();
+  });
+
+  it('keeps partial text on stream failure, then clears it and tool activity when retrying', async () => {
+    let fail!: (error: Error) => void;
+    let emit!: NonNullable<Parameters<typeof api.chat.send>[3]>;
+    vi.mocked(api.chat.send).mockImplementationOnce((_project, _input, _thread, callback) => {
+      emit = callback!;
+      return new Promise((_resolve, reject) => { fail = reject; });
+    }).mockImplementationOnce(() => new Promise(() => undefined));
+    const { unmount } = renderPage();
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: userMessage.content } });
+    fireEvent.click(screen.getByRole('button', { name: '보내기' }));
+    await waitFor(() => expect(emit).toBeDefined());
+    act(() => {
+      emit({ type: 'delta', text: '완료되지 않은 답변' }, '');
+      emit({ type: 'tool_start', callId: 'one', name: 'search_canon' }, '');
+    });
+    await act(async () => fail(new Error('연결이 끊겼어요.')));
+    expect(screen.getByText('완료되지 않은 답변')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('연결이 끊겼어요.');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '전송 다시 시도' }));
+    await waitFor(() => expect(api.chat.send).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText('완료되지 않은 답변')).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).not.toHaveTextContent('도구');
+    const signal = vi.mocked(api.chat.send).mock.calls[1]![4]!;
+    unmount();
+    expect(signal.aborted).toBe(true);
+  });
+
   it('labels project writing-direction changes in proposal reviews', async () => {
     const projectProposal: ChatProposal = {
       ...proposal,
@@ -126,7 +198,7 @@ describe('project AI chat', () => {
     fireEvent.change(input, { target: { value: '  능력에 대가를 추가해 줘  ' } });
     fireEvent.click(screen.getByRole('button', { name: '보내기' }));
     await waitFor(() => expect(api.chat.send).toHaveBeenCalledTimes(1));
-    expect(api.chat.send).toHaveBeenCalledWith('story', { content: '능력에 대가를 추가해 줘', clientMessageId: expect.any(String) }, thread.id);
+    expect(api.chat.send).toHaveBeenCalledWith('story', { content: '능력에 대가를 추가해 줘', clientMessageId: expect.any(String) }, thread.id, expect.any(Function), expect.any(AbortSignal));
     expect(screen.getByRole('button', { name: '보내기' })).toBeDisabled();
     fireEvent.change(input, { target: { value: '다음 질문을 미리 작성' } });
     await act(async () => resolve({ thread, messages: [userMessage, assistantMessage] }));
@@ -140,7 +212,7 @@ describe('project AI chat', () => {
     renderPage();
     expect(await screen.findByText('연결이 끊어졌습니다.')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '답변 다시 시도' }));
-    await waitFor(() => expect(api.chat.send).toHaveBeenCalledWith('story', { content: userMessage.content, clientMessageId: 'turn-1' }, thread.id));
+    await waitFor(() => expect(api.chat.send).toHaveBeenCalledWith('story', { content: userMessage.content, clientMessageId: 'turn-1' }, thread.id, expect.any(Function), expect.any(AbortSignal)));
     expect(await screen.findByText(assistantMessage.content)).toBeInTheDocument();
     expect(screen.getAllByText(userMessage.content)).toHaveLength(1);
   });
@@ -154,7 +226,7 @@ describe('project AI chat', () => {
     expect(screen.getByText('설정을 읽어 줘')).toBeInTheDocument();
     const originalInput = vi.mocked(api.chat.send).mock.calls[0][1];
     fireEvent.click(screen.getByRole('button', { name: '전송 다시 시도' }));
-    await waitFor(() => expect(api.chat.send).toHaveBeenNthCalledWith(2, 'story', originalInput, thread.id));
+    await waitFor(() => expect(api.chat.send).toHaveBeenNthCalledWith(2, 'story', originalInput, thread.id, expect.any(Function), expect.any(AbortSignal)));
   });
 
   it('shows deletion and arc archival effects before applying, and leaves stale proposals unapplied', async () => {
@@ -182,6 +254,6 @@ describe('project AI chat', () => {
     fireEvent.keyDown(input, { key: 'Enter', shiftKey: true });
     expect(api.chat.send).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: '보내기' }));
-    await waitFor(() => expect(api.chat.send).toHaveBeenCalledWith('another-story', expect.objectContaining({ content: '새로운 설정' }), thread.id));
+    await waitFor(() => expect(api.chat.send).toHaveBeenCalledWith('another-story', expect.objectContaining({ content: '새로운 설정' }), thread.id, expect.any(Function), expect.any(AbortSignal)));
   });
 });

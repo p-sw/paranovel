@@ -10,13 +10,16 @@ import { sanitizeLogText, serializeError } from '../shared/error-log';
 import { id, now, sha256, stringifyJson } from '../shared/utils';
 import type {
   ChatMessage,
+  ChatStreamEvent,
   CompletionRequest,
   CompletionResult,
   CompletionUsage,
   PromptRunInput,
+  ToolCall,
   ToolDefinition,
 } from './ai.types';
 import { OpenRouterGateway } from './openrouter.gateway';
+import { JsonReplyStream } from './json-reply-stream';
 import {
   TavilySearchService,
   tavilySearchTool,
@@ -68,6 +71,21 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value) ?? 'null';
 }
 
+function toolContentWithinBudget(result: unknown, budget: number): string {
+  const content = stringifyJson(result);
+  if (content.length <= budget) return content;
+  const truncated = (length: number): string => stringifyJson({ truncated: true, excerpt: content.slice(0, length) });
+  if (truncated(0).length > budget) return '';
+  let lower = 0;
+  let upper = Math.min(content.length, budget);
+  while (lower < upper) {
+    const middle = Math.ceil((lower + upper) / 2);
+    if (truncated(middle).length <= budget) lower = middle;
+    else upper = middle - 1;
+  }
+  return truncated(lower);
+}
+
 @Injectable()
 export class AiRunnerService {
   private readonly logger = new Logger(AiRunnerService.name);
@@ -102,6 +120,9 @@ export class AiRunnerService {
       readTool: (name: string, argumentsJson: string) => Promise<unknown>;
       resolveAfterTools?: () => T | undefined;
       toolMaxTokens?: number;
+      onEvent?: (event: ChatStreamEvent) => void;
+      // Only independent tools belong here. All other calls are ordering barriers.
+      parallelToolNames?: string[];
     },
     onRunStarted?: (runId: string) => void,
   ): Promise<{ runId: string; value: T }> {
@@ -112,56 +133,86 @@ export class AiRunnerService {
       let calls = 0;
       let referenceSearches = 0;
       let remainingCharacters = 60_000;
+      const parallelTools = new Set(input.parallelToolNames ?? []);
+      const complete = (completionRequest: CompletionRequest, onDelta: (text: string) => void) =>
+        input.onEvent ? this.gateway.streamText(completionRequest, onDelta) : this.gateway.complete(completionRequest);
+      const runTool = async (call: ToolCall): Promise<unknown> => {
+        input.signal?.throwIfAborted();
+        // Reserve limits before the first await, in the model's call order.
+        if (calls >= 8 || remainingCharacters <= 0) return { error: 'READ_LIMIT_REACHED' };
+        calls += 1;
+        if (call.function.name === tavilySearchTool.function.name) {
+          if (referenceSearches >= MAX_REFERENCE_SEARCHES) return { error: 'SEARCH_LIMIT_REACHED' };
+          referenceSearches += 1;
+        }
+        input.onEvent?.({ type: 'tool_start', callId: call.id, name: call.function.name });
+        try {
+          const result = await input.readTool(call.function.name, call.function.arguments);
+          input.signal?.throwIfAborted();
+          return result;
+        } finally {
+          if (!input.signal?.aborted) input.onEvent?.({ type: 'tool_end', callId: call.id, name: call.function.name });
+        }
+      };
       for (let round = 0; round < 4 && calls < 8; round += 1) {
         input.signal?.throwIfAborted();
-        const response = await this.gateway.complete({
+        const response = await complete({
           ...request, messages: [...messages], schema: undefined,
           tools: input.readTools, toolChoice: 'auto', maxTokens: input.toolMaxTokens ?? 2_000,
-        });
+        }, () => undefined);
         usage = addUsage(usage, response.usage);
         if (!response.toolCalls.length) break;
         messages.push(response.assistantMessage ?? {
           role: 'assistant', content: response.content || null, tool_calls: response.toolCalls,
         });
-        for (const call of response.toolCalls) {
-          input.signal?.throwIfAborted();
-          let result: unknown;
-          if (calls >= 8 || remainingCharacters <= 0) {
-            result = { error: 'READ_LIMIT_REACHED' };
-          } else {
-            calls += 1;
-            if (call.function.name === tavilySearchTool.function.name && referenceSearches >= MAX_REFERENCE_SEARCHES) {
-              result = { error: 'SEARCH_LIMIT_REACHED' };
-            } else {
-              if (call.function.name === tavilySearchTool.function.name) referenceSearches += 1;
-              result = await input.readTool(call.function.name, call.function.arguments);
+        for (let index = 0; index < response.toolCalls.length;) {
+          const batch: ToolCall[] = [response.toolCalls[index++]!];
+          if (parallelTools.has(batch[0]!.function.name)) {
+            while (index < response.toolCalls.length && parallelTools.has(response.toolCalls[index]!.function.name)) {
+              batch.push(response.toolCalls[index++]!);
             }
           }
-          let content = stringifyJson(result);
-          if (content.length > remainingCharacters && remainingCharacters > 0) {
-            content = stringifyJson({ truncated: true, excerpt: content.slice(0, Math.max(0, remainingCharacters - 100)) });
-          }
-          remainingCharacters = Math.max(0, remainingCharacters - content.length);
-          messages.push({ role: 'tool', tool_call_id: call.id, content });
-          // A tool may produce the authoritative user-facing result. Finish
-          // immediately so later calls or model rounds cannot alter it.
-          const terminalValue = input.resolveAfterTools?.();
-          if (terminalValue !== undefined) {
-            value = input.validator.parse(terminalValue);
-            return { ...response, content: stringifyJson(value), toolCalls: [], usage };
+          const results = await Promise.allSettled(batch.map(runTool));
+          input.signal?.throwIfAborted();
+          const failure = results.find((result) => result.status === 'rejected');
+          if (failure?.status === 'rejected') throw failure.reason;
+          for (let position = 0; position < batch.length; position += 1) {
+            const result = results[position]!;
+            if (result.status !== 'fulfilled') continue;
+            const content = toolContentWithinBudget(result.value, remainingCharacters);
+            remainingCharacters -= content.length;
+            messages.push({ role: 'tool', tool_call_id: batch[position]!.id, content });
+            // Sequential tools can produce an authoritative reply (e.g. images).
+            // Finish before starting later calls or another model round.
+            const terminalValue = input.resolveAfterTools?.();
+            if (terminalValue !== undefined) {
+              value = input.validator.parse(terminalValue);
+              const reply = (value as { reply?: unknown } | null)?.reply;
+              if (typeof reply === 'string' && reply) input.onEvent?.({ type: 'delta', text: reply });
+              return { ...response, content: stringifyJson(value), toolCalls: [], usage };
+            }
           }
         }
       }
       let lastError: unknown;
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const response = await this.gateway.complete({
+        input.signal?.throwIfAborted();
+        if (attempt > 0) input.onEvent?.({ type: 'reset' });
+        const replyStream = new JsonReplyStream((text) => input.onEvent?.({ type: 'delta', text }));
+        const response = await complete({
           ...request, messages: [...messages], tools: undefined, toolChoice: 'none',
-        });
+        }, (text) => replyStream.write(text));
         usage = addUsage(usage, response.usage);
+        input.signal?.throwIfAborted();
         try {
           value = input.validator.parse(JSON.parse(response.content));
-          return { ...response, usage };
-        } catch (error) { lastError = error; }
+        } catch (error) { lastError = error; continue; }
+        const reply = (value as { reply?: unknown } | null)?.reply;
+        if (input.onEvent && typeof reply === 'string' && reply !== replyStream.text) {
+          input.onEvent({ type: 'reset' });
+          if (reply) input.onEvent({ type: 'delta', text: reply });
+        }
+        return { ...response, usage };
       }
       throw new BadGatewayException(`AI returned invalid chat output after one retry: ${lastError instanceof Error ? lastError.message : String(lastError)}`, { cause: lastError });
     }, onRunStarted);

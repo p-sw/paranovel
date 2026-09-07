@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { AiRunnerService } from '../src/ai/ai-runner.service';
 import { OpenRouterGateway } from '../src/ai/openrouter.gateway';
 import type { CompletionRequest } from '../src/ai/ai.types';
+import type { ChatHistory, ConversationStreamEvent } from '@paranovel/contracts';
 import { ArcsService } from '../src/arcs/arcs.service';
 import { CanonService } from '../src/canon/canon.service';
 import { ChatReadToolsService } from '../src/chat/chat-read-tools.service';
@@ -68,6 +69,48 @@ describe('project chat', () => {
     completeChat.mockResolvedValueOnce({ runId: 'chat-run', value: { reply: '검토할 내용을 준비했습니다.', proposals } });
     return chat.send(projectId, { content, clientMessageId }, undefined, threadId);
   }
+
+  it('streams a pending turn, keeps proposals unavailable until complete, and replays the saved answer', async () => {
+    const events: ConversationStreamEvent<ChatHistory>[] = [];
+    let finish!: () => void;
+    const ready = new Promise<void>((resolve) => { finish = resolve; });
+    completeChat.mockImplementationOnce(async (input) => {
+      expect(input.parallelToolNames).toEqual(expect.arrayContaining(['read_project_record', 'search_project_memory']));
+      expect(input.parallelToolNames).not.toContain('generate_image_tags');
+      input.onEvent({ type: 'delta', text: '설정을 정리' });
+      await ready;
+      input.onEvent({ type: 'delta', text: '했습니다.' });
+      return { runId: 'stream-run', value: { reply: '설정을 정리했습니다.', proposals: [proposal('CANON', 'CREATE', canonFields)] } };
+    });
+    const body = { clientMessageId: 'stream-turn', content: '설정을 만들어 줘' };
+    const pending = chat.send(projectId, body, undefined, undefined, (event) => events.push(event));
+    await vi.waitFor(() => expect(events.some((event) => event.type === 'delta')).toBe(true));
+    const assistant = chat.history(projectId).messages.at(-1)!;
+    expect(events[0]).toEqual({ type: 'start', messageId: assistant.id });
+    expect(assistant).toMatchObject({ content: '', status: 'PENDING', proposals: [] });
+    expect(database.orm.select().from(chatProposals).all()).toHaveLength(0);
+    finish();
+    const completed = await pending;
+    expect(completed.messages.at(-1)).toMatchObject({ id: assistant.id, content: '설정을 정리했습니다.', status: 'COMPLETE', proposals: [expect.objectContaining({ status: 'PENDING' })] });
+    const replay: ConversationStreamEvent<ChatHistory>[] = [];
+    expect(await chat.send(projectId, body, undefined, undefined, (event) => replay.push(event))).toEqual(completed);
+    expect(replay).toEqual([{ type: 'start', messageId: assistant.id }]);
+    expect(completeChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks a streamed turn failed after cancellation without saving partial proposals', async () => {
+    const controller = new AbortController();
+    const emit = vi.fn();
+    completeChat.mockImplementationOnce(async (input) => {
+      input.onEvent({ type: 'delta', text: '일부 답변' });
+      controller.abort();
+      return { runId: 'cancelled-run', value: { reply: '완성된 답변', proposals: [proposal('CANON', 'CREATE', canonFields)] } };
+    });
+    await expect(chat.send(projectId, { clientMessageId: 'cancelled-stream', content: '설정을 만들어 줘' }, controller.signal, undefined, emit)).rejects.toBeInstanceOf(BadGatewayException);
+    expect(emit).toHaveBeenCalledWith({ type: 'delta', text: '일부 답변' });
+    expect(chat.history(projectId).messages.at(-1)).toMatchObject({ content: '', status: 'FAILED', proposals: [] });
+    expect(database.orm.select().from(chatProposals).all()).toHaveLength(0);
+  });
 
   it('creates empty rooms idempotently without creating rooms when reading empty history', () => {
     expect(chat.history(projectId)).toEqual({ thread: null, messages: [] });

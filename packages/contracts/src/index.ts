@@ -550,3 +550,50 @@ export const chatThreadSummarySchema = chatThreadSchema.extend({
 export type ChatThreadSummary = z.infer<typeof chatThreadSummarySchema>;
 export const chatHistorySchema = z.object({ thread: chatThreadSchema.nullable(), messages: z.array(chatMessageSchema) });
 export type ChatHistory = z.infer<typeof chatHistorySchema>;
+
+export const editorAiHistorySchema: z.ZodType<EditorAiHistory> = z.object({
+  messages: z.array(z.object({
+    id: idSchema, projectId: idSchema, episodeId: idSchema, clientMessageId: idSchema,
+    role: z.enum(['user', 'assistant']), content: z.string(),
+    status: z.enum(['PENDING', 'COMPLETE', 'FAILED']),
+    request: z.object({
+      content: z.string(), clientMessageId: idSchema, expectedRevision: z.number().int().nonnegative(),
+      selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), text: z.string() }),
+    }).nullable(),
+    edit: z.object({
+      title: z.string(), start: z.number().int().nonnegative(), end: z.number().int().nonnegative(),
+      original: z.string(), replacement: z.string(), baseRevision: z.number().int().nonnegative(),
+      status: z.enum(['PENDING', 'APPLIED']),
+    }).nullable(),
+    error: z.string().nullable(), createdAt: isoDateSchema,
+  })),
+});
+
+const conversationProgressSchemas = [
+  z.object({ type: z.literal('delta'), text: z.string() }),
+  z.object({ type: z.literal('reset') }),
+  z.object({ type: z.literal('tool_start'), callId: z.string(), name: z.string() }),
+  z.object({ type: z.literal('tool_end'), callId: z.string(), name: z.string() }),
+] as const;
+export const aiConversationEventSchema = z.discriminatedUnion('type', conversationProgressSchemas);
+export type AiConversationEvent = z.infer<typeof aiConversationEventSchema>;
+
+const conversationLifecycleSchemas = [
+  z.object({ type: z.literal('start'), messageId: idSchema }),
+  z.object({ type: z.literal('error'), message: z.string(), code: z.string().optional() }),
+] as const;
+
+export const chatStreamEventSchema = z.discriminatedUnion('type', [
+  ...conversationProgressSchemas, ...conversationLifecycleSchemas,
+  z.object({ type: z.literal('complete'), history: chatHistorySchema }),
+]);
+export const editorAiStreamEventSchema = z.discriminatedUnion('type', [
+  ...conversationProgressSchemas, ...conversationLifecycleSchemas,
+  z.object({ type: z.literal('complete'), history: editorAiHistorySchema }),
+]);
+
+export type ConversationStreamEvent<T> =
+  | AiConversationEvent
+  | { type: 'start'; messageId: string }
+  | { type: 'complete'; history: T }
+  | { type: 'error'; message: string; code?: string };

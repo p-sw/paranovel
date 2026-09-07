@@ -30,6 +30,11 @@ export interface CompletionUsage {
   completionTokens?: number;
 }
 
+export type ChatStreamEvent =
+  | { type: 'delta'; text: string }
+  | { type: 'reset' }
+  | { type: 'tool_start' | 'tool_end'; callId: string; name: string };
+
 export interface CompletionResult {
   content: string;
   toolCalls: ToolCall[];

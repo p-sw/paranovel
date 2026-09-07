@@ -1,6 +1,7 @@
 import { BadGatewayException, BadRequestException, ConflictException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { and, desc, eq, getTableColumns, sql } from 'drizzle-orm';
 import { z } from 'zod';
+import type { ChatHistory, ConversationStreamEvent } from '@paranovel/contracts';
 import { AiRunnerService } from '../ai/ai-runner.service';
 import type { ChatMessage as ModelMessage } from '../ai/ai.types';
 import { ArcsService } from '../arcs/arcs.service';
@@ -112,7 +113,8 @@ export class ChatService implements OnModuleInit {
     })) };
   }
 
-  async send(projectId: string, body: unknown, signal?: AbortSignal, threadId?: string) {
+  async send(projectId: string, body: unknown, signal?: AbortSignal, threadId?: string,
+    onEvent?: (event: ConversationStreamEvent<ChatHistory>) => void) {
     const parsed = messageInput.safeParse(body);
     if (!parsed.success) throw new BadRequestException('content와 clientMessageId를 올바르게 입력해 주세요.');
     const input = parsed.data;
@@ -165,10 +167,13 @@ export class ChatService implements OnModuleInit {
         const history = this.history(projectId, turn.threadId);
         context.stage = 'complete';
         this.logger.log({ event: 'chat_send_completed', ...logContext(), replayed: true });
+        onEvent?.({ type: 'start', messageId: turn.id });
         return history;
       }
       activeAssistantId = turn.id;
       activeThreadId = turn.threadId;
+      onEvent?.({ type: 'start', messageId: turn.id });
+      signal?.throwIfAborted();
       context.stage = 'memory';
       const memory = await this.memory.assemble(projectId, input.content);
       context.stage = 'snapshot';
@@ -178,6 +183,7 @@ export class ChatService implements OnModuleInit {
       context.stage = 'ai';
       let imageTagAttempts = 0;
       let imageTagResult: ImageTagToolResult | undefined;
+      const readTools = this.reads.definitions();
       const result = await this.ai.completeChat({
         task: 'project_chat', promptId: 'project-chat', projectId, modelRole: 'CHAT',
         history, signal, maxTokens: 12_000, toolMaxTokens: 8_000,
@@ -189,7 +195,8 @@ export class ChatService implements OnModuleInit {
           improvements: memory.improvements, record_catalog: catalog,
         },
         schema: { name: 'project_chat_reply', value: chatOutputSchema }, validator: chatOutputValidator,
-        readTools: this.reads.definitions(),
+        readTools, onEvent,
+        parallelToolNames: readTools.filter((tool) => tool.function.name !== IMAGE_TAG_TOOL_NAME).map((tool) => tool.function.name),
         resolveAfterTools: () => imageTagResult
           ? { reply: imageTagResult.tagString, proposals: [] }
           : undefined,

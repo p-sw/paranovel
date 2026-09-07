@@ -1,5 +1,7 @@
-import { Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
-import type { Request } from 'express';
+import { Body, Controller, Get, Param, Post, Req, Res } from '@nestjs/common';
+import type { ChatHistory, ConversationStreamEvent } from '@paranovel/contracts';
+import type { Request, Response } from 'express';
+import { sendNdjson } from '../shared/ndjson';
 import { ChatService } from './chat.service';
 
 @Controller('projects/:projectId/chat')
@@ -26,6 +28,22 @@ export class ChatController {
 
   @Get('messages')
   history(@Param('projectId') projectId: string) { return this.chat.history(projectId); }
+
+  @Post('threads/:threadId/messages/stream')
+  streamToThread(@Param('projectId') projectId: string, @Param('threadId') threadId: string,
+    @Body() body: unknown, @Req() request: Request, @Res() response: Response) {
+    return this.stream(projectId, body, request, response, threadId);
+  }
+
+  @Post('messages/stream')
+  stream(@Param('projectId') projectId: string, @Body() body: unknown,
+    @Req() request: Request, @Res() response: Response, threadId?: string) {
+    return sendNdjson<ConversationStreamEvent<ChatHistory>>(request, response, async (emit, signal) => {
+      const history = await this.chat.send(projectId, body, signal, threadId, emit);
+      signal.throwIfAborted();
+      emit({ type: 'complete', history });
+    });
+  }
 
   @Post('messages')
   async send(@Param('projectId') projectId: string, @Body() body: unknown, @Req() request: Request, threadId?: string) {

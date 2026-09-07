@@ -97,6 +97,46 @@ function proposeAutomaticEdit(replacementText = replacement) {
 }
 
 describe('editing conversation in the episode workspace', () => {
+  it('streams readable replies and multiple tools without applying or exposing an unfinished edit', async () => {
+    let finish!: (value: EditorAiHistory) => void;
+    let emit!: NonNullable<Parameters<typeof api.editorAi.send>[3]>;
+    let request!: EditorAiInput;
+    vi.mocked(api.editorAi.send).mockImplementationOnce((_project, _episode, input, callback) => {
+      request = input;
+      emit = callback!;
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    const { editor, client } = await openEditor();
+    select(editor);
+    fireEvent.change(screen.getByRole('textbox', { name: '편집 AI에게 보낼 메시지' }), { target: { value: '긴장감을 높여줘' } });
+    fireEvent.click(screen.getByRole('button', { name: '편집 AI에 보내기' }));
+    await waitFor(() => expect(emit).toBeDefined());
+    act(() => {
+      emit({ type: 'delta', text: '원문의 흐름을 확인했어요.' }, '');
+      emit({ type: 'tool_start', callId: 'one', name: 'read_manuscript' }, '');
+      emit({ type: 'tool_start', callId: 'two', name: 'read_manuscript' }, '');
+    });
+    expect(screen.getByText('원문의 흐름을 확인했어요.')).toBeInTheDocument();
+    expect(within(screen.getByRole('log')).getByRole('status')).toHaveTextContent('도구 2개');
+    const complete = reply(request);
+    act(() => client.setQueryData(['editor-ai', 'story', 'episode'], complete));
+    expect(screen.getAllByText('원문의 흐름을 확인했어요.')).toHaveLength(1);
+    expect(screen.queryByRole('region', { name: '원고 수정안' })).not.toBeInTheDocument();
+    act(() => {
+      emit({ type: 'reset' }, '');
+      emit({ type: 'delta', text: '인물의 반응을 ' }, '');
+      emit({ type: 'delta', text: '구체적으로 다듬었어요.' }, '');
+    });
+    expect(screen.queryByText('원문의 흐름을 확인했어요.')).not.toBeInTheDocument();
+    expect(screen.getByText('인물의 반응을 구체적으로 다듬었어요.')).toBeInTheDocument();
+    expect(editor).toHaveValue(source);
+    expect(api.editorAi.apply).not.toHaveBeenCalled();
+    await act(async () => finish(complete));
+    expect(screen.getByRole('button', { name: '수락하고 적용' })).toBeEnabled();
+    expect(within(screen.getByRole('log')).queryByRole('status')).not.toBeInTheDocument();
+    expect(editor).toHaveValue(source);
+  });
+
   it('shows the AI-chosen range before and after in a persistent card and waits for acceptance to edit', async () => {
     proposeAutomaticEdit();
     const { editor, unmount } = await openEditor();
@@ -310,7 +350,7 @@ describe('editing conversation in the episode workspace', () => {
     expect(input).toHaveValue('그 다음 요청의 초안');
     fireEvent.click(screen.getByRole('button', { name: '전송 다시 시도' }));
     await screen.findByRole('heading', { name: '긴장감을 높인 문장' });
-    expect(api.editorAi.send).toHaveBeenLastCalledWith('story', 'episode', request);
+    expect(api.editorAi.send).toHaveBeenLastCalledWith('story', 'episode', request, expect.any(Function), expect.any(AbortSignal));
     expect(input).toHaveValue('그 다음 요청의 초안');
   });
 
@@ -357,6 +397,7 @@ describe('editing conversation in the episode workspace', () => {
     await waitFor(() => expect(screen.getByRole('textbox', { name: '회차 제목' })).toHaveValue(second.title));
     fireEvent.click(screen.getByRole('button', { name: '편집 AI' }));
     await screen.findByRole('heading', { name: '이 문장부터, 함께 써요' });
+    expect(vi.mocked(api.editorAi.send).mock.calls[0]![4]?.aborted).toBe(true);
     await act(async () => finish(reply(request)));
     expect(screen.getByRole('textbox', { name: '회차 본문' })).toHaveValue(second.content);
     expect(within(screen.getByRole('log')).queryByText('느린 요청')).not.toBeInTheDocument();

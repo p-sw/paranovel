@@ -8,6 +8,8 @@ import { createIdempotencyKey } from '../lib';
 import { Button, ErrorState, Spinner } from '../components/Ui';
 import { ChatProposalCard } from '../components/ChatProposalCard';
 import { ChatHeading } from '../components/ChatHeading';
+import { ConversationReply } from '../components/ConversationReply';
+import { useConversationStream } from '../useConversationStream';
 
 type Turn = { content: string; clientMessageId: string };
 const suggestions = ['현재 설정에서 모순되는 부분을 찾아줘', '다음 아크를 계획해 줘', '최근 회차를 분석하고 개선점을 제안해 줘'];
@@ -29,6 +31,7 @@ function ProjectChat({ projectId, threadId }: { projectId: string; threadId: str
   const followRef = useRef(true);
   const sendingRef = useRef(false);
   const applyingRef = useRef(false);
+  const stream = useConversationStream(`${projectId}:${threadId}`);
   const queryKey = ['chat', projectId, threadId];
   const historyQuery = useQuery({
     queryKey,
@@ -38,14 +41,19 @@ function ProjectChat({ projectId, threadId }: { projectId: string; threadId: str
   });
   const messages = historyQuery.data?.messages ?? [];
   const sendMutation = useMutation({
-    mutationFn: (turn: Turn) => api.chat.send(projectId, turn, threadId),
+    mutationFn: (turn: Turn) => {
+      const { onEvent, signal } = stream.start();
+      return api.chat.send(projectId, turn, threadId, onEvent, signal);
+    },
     onSuccess: async (history) => {
+      if (stream.isAborted()) return;
       await queryClient.cancelQueries({ queryKey, exact: true });
       queryClient.setQueryData(queryKey, history);
       setLocalTurn(null);
       setSendError('');
     },
     onError: (error) => {
+      if (stream.isAborted()) return;
       setSendError(messageOf(error));
       void queryClient.invalidateQueries({ queryKey });
     },
@@ -77,13 +85,14 @@ function ProjectChat({ projectId, threadId }: { projectId: string; threadId: str
     })),
     onSettled: () => { applyingRef.current = false; },
   });
-  const pending = sendMutation.isPending || messages.some((message) => message.status === 'PENDING');
+  const pending = sendMutation.isPending || messages.some((message) => message.status === 'PENDING' && !(sendError && message.clientMessageId === localTurn?.clientMessageId));
   const localNotSaved = localTurn && !messages.some((message) => message.clientMessageId === localTurn.clientMessageId);
+  const localAssistantMissing = localTurn && !messages.some((message) => message.role === 'assistant' && message.clientMessageId === localTurn.clientMessageId);
   const unsavedFailure = Boolean(localNotSaved && sendError && !sendMutation.isPending);
 
   useLayoutEffect(() => {
     if (followRef.current && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [messages, localTurn, sendError, pending]);
+  }, [messages, localTurn, sendError, pending, stream.progress]);
 
   const send = (turn: Turn) => {
     if (sendingRef.current || pending || applyingRef.current) return;
@@ -134,39 +143,45 @@ function ProjectChat({ projectId, threadId }: { projectId: string; threadId: str
           <p className="text-sm leading-6 text-muted">기존 회차를 살펴보며 설정을 정리하거나 다음 아크를 계획할 수 있어요.</p>
           <div className="flex flex-col gap-2">{suggestions.map((suggestion) => <Button key={suggestion} variant="secondary" onClick={() => { setDraft(suggestion); inputRef.current?.focus(); }}>{suggestion}</Button>)}</div>
         </div> : null}
-        {messages.map((message) => <article key={message.id} className={`chat-message chat-message-${message.role}`} aria-label={message.role === 'user' ? '내 메시지' : 'AI 답변'}>
-          <p className="chat-speaker">{message.role === 'user' ? '나' : 'AI'}</p>
-          {message.content ? <p className="chat-message-text">{message.content}</p> : null}
-          {message.status === 'PENDING' && message.role === 'assistant' ? <p className="chat-processing" role="status"><Sparkles className="size-4 animate-pulse" />작품 정보를 확인하며 답변을 준비하고 있어요.</p> : null}
-          {message.status === 'FAILED' ? <div className="mt-3">
-            <p className="text-sm text-red-700" role="alert">{message.error || '답변을 만들지 못했습니다. 다시 시도해 주세요.'}</p>
-            <Button className="mt-2" variant="secondary" disabled={pending || applyMutation.isPending} onClick={() => retryMessage(message)}><RotateCcw className="size-4" />답변 다시 시도</Button>
-          </div> : null}
-          {message.proposals.map((proposal) => <ChatProposalCard key={proposal.id} proposal={proposal}
-            busy={applyMutation.isPending && applyMutation.variables === proposal.id}
-            disabled={pending || applyMutation.isPending}
-            error={applyErrors[proposal.id]}
-            onApply={() => {
-              if (applyingRef.current || sendingRef.current || pending) return;
-              applyingRef.current = true;
-              applyMutation.mutate(proposal.id);
-            }} />)}
-        </article>)}
-        {localNotSaved ? <>
-          <article className="chat-message chat-message-user" aria-label="내 메시지"><p className="chat-speaker">나</p><p className="chat-message-text">{localTurn.content}</p></article>
-          <div className="chat-message chat-message-assistant">
-            {sendMutation.isPending ? <p className="chat-processing" role="status"><Sparkles className="size-4 animate-pulse" />작품 정보를 확인하며 답변을 준비하고 있어요.</p> : <>
-              <p className="text-sm text-red-700" role="alert">{sendError || '메시지를 전송하지 못했습니다.'}</p>
-              <Button className="mt-2" variant="secondary" disabled={pending || applyMutation.isPending} onClick={() => send(localTurn)}><RotateCcw className="size-4" />전송 다시 시도</Button>
-              <Button className="ml-2 mt-2" variant="ghost" disabled={pending || applyMutation.isPending} onClick={() => {
-                setDraft((previous) => previous ? `${localTurn.content}\n\n${previous}` : localTurn.content);
-                setLocalTurn(null);
-                setSendError('');
-                inputRef.current?.focus();
-              }}>입력 수정</Button>
-            </>}
-          </div>
-        </> : null}
+        {messages.map((message) => {
+          const localAssistant = message.role === 'assistant' && message.clientMessageId === localTurn?.clientMessageId && (sendMutation.isPending || message.status !== 'COMPLETE');
+          const streaming = localAssistant && sendMutation.isPending;
+          const failed = !streaming && (message.status === 'FAILED' || (localAssistant && Boolean(sendError)));
+          return <article key={message.id} className={`chat-message chat-message-${message.role}`} aria-label={message.role === 'user' ? '내 메시지' : 'AI 답변'}>
+            <p className="chat-speaker">{message.role === 'user' ? '나' : 'AI'}</p>
+            {localAssistant ? <ConversationReply progress={stream.progress} pending={streaming} className="chat-message-text" fallback="작품 정보를 확인하며 답변을 준비하고 있어요." />
+              : message.content ? <p className="chat-message-text">{message.content}</p> : null}
+            {!localAssistant && message.status === 'PENDING' && message.role === 'assistant' ? <p className="chat-processing" role="status"><Sparkles className="size-4 animate-pulse" />작품 정보를 확인하며 답변을 준비하고 있어요.</p> : null}
+            {failed ? <div className="mt-3">
+              <p className="text-sm text-red-700" role="alert">{localAssistant && sendError ? sendError : message.error || '답변을 만들지 못했습니다. 다시 시도해 주세요.'}</p>
+              <Button className="mt-2" variant="secondary" disabled={pending || applyMutation.isPending} onClick={() => retryMessage(message)}><RotateCcw className="size-4" />답변 다시 시도</Button>
+            </div> : null}
+            {!streaming && message.status === 'COMPLETE' ? message.proposals.map((proposal) => <ChatProposalCard key={proposal.id} proposal={proposal}
+              busy={applyMutation.isPending && applyMutation.variables === proposal.id}
+              disabled={pending || applyMutation.isPending}
+              error={applyErrors[proposal.id]}
+              onApply={() => {
+                if (applyingRef.current || sendingRef.current || pending) return;
+                applyingRef.current = true;
+                applyMutation.mutate(proposal.id);
+              }} />) : null}
+          </article>;
+        })}
+        {localNotSaved ? <article className="chat-message chat-message-user" aria-label="내 메시지"><p className="chat-speaker">나</p><p className="chat-message-text">{localTurn.content}</p></article> : null}
+        {localAssistantMissing ? <div className="chat-message chat-message-assistant" aria-label="AI 답변">
+          <p className="chat-speaker">AI</p>
+          <ConversationReply progress={stream.progress} pending={sendMutation.isPending} className="chat-message-text" fallback="작품 정보를 확인하며 답변을 준비하고 있어요." />
+          {!sendMutation.isPending ? <>
+            <p className="text-sm text-red-700" role="alert">{sendError || '메시지를 전송하지 못했습니다.'}</p>
+            <Button className="mt-2" variant="secondary" disabled={pending || applyMutation.isPending} onClick={() => send(localTurn)}><RotateCcw className="size-4" />전송 다시 시도</Button>
+            <Button className="ml-2 mt-2" variant="ghost" disabled={pending || applyMutation.isPending} onClick={() => {
+              setDraft((previous) => previous ? `${localTurn.content}\n\n${previous}` : localTurn.content);
+              setLocalTurn(null);
+              setSendError('');
+              inputRef.current?.focus();
+            }}>입력 수정</Button>
+          </> : null}
+        </div> : null}
       </div>
       {awayFromBottom ? <Button className="chat-latest" variant="secondary" size="sm" onClick={scrollToBottom}><ArrowDown className="size-4" />최근 대화</Button> : null}
     </div>

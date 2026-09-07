@@ -1,7 +1,7 @@
 import { BadGatewayException, BadRequestException, ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
-import type { EditorAiInput } from '@paranovel/contracts';
+import type { ConversationStreamEvent, EditorAiHistory, EditorAiInput } from '@paranovel/contracts';
 import { AiRunnerService } from '../src/ai/ai-runner.service';
 import type { CompletionRequest } from '../src/ai/ai.types';
 import { DatabaseService } from '../src/database/database.service';
@@ -127,7 +127,7 @@ describe('episode editing AI', () => {
       expect(await input.readTool('replace_text', JSON.stringify({ title: '반응 수정', original: selected, replacement }))).toMatchObject({
         status: 'PREVIEW_READY', start: original.indexOf(selected), end: original.indexOf(selected) + selected.length,
       });
-      expect(await input.readTool('insert_at_cursor', JSON.stringify({ title: '추가 삽입', replacement: '새 문장' }))).toHaveProperty('error');
+      expect(await input.readTool('replace_text', JSON.stringify({ title: '중복 수정', original: selected, replacement: '새 문장' }))).toHaveProperty('error');
       return { runId: 'auto-range', value: { reply: '하린의 반응을 다듬는 수정안을 준비했어요.' } };
     });
     const history = await editor.send(projectId, episodeId, unselected);
@@ -161,6 +161,129 @@ describe('episode editing AI', () => {
     const history = await editor.send(projectId, episodeId, request({ selection: { start: 0, end: 0, text: '' } }));
     expect(history.messages[1]?.edit).toBeNull();
     expect(episodes.get(projectId, episodeId)).toMatchObject({ content: original, revision: 1 });
+  });
+
+  it('combines multiple edits in manuscript order while preserving the untouched gap', async () => {
+    completeChat.mockImplementationOnce(async (input) => {
+      expect(input.parallelToolNames).toEqual(['read_manuscript']);
+      const results = await Promise.all([
+        input.readTool('replace_text', JSON.stringify({ title: '끝 문장', original: '뒤 문장.', replacement: '닫힌 문 너머에서 소리가 났다.' })),
+        input.readTool('read_manuscript', JSON.stringify({ start: 0, length: original.length })),
+        input.readTool('replace_text', JSON.stringify({ title: '첫 문장', original: '앞 문장.', replacement: '복도는 고요했다.' })),
+      ]);
+      expect(results[0]).toMatchObject({ status: 'PREVIEW_READY', editCount: 1 });
+      expect(results[1]).toMatchObject({ text: original });
+      expect(results[2]).toMatchObject({ status: 'PREVIEW_READY', editCount: 2 });
+      return { runId: 'multiple-edits', value: { reply: '처음과 끝의 두 문장을 다듬었어요.' } };
+    });
+    const history = await editor.send(projectId, episodeId, request({ selection: { start: 0, end: 0, text: '' } }));
+    const combined = `복도는 고요했다.\n${selected}\n닫힌 문 너머에서 소리가 났다.`;
+    expect(history.messages[1]?.edit).toEqual({
+      title: '2곳 수정', start: 0, end: original.length, original, replacement: combined, baseRevision: 1, status: 'PENDING',
+    });
+    expect(episodes.get(projectId, episodeId).content).toBe(original);
+    const applied = editor.apply(projectId, episodeId, history.messages[1]!.id);
+    expect(applied.episode).toMatchObject({ content: combined, revision: 2 });
+    expect(editor.apply(projectId, episodeId, history.messages[1]!.id)).toEqual(applied);
+  });
+
+  it.each([0, 2, 4])('orders adjacent replacements and a boundary insertion deterministically at cursor %s', async (cursor) => {
+    const content = '가나다라';
+    const adjacent = await episodes.create(projectId, { title: '인접한 문장', direction: '', content });
+    completeChat.mockImplementationOnce(async (input) => {
+      for (const [name, args] of [
+        ['replace_text', { title: '뒤 수정', original: '다라', replacement: '뒤' }],
+        ['insert_at_cursor', { title: '삽입', replacement: '새' }],
+        ['replace_text', { title: '앞 수정', original: '가나', replacement: '앞' }],
+      ]) {
+        expect(await input.readTool(name, JSON.stringify(args))).toHaveProperty('status', 'PREVIEW_READY');
+      }
+      return { runId: 'adjacent-edits', value: { reply: '두 부분을 다듬고 새 본문을 추가했어요.' } };
+    });
+    const history = await editor.send(projectId, adjacent.id, request({ selection: { start: cursor, end: cursor, text: '' } }));
+    const combined = cursor === 0 ? '새앞뒤' : cursor === 2 ? '앞새뒤' : '앞뒤새';
+    expect(editor.apply(projectId, adjacent.id, history.messages[1]!.id).episode.content).toBe(combined);
+  });
+
+  it('rejects nested or partially overlapping replacements without discarding valid independent edits', async () => {
+    completeChat.mockImplementationOnce(async (input) => {
+      await input.readTool('replace_text', JSON.stringify({ title: '반응', original: selected, replacement }));
+      for (const overlapping of ['숨을 삼켰다.', original, `${selected}\n뒤 문장.`]) {
+        expect(await input.readTool('replace_text', JSON.stringify({ title: '겹친 수정', original: overlapping, replacement: '겹친 문장' }))).toHaveProperty('error');
+      }
+      expect(await input.readTool('replace_text', JSON.stringify({ title: '끝 문장', original: '뒤 문장.', replacement: '끝.' }))).toHaveProperty('status', 'PREVIEW_READY');
+      return { runId: 'overlapping-edits', value: { reply: '반응과 끝 문장을 다듬었어요.' } };
+    });
+    const history = await editor.send(projectId, episodeId, request({ selection: { start: 0, end: 0, text: '' } }));
+    expect(editor.apply(projectId, episodeId, history.messages[1]!.id).episode.content).toBe(`앞 문장.\n${replacement}\n끝.`);
+  });
+
+  it.each([true, false])('rejects an insertion inside a replacement regardless of call order (replacement first: %s)', async (replaceFirst) => {
+    const cursor = original.indexOf(selected) + 1;
+    completeChat.mockImplementationOnce(async (input) => {
+      const calls: [string, Record<string, string>][] = [
+        ['replace_text', { title: '반응', original: selected, replacement }],
+        ['insert_at_cursor', { title: '삽입', replacement: '추가' }],
+      ];
+      if (!replaceFirst) calls.reverse();
+      expect(await input.readTool(calls[0]![0], JSON.stringify(calls[0]![1]))).toHaveProperty('status', 'PREVIEW_READY');
+      expect(await input.readTool(calls[1]![0], JSON.stringify(calls[1]![1]))).toHaveProperty('error');
+      return { runId: 'interior-insertion', value: { reply: '겹치지 않는 수정안만 준비했어요.' } };
+    });
+    const history = await editor.send(projectId, episodeId, request({ selection: { start: cursor, end: cursor, text: '' } }));
+    const expected = replaceFirst ? original.replace(selected, replacement) : original.slice(0, cursor) + '추가' + original.slice(cursor);
+    expect(editor.apply(projectId, episodeId, history.messages[1]!.id).episode.content).toBe(expected);
+  });
+
+  it('rejects multiple insertions at the same cursor while retaining an independent replacement', async () => {
+    completeChat.mockImplementationOnce(async (input) => {
+      await input.readTool('insert_at_cursor', JSON.stringify({ title: '삽입', replacement: '새 장면.\n' }));
+      expect(await input.readTool('insert_at_cursor', JSON.stringify({ title: '중복 삽입', replacement: '추가 장면.\n' }))).toHaveProperty('error');
+      expect(await input.readTool('replace_text', JSON.stringify({ title: '반응', original: selected, replacement }))).toHaveProperty('status', 'PREVIEW_READY');
+      return { runId: 'duplicate-insertion', value: { reply: '새 장면과 반응의 수정안을 준비했어요.' } };
+    });
+    const history = await editor.send(projectId, episodeId, request({ selection: { start: 0, end: 0, text: '' } }));
+    expect(editor.apply(projectId, episodeId, history.messages[1]!.id).episode.content).toBe('새 장면.\n' + original.replace(selected, replacement));
+  });
+
+  it('enforces the manuscript limit on the combined changes and retains the valid preview', async () => {
+    const content = '앞' + '중'.repeat(999_988) + '뒤';
+    const long = await episodes.create(projectId, { title: '한계 원고', direction: '', content });
+    completeChat.mockImplementationOnce(async (input) => {
+      expect(await input.readTool('replace_text', JSON.stringify({ title: '도입', original: '앞', replacement: '처'.repeat(6) }))).toHaveProperty('status', 'PREVIEW_READY');
+      expect(await input.readTool('replace_text', JSON.stringify({ title: '끝', original: '뒤', replacement: '끝'.repeat(7) }))).toEqual({ error: '원고는 1,000,000자 이하여야 합니다.' });
+      expect(await input.readTool('replace_text', JSON.stringify({ title: '끝', original: '뒤', replacement: '끝'.repeat(6) }))).toHaveProperty('status', 'PREVIEW_READY');
+      expect(await input.readTool('insert_at_cursor', JSON.stringify({ title: '넘치는 삽입', replacement: '추가' }))).toEqual({ error: '원고는 1,000,000자 이하여야 합니다.' });
+      return { runId: 'combined-limit', value: { reply: '분량 제한 내에서 두 부분을 다듬었어요.' } };
+    });
+    const history = await editor.send(projectId, long.id, request({ selection: { start: 0, end: 0, text: '' } }));
+    const applied = editor.apply(projectId, long.id, history.messages[1]!.id);
+    expect(applied.episode.content).toBe('처'.repeat(6) + '중'.repeat(999_988) + '끝'.repeat(6));
+    expect(applied.episode.content.length).toBe(1_000_000);
+  });
+
+  it('emits the persisted message ID before forwarding streaming events and reuses it on replay', async () => {
+    const events: ConversationStreamEvent<EditorAiHistory>[] = [];
+    completeChat.mockImplementationOnce(async (input) => {
+      expect(events).toEqual([{ type: 'start', messageId: editor.history(projectId, episodeId).messages[1]!.id }]);
+      input.onEvent({ type: 'tool_start', callId: 'edit-call', name: 'replace_selection' });
+      await input.readTool('replace_selection', JSON.stringify({ title: '반응', replacement }));
+      input.onEvent({ type: 'tool_end', callId: 'edit-call', name: 'replace_selection' });
+      input.onEvent({ type: 'delta', text: '반응을 ' });
+      input.onEvent({ type: 'delta', text: '다듬었어요.' });
+      return { runId: 'streaming-edit', value: { reply: '반응을 다듬었어요.' } };
+    });
+    const history = await editor.send(projectId, episodeId, request(), undefined, (event) => events.push(event));
+    expect(events).toEqual([
+      { type: 'start', messageId: history.messages[1]!.id },
+      { type: 'tool_start', callId: 'edit-call', name: 'replace_selection' },
+      { type: 'tool_end', callId: 'edit-call', name: 'replace_selection' },
+      { type: 'delta', text: '반응을 ' }, { type: 'delta', text: '다듬었어요.' },
+    ]);
+    events.length = 0;
+    expect(await editor.send(projectId, episodeId, request(), undefined, (event) => events.push(event))).toEqual(history);
+    expect(events).toEqual([{ type: 'start', messageId: history.messages[1]!.id }]);
+    expect(completeChat).toHaveBeenCalledTimes(1);
   });
 
   it('requires enough original context to distinguish repeated passages and replaces only the intended occurrence', async () => {
@@ -315,6 +438,37 @@ describe('episode editing AI', () => {
     expect(() => editor.apply(projectId, context.target.id, message.id)).toThrow(ConflictException);
     expect(episodes.get(projectId, context.target.id)).toMatchObject({ content: original, revision: 1 });
     expect(editor.history(projectId, context.target.id).messages[1]?.edit?.status).toBe('PENDING');
+  });
+
+  it('retains the side-story flow guard when combining edits and rejects a changed predecessor', async () => {
+    const { predecessor, target } = await groupedSideStory(true);
+    completeChat.mockImplementationOnce(async (input) => {
+      expect(await input.readTool('replace_text', JSON.stringify({
+        title: '끝 문장', original: '뒤 문장.', replacement: '문 너머에서 소리가 났다.',
+      }))).toMatchObject({ status: 'PREVIEW_READY', editCount: 1 });
+      expect(await input.readTool('replace_text', JSON.stringify({
+        title: '첫 문장', original: '앞 문장.', replacement: '복도는 고요했다.',
+      }))).toMatchObject({ status: 'PREVIEW_READY', editCount: 2 });
+      return { runId: 'side-story-multiple-edits', value: { reply: '외전의 처음과 끝을 다듬었어요.' } };
+    });
+    const history = await editor.send(projectId, target.id, request({ selection: { start: 0, end: 0, text: '' } }));
+    const message = history.messages[1]!;
+    expect(message.edit).toEqual({
+      title: '2곳 수정', start: 0, end: original.length, original,
+      replacement: `복도는 고요했다.\n${selected}\n문 너머에서 소리가 났다.`,
+      baseRevision: 1, status: 'PENDING',
+    });
+    const raw = database.orm.select({ editJson: editorAiMessages.editJson })
+      .from(editorAiMessages).where(eq(editorAiMessages.id, message.id)).get();
+    expect(JSON.parse(raw!.editJson!)).toMatchObject({ baseFlowRevision: expect.any(String) });
+
+    episodes.updateScene(projectId, predecessor!.id, {
+      expectedRevision: predecessor!.revision, location: '앞선 외전에서 바뀐 장소',
+    });
+
+    expect(() => editor.apply(projectId, target.id, message.id)).toThrow(ConflictException);
+    expect(episodes.get(projectId, target.id)).toMatchObject({ content: original, revision: 1 });
+    expect(editor.history(projectId, target.id).messages[1]?.edit?.status).toBe('PENDING');
   });
 
   it.each(['memory', 'model'] as const)('fails a grouped side-story reply when the flow changes during %s work', async (stage) => {
@@ -489,5 +643,26 @@ describe('episode editing AI', () => {
     expect(complete.mock.calls[0]![0].messages[0]?.content).toContain('편집 AI');
     expect(complete.mock.calls.at(-1)![0].messages.some((message) => message.role === 'tool' && message.content?.includes('PREVIEW_READY'))).toBe(true);
     expect(database.connection.prepare('SELECT model, status FROM ai_runs').get()).toEqual({ model: 'test/writer', status: 'SUCCEEDED' });
+  });
+
+  it('stages every independent edit from one real model tool-call batch', async () => {
+    const complete = vi.fn(async (input: CompletionRequest) => {
+      if (input.tools && !input.messages.some((message) => message.role === 'tool')) return {
+        model: input.model, usage: {}, content: '',
+        toolCalls: [
+          { id: 'last-sentence', type: 'function' as const, function: { name: 'replace_text', arguments: JSON.stringify({ title: '끝', original: '뒤 문장.', replacement: '발소리가 멎었다.' }) } },
+          { id: 'first-sentence', type: 'function' as const, function: { name: 'replace_text', arguments: JSON.stringify({ title: '도입', original: '앞 문장.', replacement: '어둠이 짙어졌다.' }) } },
+        ],
+      };
+      return { model: input.model, usage: {}, content: JSON.stringify({ reply: '두 문장의 수정안을 준비했어요.' }), toolCalls: [] };
+    });
+    const runner = new AiRunnerService(database, new PromptRegistryService(), { complete } as never, { isConfigured: () => false } as never);
+    const integrated = new EditorAiService(database, episodes, memory, runner);
+    const result = await integrated.send(projectId, episodeId, request({ selection: { start: 0, end: 0, text: '' } }));
+    const finalRequest = complete.mock.calls.at(-1)![0];
+    const results = finalRequest.messages.filter((message) => message.role === 'tool');
+    expect(results).toHaveLength(2);
+    expect(results.map((message) => JSON.parse(message.content!).status)).toEqual(['PREVIEW_READY', 'PREVIEW_READY']);
+    expect(integrated.apply(projectId, episodeId, result.messages[1]!.id).episode.content).toBe(`어둠이 짙어졌다.\n${selected}\n발소리가 멎었다.`);
   });
 });

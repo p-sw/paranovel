@@ -1,5 +1,5 @@
-import { aiStreamEventSchema } from '@paranovel/contracts';
-import type { ChatHistory, ChatProposal, ChatThread, ChatThreadSummary, EditorAiHistory, EditorAiInput, EditorAiMessage, EpisodeOrder, UpdateEpisodeOrderInput } from '@paranovel/contracts';
+import { aiStreamEventSchema, chatStreamEventSchema, editorAiStreamEventSchema } from '@paranovel/contracts';
+import type { ConversationStreamEvent, ChatHistory, ChatProposal, ChatThread, ChatThreadSummary, EditorAiHistory, EditorAiInput, EditorAiMessage, EpisodeOrder, UpdateEpisodeOrderInput } from '@paranovel/contracts';
 import type {
   Arc,
   ArcPlanProposal,
@@ -181,12 +181,93 @@ async function ndjson(
   }
 }
 
+type ConversationHistory = ChatHistory | EditorAiHistory;
+type ConversationCallback<T> = (event: ConversationStreamEvent<T>, accumulated: string) => void;
+
+async function conversationNdjson<T extends ConversationHistory>(
+  path: string,
+  body: unknown,
+  schema: { parse: (value: unknown) => ConversationStreamEvent<T> },
+  onEvent: ConversationCallback<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  const response = await fetch(`/api${path}`, {
+    method: 'POST',
+    headers: { Accept: 'application/x-ndjson', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok) {
+    const payload = await response.text();
+    let message = payload || 'AI 요청을 시작하지 못했습니다.';
+    try {
+      const error = JSON.parse(payload) as { message?: unknown };
+      if (typeof error.message === 'string') message = error.message;
+    } catch { /* Preserve a plain-text HTTP error. */ }
+    throw new ApiError(message, response.status);
+  }
+  if (!response.body) throw new ApiError('스트리밍 응답 본문이 없습니다.', 502);
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let content = '';
+  let messageId: string | undefined;
+  let history: T | undefined;
+  const consume = (line: string) => {
+    if (!line.trim() || history) return;
+    let event: ConversationStreamEvent<T>;
+    try {
+      event = schema.parse(JSON.parse(line));
+    } catch {
+      throw new ApiError('AI 응답을 해석하지 못했습니다.', 502);
+    }
+    if (event.type === 'start') messageId = event.messageId;
+    if (event.type === 'reset') content = '';
+    if (event.type === 'delta') content += event.text;
+    if (event.type === 'error') {
+      const status = Number(event.code);
+      throw new ApiError(event.message, status >= 400 && status < 600 ? status : 502);
+    }
+    if (event.type === 'complete') {
+      if (!messageId || !event.history.messages.some((message) => message.id === messageId && message.role === 'assistant' && message.status === 'COMPLETE')) {
+        throw new ApiError('완료된 AI 답변을 확인하지 못했습니다. 다시 시도해 주세요.', 502);
+      }
+      history = event.history;
+    }
+    onEvent(event, content);
+  };
+  const abort = () => { void reader.cancel(signal?.reason).catch(() => undefined); };
+  signal?.addEventListener('abort', abort, { once: true });
+  try {
+    while (!history) {
+      signal?.throwIfAborted();
+      const { done, value } = await reader.read();
+      signal?.throwIfAborted();
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) consume(line);
+      if (done) break;
+    }
+    if (buffer.trim()) consume(buffer);
+    if (!history) throw new ApiError('AI 답변이 완료되기 전에 연결이 끊겼습니다. 다시 시도해 주세요.', 502);
+    return history;
+  } finally {
+    signal?.removeEventListener('abort', abort);
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+
 export const api = {
   editorAi: {
     history: (projectId: string, episodeId: string) =>
       json<EditorAiHistory>(`/projects/${projectId}/episodes/${episodeId}/editor-ai/messages`),
-    send: (projectId: string, episodeId: string, input: EditorAiInput) =>
-      json<EditorAiHistory>(`/projects/${projectId}/episodes/${episodeId}/editor-ai/messages`, { method: 'POST', body: input }),
+    send: (projectId: string, episodeId: string, input: EditorAiInput, onEvent?: ConversationCallback<EditorAiHistory>, signal?: AbortSignal) =>
+      onEvent
+        ? conversationNdjson(`/projects/${projectId}/episodes/${episodeId}/editor-ai/messages/stream`, input, editorAiStreamEventSchema, onEvent, signal)
+        : json<EditorAiHistory>(`/projects/${projectId}/episodes/${episodeId}/editor-ai/messages`, { method: 'POST', body: input, signal }),
     apply: (projectId: string, episodeId: string, messageId: string) =>
       json<{ episode: Episode; message: EditorAiMessage }>(`/projects/${projectId}/episodes/${episodeId}/editor-ai/messages/${encodeURIComponent(messageId)}/apply`, { method: 'POST' }),
   },
@@ -196,8 +277,10 @@ export const api = {
       json<ChatThread>(`/projects/${projectId}/chat/threads`, { method: 'POST', body: { clientThreadId } }),
     history: (projectId: string, threadId?: string) =>
       json<ChatHistory>(`/projects/${projectId}/chat/${threadId ? `threads/${encodeURIComponent(threadId)}/` : ''}messages`),
-    send: (projectId: string, input: { content: string; clientMessageId: string }, threadId?: string) =>
-      json<ChatHistory>(`/projects/${projectId}/chat/${threadId ? `threads/${encodeURIComponent(threadId)}/` : ''}messages`, { method: 'POST', body: input }),
+    send: (projectId: string, input: { content: string; clientMessageId: string }, threadId?: string, onEvent?: ConversationCallback<ChatHistory>, signal?: AbortSignal) =>
+      onEvent
+        ? conversationNdjson(`/projects/${projectId}/chat/${threadId ? `threads/${encodeURIComponent(threadId)}/` : ''}messages/stream`, input, chatStreamEventSchema, onEvent, signal)
+        : json<ChatHistory>(`/projects/${projectId}/chat/${threadId ? `threads/${encodeURIComponent(threadId)}/` : ''}messages`, { method: 'POST', body: input, signal }),
     apply: (projectId: string, proposalId: string) =>
       json<{ proposal: ChatProposal }>(`/projects/${projectId}/chat/proposals/${proposalId}/apply`, { method: 'POST' }),
   },
