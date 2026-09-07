@@ -16,6 +16,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Copy,
   FileCheck2,
   History,
   Info,
@@ -123,6 +124,8 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
   const [revision, setRevision] = useState(0);
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [saveError, setSaveError] = useState('');
+  const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied'>('idle');
+  const [copyError, setCopyError] = useState('');
   const [selection, setSelection] = useState<SelectionSnapshot | null>(null);
   const [editorAiSelection, setEditorAiSelection] = useState<SelectionSnapshot | null>(null);
   const editorAiSelectionRef = useRef<SelectionSnapshot | null>(null);
@@ -174,6 +177,31 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
     draftRef.current = next;
     if (saveInFlightRef.current) dirtyWhileSavingRef.current = true;
     setDraft(next);
+  };
+
+  useEffect(() => {
+    if (copyState !== 'copied') return;
+    const timeout = window.setTimeout(() => setCopyState('idle'), 2500);
+    return () => window.clearTimeout(timeout);
+  }, [copyState]);
+
+  const copyManuscript = async () => {
+    const content = draftRef.current.content;
+    if (!content.trim() || copyState === 'copying') return;
+    setCopyError('');
+    if (!navigator.clipboard?.writeText) {
+      setCopyState('idle');
+      setCopyError('이 브라우저에서는 클립보드 복사를 사용할 수 없어요. 본문을 선택해 직접 복사해 주세요.');
+      return;
+    }
+    setCopyState('copying');
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopyState('copied');
+    } catch {
+      setCopyState('idle');
+      setCopyError('본문을 복사하지 못했어요. 브라우저의 클립보드 권한을 확인한 뒤 다시 시도해 주세요.');
+    }
   };
 
   const saveNow = useCallback(async (allowDuringGeneration = false): Promise<Episode | null> => {
@@ -595,12 +623,19 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
             </IconButton>
           </div>
           <SaveIndicator state={saveState} error={saveError} onRetry={() => void saveNow()} />
+          <Button size="sm" variant="secondary" busy={copyState === 'copying'} disabled={!draft.content.trim()}
+            aria-label="본문 전체 복사" onClick={() => void copyManuscript()}>
+            {copyState === 'copied' ? <Check className="size-4" aria-hidden="true" /> : <Copy className="size-4" aria-hidden="true" />}
+            {copyState === 'copying' ? '복사 중' : copyState === 'copied' ? '복사됨' : '본문 복사'}
+          </Button>
           <Button size="sm" disabled={generationBusy} variant={editorAiOpen ? 'primary' : 'secondary'} aria-expanded={editorAiOpen}
             onClick={() => setEditorAiOpen((open) => !open)}><PencilLine className="size-4" />편집 AI</Button>
           <IconButton label="장면과 기억 보기" className="editor-context-toggle" onClick={() => setContextOpen(true)}>
             <PanelRightOpen className="size-5" />
           </IconButton>
         </header>
+        <span className="sr-only" role="status">{copyState === 'copied' ? '본문 전체를 복사했어요.' : ''}</span>
+        {copyError ? <div className="px-4"><FieldError>{copyError}</FieldError></div> : null}
 
         {recoveryBackup ? (
           <section className="draft-recovery-banner" role="alert" aria-labelledby="draft-recovery-title">
