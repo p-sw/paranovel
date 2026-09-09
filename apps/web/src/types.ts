@@ -47,7 +47,26 @@ export type CanonEntry = ContractCanonEntry & {
   sourceEpisodeId?: string | null;
 };
 
-export type Arc = ContractArc & {
+export type ArcMilestoneType = 'GOAL' | 'REVERSAL' | 'ESCALATION' | 'CLIMAX' | 'RESOLUTION' | 'OTHER';
+
+export interface ArcMilestone {
+  id?: string;
+  episode: number;
+  type: ArcMilestoneType;
+  description: string;
+}
+
+export interface ArcEpisodeDirection {
+  episode: number;
+  title: string;
+  direction: string;
+}
+
+// Keep the HTTP boundary usable while the shared contract and older cached
+// responses move from reversalPlan to milestones plus complete episode plans.
+export type Arc = Omit<ContractArc, 'reversalPlan' | 'milestones' | 'episodeDirections'> & {
+  milestones: ArcMilestone[];
+  episodeDirections: ArcEpisodeDirection[];
   startEpisodeNumber?: number;
   endEpisodeNumber?: number;
   revision?: number;
@@ -91,6 +110,8 @@ export interface CreateSideStoryGroupInput {
     conflict: string;
     endEpisodeNumber?: number;
     reversalPlan?: Array<{ episode: number; description: string }>;
+    milestones?: ArcMilestone[];
+    episodeDirections?: ArcEpisodeDirection[];
   };
 }
 
@@ -103,14 +124,20 @@ export interface ArcPlanProposal {
   endEpisodeNumber: number;
   goal: string;
   conflict: string;
-  reversalPlan: Array<{ episode: number; description: string }>;
-  episodeDirections: Array<{ episode: number; title: string; direction: string }>;
+  milestones: ArcMilestone[];
+  episodeDirections: ArcEpisodeDirection[];
   conflicts: string[];
   replaceArcId?: string;
   replaceArcRevision?: number;
 }
 
-export type ProjectBlueprint = ContractProjectBlueprint & {
+type ContractBlueprintArc = ContractProjectBlueprint['arcs'][number];
+
+export type ProjectBlueprint = Omit<ContractProjectBlueprint, 'arcs'> & {
+  arcs: Array<Omit<ContractBlueprintArc, 'reversalPlan' | 'milestones' | 'episodeDirections'> & {
+    milestones: ArcMilestone[];
+    episodeDirections: ArcEpisodeDirection[];
+  }>;
   defaultTargetChars?: number;
 };
 

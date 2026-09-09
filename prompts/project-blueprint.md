@@ -1,7 +1,7 @@
 ---
 id: project-blueprint
-version: 4
-task: project_blueprint
+version: 5
+task: project_blueprint_milestones
 responseMode: json
 requiredVariables:
   - project_title
@@ -29,8 +29,10 @@ requiredVariables:
 - 능력과 세계 규칙에는 비용, 한계, 예외를 포함해 편의적인 해결을 막는다.
 - target_episode_answer에 사용자가 회차를 지정했다면 정확히 그 회차를 targetEpisode로 삼고 targetEpisodeSource를 USER로 쓴다.
 - 목표 회차 답변을 건너뛰었다면 이야기의 장르, 갈등 규모와 예상 호흡에 맞는 완결 회차를 직접 정하고 targetEpisodeSource를 AI로 쓴다. 중도 종료가 아니라 핵심 갈등과 인물 변화가 결말에 도달하는 완결 길이여야 한다.
-- arcs는 1화부터 targetEpisode까지 빈틈이나 겹침 없이 이어지는 전체 작품 아크다. 첫 아크 뒤에도 결말까지 모두 작성한다.
-- 각 아크는 5~20화 범위이며, 긴 작품에서는 가능한 한 15~20화 단위로 묶어 배열을 불필요하게 늘리지 않는다. 각 아크의 goal과 conflict에는 단계적 고조, 회수하거나 이월할 떡밥과 다음 아크로 이어지는 변화를 구체적으로 담고, 공개 회차가 정해진 반전은 reversalPlan에 기록한다.
+- 이 작업은 아크 생성의 첫 번째 단계다. arcs는 1화부터 targetEpisode까지 빈틈이나 겹침 없이 이어지는 전체 작품 아크이며, 첫 아크 뒤에도 결말까지 모두 작성한다.
+- 각 아크는 5~20화 범위이며, 긴 작품에서는 가능한 한 15~20화 단위로 묶어 배열을 불필요하게 늘리지 않는다. 각 아크의 goal과 conflict에는 단계적 고조, 회수하거나 이월할 떡밥과 다음 아크로 이어지는 변화를 구체적으로 담는다.
+- 각 아크에는 마일스톤을 하나 이상 둔다. milestones의 episode는 해당 아크 범위 안의 공개 회차이고 type은 GOAL, REVERSAL, ESCALATION, CLIMAX, RESOLUTION, OTHER 중 서사 기능에 맞는 값을 쓴다. description에는 그 회차에 반드시 도달할 목표, 반전, 고조, 절정, 해결이나 그 밖의 핵심 변화를 구체적으로 기록한다.
+- 이 첫 단계에서는 회차 사이를 잇는 episodeDirections를 만들지 않는다. 이후 두 번째 단계가 여기서 확정한 마일스톤을 바꾸지 않고 모든 회차의 전개 방향을 채운다.
 - 첫 arcs 항목은 프로젝트가 시작할 현재 아크이고 나머지는 전개에 따라 바뀔 수 있는 미래 계획이다. 과거의 확정 사실처럼 표현하지 않는다.
 - 초반부터 모든 비밀을 설명하지 않는다. 독자가 알아야 할 정보와 작가만 아는 정보를 구분한다.
 - 한국어로 작성하고, 런타임이 제공한 JSON Schema를 정확히 따른다. 스키마 밖 키, Markdown, 코드 펜스, 설명문을 출력하지 않는다.

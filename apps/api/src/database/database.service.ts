@@ -474,6 +474,106 @@ CREATE TABLE chat_episode_tasks (
 );
 `;
 
+const ARC_MILESTONES_AND_DIRECTIONS_MIGRATION = `
+ALTER TABLE arcs
+  ADD COLUMN milestone_plan_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE arcs
+  ADD COLUMN episode_directions_json TEXT NOT NULL DEFAULT '[]';
+
+UPDATE arcs AS arc
+SET milestone_plan_json = CASE
+  WHEN json_valid(arc.reversal_plan_json)
+    AND json_type(arc.reversal_plan_json) = 'array'
+  THEN (
+    SELECT CASE
+      WHEN COUNT(*) > 0
+      THEN json_group_array(json(json_set(value, '$.type', 'REVERSAL')))
+      ELSE json_array(json_object(
+        'episode', arc.end_episode_number,
+        'type', 'GOAL',
+        'description', arc.goal
+      ))
+    END
+    FROM json_each(arc.reversal_plan_json)
+    WHERE type = 'object'
+      AND json_type(value, '$.episode') = 'integer'
+      AND json_type(value, '$.description') = 'text'
+      AND json_extract(value, '$.episode') BETWEEN arc.start_episode_number AND arc.end_episode_number
+      AND length(trim(json_extract(value, '$.description'))) > 0
+  )
+  ELSE json_array(json_object(
+    'episode', arc.end_episode_number,
+    'type', 'GOAL',
+    'description', arc.goal
+  ))
+END;
+
+UPDATE arcs AS arc
+SET episode_directions_json = (
+  WITH RECURSIVE episode_numbers(episode) AS (
+    SELECT arc.start_episode_number
+    UNION ALL
+    SELECT episode + 1
+    FROM episode_numbers
+    WHERE episode < arc.end_episode_number
+  )
+  SELECT json_group_array(json_object(
+    'episode', episode,
+    'title', COALESCE(
+      (
+        SELECT e.title
+        FROM episodes e
+        WHERE e.project_id = arc.project_id
+          AND e.number = episode
+          AND e.deleted_at IS NULL
+          AND length(trim(e.title)) > 0
+          AND (
+            (arc.side_story_group_id IS NULL AND e.kind = 'MAIN')
+            OR (
+              arc.side_story_group_id IS NOT NULL
+              AND e.kind = 'SIDE_STORY'
+              AND e.side_story_group_id = arc.side_story_group_id
+            )
+          )
+        LIMIT 1
+      ),
+      arc.title || ' ' || episode || '화'
+    ),
+    'direction', COALESCE(
+      (
+        SELECT e.direction
+        FROM episodes e
+        WHERE e.project_id = arc.project_id
+          AND e.number = episode
+          AND e.deleted_at IS NULL
+          AND length(trim(e.direction)) > 0
+          AND (
+            (arc.side_story_group_id IS NULL AND e.kind = 'MAIN')
+            OR (
+              arc.side_story_group_id IS NOT NULL
+              AND e.kind = 'SIDE_STORY'
+              AND e.side_story_group_id = arc.side_story_group_id
+            )
+          )
+        LIMIT 1
+      ),
+      (
+        SELECT json_extract(milestone.value, '$.description')
+        FROM json_each(arc.milestone_plan_json) milestone
+        WHERE milestone.type = 'object'
+          AND json_extract(milestone.value, '$.episode') = episode
+          AND length(trim(json_extract(milestone.value, '$.description'))) > 0
+        ORDER BY milestone.key
+        LIMIT 1
+      ),
+      CASE WHEN length(trim(arc.goal)) > 0 THEN arc.goal END,
+      arc.title || '의 전개'
+    )
+  ))
+  FROM episode_numbers
+);
+`;
+
 @Injectable()
 export class DatabaseService implements OnApplicationShutdown {
   readonly connection: Database.Database;
@@ -515,6 +615,7 @@ export class DatabaseService implements OnApplicationShutdown {
       { version: 13, sql: PROJECT_TARGET_EPISODE_MIGRATION },
       { version: 14, sql: SIDE_STORIES_MIGRATION, rebuildsReferencedTable: true },
       { version: 15, sql: CHAT_EPISODE_TASKS_MIGRATION },
+      { version: 16, sql: ARC_MILESTONES_AND_DIRECTIONS_MIGRATION },
     ];
     this.connection.exec(
       'CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)',

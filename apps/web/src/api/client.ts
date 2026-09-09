@@ -44,7 +44,7 @@ export class ApiError extends Error {
 
 type JsonOptions = Omit<RequestInit, 'body'> & { body?: unknown };
 
-type ArcMutableFields = Pick<Arc, 'title' | 'startEpisode' | 'endEpisode' | 'goal' | 'conflict' | 'reversalPlan'>;
+type ArcMutableFields = Pick<Arc, 'title' | 'startEpisode' | 'endEpisode' | 'goal' | 'conflict' | 'milestones' | 'episodeDirections'>;
 type ArcWritableStatus = Extract<Arc['status'], 'PLANNED' | 'ACTIVE'>;
 type CreateArcInput = ArcMutableFields & {
   status?: ArcWritableStatus;

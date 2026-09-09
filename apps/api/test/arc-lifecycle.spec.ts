@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ArcEpisodeDirectionsService } from '../src/ai/arc-episode-directions.service';
 import { ArcsService } from '../src/arcs/arcs.service';
 import { DatabaseService } from '../src/database/database.service';
 import { episodes } from '../src/database/schema';
@@ -13,6 +14,21 @@ const futureFields = {
   title: '왕도의 그림자', startEpisodeNumber: 6, endEpisodeNumber: 10,
   goal: '왕도에 들어간다.', conflict: '왕실이 추적한다.', reversalPlan: [],
 };
+
+const generatedDirections = (start: number, end: number) => Array.from(
+  { length: end - start + 1 },
+  (_, index) => ({
+    episode: start + index,
+    title: `${start + index}화`,
+    direction: `${start + index}화의 전개`,
+  }),
+);
+
+const directionGenerator = () => ({
+  generate: vi.fn(async ({ arc }: {
+    arc: { startEpisodeNumber: number; endEpisodeNumber: number };
+  }) => generatedDirections(arc.startEpisodeNumber, arc.endEpisodeNumber)),
+});
 
 describe('arc lifecycle protection', () => {
   let database: DatabaseService;
@@ -28,7 +44,7 @@ describe('arc lifecycle protection', () => {
     }).id;
     arcs = new ArcsService(database, {
       indexSource: vi.fn(), removeSource: vi.fn(), assemble: vi.fn(),
-    } as never, {} as never);
+    } as never, {} as never, {} as never);
   });
 
   afterEach(() => {
@@ -193,7 +209,68 @@ describe('arc lifecycle protection', () => {
     expect(arcs.get(projectId, current.id).status).toBe('ARCHIVED');
   });
 
+  it('runs milestone planning before direction planning and rejects a failed second phase', async () => {
+    let failDirections = false;
+    const completeJson = vi.fn(async (request) => {
+      if (request.task === 'arc_plan') {
+        return {
+          value: request.validator.parse({
+            title: '첫 번째 계획',
+            startEpisodeNumber: 1,
+            endEpisodeNumber: 5,
+            goal: '관문을 연다.',
+            conflict: '수문장이 막는다.',
+            milestones: [{ episode: 5, type: 'GOAL', description: '관문을 연다.' }],
+            conflicts: [],
+          }),
+        };
+      }
+      if (request.task === 'arc_episode_directions') {
+        const episodeDirections = failDirections
+          ? generatedDirections(1, 4)
+          : generatedDirections(1, 5);
+        return { value: request.validator.parse({ episodeDirections }) };
+      }
+      throw new Error(`Unexpected task: ${request.task}`);
+    });
+    const assembled = {
+      projectContext: '{}', improvements: '[]', canon: '[]', currentArc: 'null',
+      currentScene: 'null', recentSummaries: '[]', openForeshadowing: '[]', retrievedMemories: '[]',
+    };
+    const runner = { completeJson } as never;
+    arcs = new ArcsService(
+      database,
+      { indexSource: vi.fn(), removeSource: vi.fn(), assemble: vi.fn().mockResolvedValue(assembled) } as never,
+      runner,
+      new ArcEpisodeDirectionsService(runner),
+    );
+
+    await expect(arcs.plan(projectId, {})).resolves.toMatchObject({
+      milestones: [{ episode: 5, type: 'GOAL', description: '관문을 연다.' }],
+      episodeDirections: generatedDirections(1, 5),
+    });
+    expect(completeJson.mock.calls.map(([request]) => request.task)).toEqual([
+      'arc_plan',
+      'arc_episode_directions',
+    ]);
+    expect(completeJson.mock.calls[1]![0].variables.arc_milestones).toMatchObject({
+      startEpisodeNumber: 1,
+      endEpisodeNumber: 5,
+      milestones: [{ episode: 5, type: 'GOAL', description: '관문을 연다.' }],
+    });
+
+    failDirections = true;
+    await expect(arcs.plan(projectId, {})).rejects.toThrow();
+    expect(completeJson.mock.calls.map(([request]) => request.task)).toEqual([
+      'arc_plan',
+      'arc_episode_directions',
+      'arc_plan',
+      'arc_episode_directions',
+    ]);
+  });
+
   it('revises the next planned arc in place and validates its exact range', async () => {
+    const arcDirections = directionGenerator();
     const completeJson = vi.fn(async (request) => {
       const value = {
         title: '수정된 왕도의 그림자',
@@ -201,8 +278,11 @@ describe('arc lifecycle protection', () => {
         endEpisodeNumber: 10,
         goal: '왕도의 음모를 밝힌다.',
         conflict: '왕실의 추격을 피한다.',
-        reversalPlan: [{ episode: 9, description: '조력자가 왕실의 며느리였다.' }],
-        episodeDirections: [{ episode: 6, title: '성문', direction: '왕도에 잠입한다.' }],
+        milestones: [{
+          episode: 9,
+          type: 'REVERSAL',
+          description: '조력자가 왕실의 며느리였다.',
+        }],
         conflicts: [],
       };
       return { value: request.validator.parse(value) };
@@ -213,7 +293,7 @@ describe('arc lifecycle protection', () => {
     };
     arcs = new ArcsService(database, {
       indexSource: vi.fn(), removeSource: vi.fn(), assemble: vi.fn().mockResolvedValue(assembled),
-    } as never, { completeJson } as never);
+    } as never, { completeJson } as never, arcDirections as never);
     await arcs.create(projectId, { ...currentFields, status: 'ACTIVE' });
     const future = await arcs.create(projectId, futureFields);
 
@@ -228,6 +308,15 @@ describe('arc lifecycle protection', () => {
       start_episode_number: 6,
       end_episode_number: 10,
     });
+    expect(arcDirections.generate).toHaveBeenCalledWith(expect.objectContaining({
+      projectId,
+      arc: expect.objectContaining({
+        startEpisodeNumber: 6,
+        endEpisodeNumber: 10,
+        milestones: [expect.objectContaining({ type: 'REVERSAL', episode: 9 })],
+      }),
+    }));
+    expect(proposal.episodeDirections).toEqual(generatedDirections(6, 10));
 
     completeJson.mockImplementationOnce(async (request) => ({
       value: request.validator.parse({
@@ -251,18 +340,18 @@ describe('arc lifecycle protection', () => {
         endEpisodeNumber: 27,
         goal: '달을 되찾을 실마리를 모은다.',
         conflict: '왕실이 마지막 문을 봉쇄한다.',
-        reversalPlan: [],
-        episodeDirections: [],
+        milestones: [{ episode: 27, type: 'GOAL', description: '실마리를 모은다.' }],
         conflicts: [],
       }),
     }));
+    const arcDirections = directionGenerator();
     const assembled = {
       projectContext: '{}', improvements: '[]', canon: '[]', currentArc: 'null',
       currentScene: 'null', recentSummaries: '[]', openForeshadowing: '[]', retrievedMemories: '[]',
     };
     arcs = new ArcsService(database, {
       indexSource: vi.fn(), removeSource: vi.fn(), assemble: vi.fn().mockResolvedValue(assembled),
-    } as never, { completeJson } as never);
+    } as never, { completeJson } as never, arcDirections as never);
     await arcs.create(projectId, {
       ...currentFields,
       endEpisodeNumber: 20,
@@ -278,14 +367,14 @@ describe('arc lifecycle protection', () => {
         endEpisodeNumber: 25,
         goal: '달을 되찾을 실마리를 모은다.',
         conflict: '왕실이 마지막 문을 봉쇄한다.',
-        reversalPlan: [],
-        episodeDirections: [],
+        milestones: [{ episode: 25, type: 'GOAL', description: '실마리를 모은다.' }],
         conflicts: [],
       }),
     }));
     await expect(arcs.plan(projectId, {})).resolves.toMatchObject({
       startEpisodeNumber: 21,
       endEpisodeNumber: 25,
+      episodeDirections: generatedDirections(21, 25),
     });
   });
 
@@ -354,18 +443,18 @@ describe('arc lifecycle protection', () => {
         endEpisodeNumber: 10,
         goal: '왕도로 향할 단서를 찾는다.',
         conflict: '추격대가 길을 막는다.',
-        reversalPlan: [],
-        episodeDirections: [],
+        milestones: [{ episode: 10, type: 'GOAL', description: '단서를 찾는다.' }],
         conflicts: [],
       }),
     }));
+    const arcDirections = directionGenerator();
     const assembled = {
       projectContext: '{}', improvements: '[]', canon: '[]', currentArc: 'null',
       currentScene: 'null', recentSummaries: '[]', openForeshadowing: '[]', retrievedMemories: '[]',
     };
     arcs = new ArcsService(database, {
       indexSource: vi.fn(), removeSource: vi.fn(), assemble: vi.fn().mockResolvedValue(assembled),
-    } as never, { completeJson } as never);
+    } as never, { completeJson } as never, arcDirections as never);
     await arcs.create(projectId, { ...currentFields, status: 'ACTIVE' });
     const deleted = await arcs.create(projectId, futureFields);
     await arcs.create(projectId, {

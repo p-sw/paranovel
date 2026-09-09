@@ -13,6 +13,7 @@ const fieldLabels: Record<string, string> = {
   defaultTargetChars: '목표 글자 수', category: '분류', aliases: '다른 이름', content: '내용',
   metadata: '추가 정보', status: '상태', startEpisodeNumber: '시작 회차', endEpisodeNumber: '마지막 회차',
   startEpisode: '시작 회차', endEpisode: '마지막 회차', goal: '목표', conflict: '갈등',
+  milestones: '회차별 마일스톤', episodeDirections: '회차별 전개',
   reversalPlan: '회차별 반전', rule: '규칙', rationale: '이유',
   tags: '태그', beforeExample: '수정 전 예시', afterExample: '수정 후 예시', active: '사용 여부',
 };
@@ -26,6 +27,7 @@ const valueLabels: Record<string, string> = {
   PLANNED: '계획됨', COMPLETE: '완료', ARCHIVED: '보관됨',
   CHARACTER: '인물', CHARACTER_APPEARANCE: '인물 외형', LOCATION: '장소', ORGANIZATION: '조직', ABILITY: '능력',
   RULE: '규칙', TIMELINE: '연표', OTHER: '기타', STYLE: '문체',
+  GOAL: '목표', REVERSAL: '반전', ESCALATION: '고조', CLIMAX: '클라이맥스', RESOLUTION: '해결',
 };
 
 function displayValue(value: unknown, field?: string): string {
@@ -33,10 +35,17 @@ function displayValue(value: unknown, field?: string): string {
   if (typeof value === 'boolean') return field === 'active' ? (value ? '사용' : '사용 안 함') : String(value);
   if (typeof value === 'string') return field === 'status' || field === 'category' ? valueLabels[value] ?? value : value;
   if (typeof value === 'number') return String(value);
-  if (Array.isArray(value)) return value.length ? value.map((item) => displayValue(item, field === 'reversalPlan' ? 'arcBeat' : undefined)).join('\n') : '없음';
+  if (Array.isArray(value)) {
+    const itemField = field === 'reversalPlan' ? 'arcBeat'
+      : field === 'milestones' ? 'arcMilestone'
+        : field === 'episodeDirections' ? 'episodeDirection' : undefined;
+    return value.length ? value.map((item) => displayValue(item, itemField)).join('\n') : '없음';
+  }
   if (typeof value === 'object') {
     const record = value as Record<string, unknown>;
     if (field === 'arcBeat') return `${record.episode}화: ${displayValue(record.description)}`;
+    if (field === 'arcMilestone') return `${record.episode}화 · ${valueLabels[String(record.type)] ?? displayValue(record.type)}: ${displayValue(record.description)}`;
+    if (field === 'episodeDirection') return `${record.episode}화 · ${displayValue(record.title)}\n${displayValue(record.direction)}`;
     return Object.entries(record)
       .map(([key, item]) => `${key}: ${displayValue(item)}`).join('\n') || '없음';
   }

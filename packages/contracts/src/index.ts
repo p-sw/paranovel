@@ -114,19 +114,90 @@ export const canonDraftSchema = z.object({
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
 
-export const arcBeatSchema = z.object({
+export const arcMilestoneTypeSchema = z.enum([
+  'GOAL',
+  'REVERSAL',
+  'ESCALATION',
+  'CLIMAX',
+  'RESOLUTION',
+  'OTHER',
+]);
+
+export const arcMilestoneSchema = z.object({
   id: idSchema.optional(),
   episode: z.number().int().positive(),
+  type: arcMilestoneTypeSchema,
   description: z.string().trim().min(1).max(10_000),
 });
 
-export const arcDraftSchema = z.object({
+export const arcEpisodeDirectionSchema = z.object({
+  episode: z.number().int().positive(),
+  title: z.string().trim().min(1).max(200),
+  direction: z.string().trim().min(1).max(20_000),
+});
+
+const arcDraftShape = {
   title: z.string().trim().min(1).max(200),
   startEpisode: z.number().int().positive(),
   endEpisode: z.number().int().positive(),
   goal: z.string().trim().min(1).max(10_000),
   conflict: z.string().trim().min(1).max(10_000),
-  reversalPlan: z.array(arcBeatSchema).default([]),
+  milestones: z.array(arcMilestoneSchema).min(1),
+  episodeDirections: z.array(arcEpisodeDirectionSchema),
+};
+
+type ArcPlanShape = {
+  startEpisode: number;
+  endEpisode: number;
+  milestones: Array<{ episode: number }>;
+  episodeDirections: Array<{ episode: number }>;
+};
+
+function validateArcPlan(
+  arc: ArcPlanShape,
+  context: z.RefinementCtx,
+  path: Array<string | number> = [],
+  minimumSpan = 5,
+): void {
+  const span = arc.endEpisode - arc.startEpisode + 1;
+  if (span < minimumSpan || span > 20) {
+    context.addIssue({
+      code: 'custom',
+      message: `아크는 ${minimumSpan}화에서 20화 사이여야 합니다.`,
+      path,
+    });
+  }
+  arc.milestones.forEach((milestone, index) => {
+    if (milestone.episode < arc.startEpisode || milestone.episode > arc.endEpisode) {
+      context.addIssue({
+        code: 'custom',
+        message: '마일스톤 회차는 해당 아크 범위 안이어야 합니다.',
+        path: [...path, 'milestones', index, 'episode'],
+      });
+    }
+  });
+
+  if (arc.episodeDirections.length !== span) {
+    context.addIssue({
+      code: 'custom',
+      message: '회차별 전개는 아크의 모든 회차에 하나씩 있어야 합니다.',
+      path: [...path, 'episodeDirections'],
+    });
+  }
+  arc.episodeDirections.forEach((direction, index) => {
+    const expectedEpisode = arc.startEpisode + index;
+    if (direction.episode !== expectedEpisode) {
+      context.addIssue({
+        code: 'custom',
+        message: `${expectedEpisode}화 전개가 순서대로 한 번 포함되어야 합니다.`,
+        path: [...path, 'episodeDirections', index, 'episode'],
+      });
+    }
+  });
+}
+
+export const arcDraftSchema = z.object(arcDraftShape).superRefine((arc, context) => {
+  validateArcPlan(arc, context);
 });
 
 export const projectBlueprintSchema = z.object({
@@ -141,14 +212,6 @@ export const projectBlueprintSchema = z.object({
   arcs: z.array(arcDraftSchema).min(1).max(100),
 }).superRefine((blueprint, context) => {
   blueprint.arcs.forEach((arc, index) => {
-    const span = arc.endEpisode - arc.startEpisode + 1;
-    if (span < 5 || span > 20) {
-      context.addIssue({
-        code: 'custom',
-        message: '각 아크는 5화에서 20화 사이여야 합니다.',
-        path: ['arcs', index],
-      });
-    }
     const expectedStart = index === 0 ? 1 : blueprint.arcs[index - 1]!.endEpisode + 1;
     if (arc.startEpisode !== expectedStart) {
       context.addIssue({
@@ -157,15 +220,6 @@ export const projectBlueprintSchema = z.object({
         path: ['arcs', index, 'startEpisode'],
       });
     }
-    arc.reversalPlan.forEach((beat, beatIndex) => {
-      if (beat.episode < arc.startEpisode || beat.episode > arc.endEpisode) {
-        context.addIssue({
-          code: 'custom',
-          message: '반전 회차는 해당 아크 범위 안이어야 합니다.',
-          path: ['arcs', index, 'reversalPlan', beatIndex, 'episode'],
-        });
-      }
-    });
   });
   const last = blueprint.arcs.at(-1);
   if (last && last.endEpisode !== blueprint.targetEpisode) {
@@ -264,7 +318,8 @@ export const canonCandidateSchema = canonDraftSchema.extend({
 });
 export type CanonCandidate = z.infer<typeof canonCandidateSchema>;
 
-export const arcSchema = arcDraftSchema.extend({
+export const arcSchema = z.object({
+  ...arcDraftShape,
   id: idSchema,
   projectId: idSchema,
   sideStoryGroupId: idSchema.nullable().optional(),
@@ -273,21 +328,23 @@ export const arcSchema = arcDraftSchema.extend({
   createdAt: isoDateSchema,
   updatedAt: isoDateSchema,
 }).superRefine((arc, context) => {
-  const span = arc.endEpisode - arc.startEpisode + 1;
-  if (span < 5 || span > 20) {
-    context.addIssue({ code: 'custom', message: '아크는 5화에서 20화 사이여야 합니다.' });
-  }
-  arc.reversalPlan.forEach((beat, index) => {
-    if (beat.episode < arc.startEpisode || beat.episode > arc.endEpisode) {
-      context.addIssue({
-        code: 'custom',
-        message: '반전 회차는 해당 아크 범위 안이어야 합니다.',
-        path: ['reversalPlan', index, 'episode'],
-      });
-    }
-  });
+  validateArcPlan(arc, context);
 });
 export type Arc = z.infer<typeof arcSchema>;
+
+export const sideStoryArcSchema = z.object({
+  ...arcDraftShape,
+  id: idSchema,
+  projectId: idSchema,
+  sideStoryGroupId: idSchema,
+  status: z.enum(['PLANNED', 'ACTIVE', 'COMPLETE', 'ARCHIVED']),
+  revision: z.number().int().positive(),
+  createdAt: isoDateSchema,
+  updatedAt: isoDateSchema,
+}).superRefine((arc, context) => {
+  validateArcPlan(arc, context, [], 1);
+});
+export type SideStoryArc = z.infer<typeof sideStoryArcSchema>;
 
 export const sideStoryGroupSchema = z.object({
   id: idSchema,
@@ -298,7 +355,7 @@ export const sideStoryGroupSchema = z.object({
   nextEpisodeNumber: z.number().int().positive(),
   revision: z.number().int().positive(),
   canon: z.array(canonEntrySchema),
-  arc: arcSchema,
+  arc: sideStoryArcSchema,
   episodes: z.array(episodeSchema).optional(),
   createdAt: isoDateSchema,
   updatedAt: isoDateSchema,
@@ -366,6 +423,8 @@ export const createSideStoryGroupSchema = z.object({
     conflict: z.string().trim().min(1).max(10_000),
     endEpisodeNumber: z.number().int().positive().max(20).optional(),
     reversalPlan: z.array(sideStoryArcBeatSchema).optional(),
+    milestones: z.array(arcMilestoneSchema).min(1).optional(),
+    episodeDirections: z.array(arcEpisodeDirectionSchema).optional(),
   }).strict().superRefine((arc, context) => {
     const endEpisodeNumber = arc.endEpisodeNumber ?? 5;
     arc.reversalPlan?.forEach((beat, index) => {
@@ -377,6 +436,34 @@ export const createSideStoryGroupSchema = z.object({
         });
       }
     });
+    arc.milestones?.forEach((milestone, index) => {
+      if (milestone.episode > endEpisodeNumber) {
+        context.addIssue({
+          code: 'custom',
+          path: ['milestones', index, 'episode'],
+          message: '마일스톤 회차는 외전 그룹 아크 범위 안이어야 합니다.',
+        });
+      }
+    });
+    if (arc.episodeDirections !== undefined) {
+      if (arc.episodeDirections.length !== endEpisodeNumber) {
+        context.addIssue({
+          code: 'custom',
+          path: ['episodeDirections'],
+          message: '회차별 전개는 외전 그룹 아크의 모든 회차에 하나씩 있어야 합니다.',
+        });
+      }
+      arc.episodeDirections.forEach((direction, index) => {
+        const expectedEpisode = index + 1;
+        if (direction.episode !== expectedEpisode) {
+          context.addIssue({
+            code: 'custom',
+            path: ['episodeDirections', index, 'episode'],
+            message: `${expectedEpisode}화 전개가 순서대로 한 번 포함되어야 합니다.`,
+          });
+        }
+      });
+    }
   }),
 }).strict();
 export type CreateSideStoryGroupInput = z.infer<typeof createSideStoryGroupSchema>;

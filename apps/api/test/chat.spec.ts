@@ -1,6 +1,7 @@
 import { BadGatewayException, ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
+import { ArcEpisodeDirectionsService } from '../src/ai/arc-episode-directions.service';
 import { AiRunnerService } from '../src/ai/ai-runner.service';
 import { OpenRouterGateway } from '../src/ai/openrouter.gateway';
 import type { CompletionRequest } from '../src/ai/ai.types';
@@ -22,7 +23,11 @@ import { ProjectsService } from '../src/projects/projects.service';
 import { PromptRegistryService } from '../src/prompts/prompt-registry.service';
 
 const canonFields = { category: 'CHARACTER', name: '하린', content: '기억을 읽는 기록관' };
-const arcFields = { title: '기록관의 비밀', startEpisodeNumber: 1, endEpisodeNumber: 8, goal: '기록을 찾는다', conflict: '왕실의 추적' };
+const arcFields = {
+  title: '기록관의 비밀', startEpisodeNumber: 1, endEpisodeNumber: 8,
+  goal: '기록을 찾는다', conflict: '왕실의 추적',
+  milestones: [{ episode: 8, type: 'GOAL' as const, description: '기록을 찾는다' }],
+};
 function proposal(kind: ChatOutput['proposals'][number]['kind'], operation: ChatOutput['proposals'][number]['operation'], changes: Record<string, unknown> = {}, targetId: string | null = null): ChatOutput['proposals'][number] {
   return { kind, operation, targetId, title: '검토할 변경', changesJson: JSON.stringify(changes) };
 }
@@ -58,18 +63,32 @@ describe('project chat', () => {
     memory = new MemoryService(database, { embeddings } as never);
     projects = new ProjectsService(database);
     const ai = { completeChat, completeJson, streamText, chatModel: () => 'test-chat-model' } as unknown as AiRunnerService;
+    const arcDirections = new ArcEpisodeDirectionsService(ai);
     canon = new CanonService(database, memory, ai);
-    arcs = new ArcsService(database, memory, ai);
+    arcs = new ArcsService(database, memory, ai, arcDirections);
     improvements = new ImprovementsService(database, ai, memory);
     const imageTags = new ImageTagToolService(projects, canon, ai);
     reads = new ChatReadToolsService(database, projects, canon, arcs, improvements, memory, { isConfigured: () => false } as never, imageTags);
     episodeService = new EpisodesService(database, projects, memory, ai);
     editor = new EditorAiService(database, episodeService, memory, ai);
     episodeTools = new ChatEpisodeToolsService(database, episodeService, editor);
-    chat = new ChatService(database, ai, projects, canon, arcs, improvements, memory, reads, episodeTools);
+    chat = new ChatService(database, ai, arcDirections, projects, canon, arcs, improvements, memory, reads, episodeTools);
     projectId = projects.createInternal({ title: '기록의 문', logline: '기억을 읽는 기록관', genreTags: ['판타지'] }).id;
     completeChat.mockReset();
-    completeJson.mockReset();
+    completeJson.mockReset().mockImplementation(async (request) => {
+      if (request.task !== 'arc_episode_directions') throw new Error(`Unexpected task: ${request.task}`);
+      const arc = request.variables.arc_milestones;
+      return { value: request.validator.parse({
+        episodeDirections: Array.from(
+          { length: arc.endEpisodeNumber - arc.startEpisodeNumber + 1 },
+          (_, index) => ({
+            episode: arc.startEpisodeNumber + index,
+            title: `${arc.startEpisodeNumber + index}화`,
+            direction: '기록의 단서를 따라 다음 사건으로 나아간다.',
+          }),
+        ),
+      }) };
+    });
     streamText.mockReset();
     embeddings.mockClear();
   });
@@ -508,7 +527,7 @@ describe('project chat', () => {
       });
     }));
     const runner = new AiRunnerService(database, new PromptRegistryService(), new OpenRouterGateway(), { isConfigured: () => false } as never);
-    const service = new ChatService(database, runner, projects, canon, arcs, improvements, memory, reads, episodeTools);
+    const service = new ChatService(database, runner, new ArcEpisodeDirectionsService(runner), projects, canon, arcs, improvements, memory, reads, episodeTools);
     const history = await service.send(projectId, { content: '작품을 설명해 줘', clientMessageId: 'wire' });
     expect(history.messages[1]!.status).toBe('COMPLETE');
     expect(bodies).toHaveLength(2);
@@ -619,9 +638,109 @@ describe('project chat', () => {
       .toBe('3인칭 제한 시점과 묵직한 문체를 유지한다.');
   });
 
+  it('generates ARC CREATE directions in stage two and overwrites model-supplied directions', async () => {
+    const history = await ask([proposal('ARC', 'CREATE', {
+      ...arcFields,
+      episodeDirections: '형식도 틀린 모델 전개 값',
+    })]);
+    const created = history.messages[1]!.proposals[0]!;
+
+    expect(created.after).toMatchObject({
+      milestones: arcFields.milestones,
+      episodeDirections: Array.from({ length: 8 }, (_, index) => ({
+        episode: index + 1,
+        title: `${index + 1}화`,
+        direction: '기록의 단서를 따라 다음 사건으로 나아간다.',
+      })),
+    });
+    expect(JSON.stringify(created.after)).not.toContain('형식도 틀린 모델 전개 값');
+    expect(completeJson).toHaveBeenCalledOnce();
+    expect(completeJson.mock.calls[0]![0]).toMatchObject({
+      task: 'arc_episode_directions',
+      promptId: 'arc-episode-directions',
+      projectId,
+      variables: { arc_milestones: arcFields },
+    });
+    expect(completeJson.mock.calls[0]![0].variables.arc_milestones)
+      .not.toHaveProperty('episodeDirections');
+  });
+
+  it('regenerates directions for structural ARC updates but skips status-only updates and deletes', async () => {
+    const record = await arcs.create(projectId, arcFields);
+    completeJson.mockClear();
+
+    const structural = await ask([
+      proposal('ARC', 'UPDATE', { goal: '숨겨진 왕실 기록까지 찾는다.' }, record.id),
+    ]);
+    expect(completeJson).toHaveBeenCalledOnce();
+    expect(structural.messages[1]!.proposals[0]!.after).toMatchObject({
+      goal: '숨겨진 왕실 기록까지 찾는다.',
+      episodeDirections: Array.from({ length: 8 }, (_, index) => ({ episode: index + 1 })),
+    });
+
+    completeJson.mockClear();
+    await ask([proposal('ARC', 'UPDATE', { status: 'PLANNED' }, record.id)], 'status-only');
+    await ask([proposal('ARC', 'DELETE', {}, record.id)], 'delete-only');
+    expect(completeJson).not.toHaveBeenCalled();
+  });
+
+  it('fails the whole chat turn without proposals when ARC direction generation fails', async () => {
+    completeJson.mockRejectedValueOnce(new Error('direction stage unavailable'));
+
+    await expect(ask([proposal('ARC', 'CREATE', arcFields)], 'direction-failure'))
+      .rejects.toBeInstanceOf(BadGatewayException);
+
+    expect(chat.history(projectId).messages[1]).toMatchObject({
+      status: 'FAILED',
+      content: '',
+      proposals: [],
+    });
+    expect(database.orm.select().from(chatProposals).all()).toHaveLength(0);
+    expect(errorLog).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'chat_send_failed',
+      stage: 'arc_directions',
+      runId: 'chat-run',
+    }));
+  });
+
+  it('applies a pending legacy ARC proposal with preserved reversals and synthesized directions', async () => {
+    const description = '원래 저장된 반전 문구';
+    const history = await ask([proposal('ARC', 'CREATE', {
+      ...arcFields,
+      milestones: [{ episode: 4, type: 'REVERSAL', description }],
+    })], 'legacy-arc-proposal');
+    const proposalId = history.messages[1]!.proposals[0]!.id;
+    const stored = database.orm.select().from(chatProposals).where(eq(chatProposals.id, proposalId)).get()!;
+    const legacyAfter = JSON.parse(stored.afterJson) as Record<string, unknown>;
+    legacyAfter.reversalPlan = [{ episode: 4, description }];
+    delete legacyAfter.milestones;
+    delete legacyAfter.episodeDirections;
+    database.orm.update(chatProposals).set({
+      afterJson: JSON.stringify(legacyAfter),
+    }).where(eq(chatProposals.id, proposalId)).run();
+
+    expect(chat.history(projectId).messages[1]!.proposals[0]!.after).toMatchObject({
+      milestones: [{ episode: 4, type: 'REVERSAL', description }],
+      episodeDirections: Array.from({ length: 8 }, (_, index) => ({ episode: index + 1 })),
+    });
+    const applied = await chat.apply(projectId, proposalId);
+    const arcId = String(applied.proposal.result!.id);
+    expect(arcs.get(projectId, arcId)).toMatchObject({
+      milestones: [{ episode: 4, type: 'REVERSAL', description }],
+      episodeDirections: Array.from({ length: 8 }, (_, index) => ({ episode: index + 1 })),
+    });
+  });
+
   it('shows arc archival effects and applies the activation with those effects atomically', async () => {
     const oldArc = await arcs.create(projectId, { ...arcFields, status: 'ACTIVE' });
-    const history = await ask([proposal('ARC', 'CREATE', { ...arcFields, title: '다음 아크', startEpisodeNumber: 9, endEpisodeNumber: 16, status: 'ACTIVE' })]);
+    const history = await ask([proposal('ARC', 'CREATE', {
+      ...arcFields,
+      title: '다음 아크',
+      startEpisodeNumber: 9,
+      endEpisodeNumber: 16,
+      milestones: [{ episode: 16, type: 'GOAL', description: '다음 아크의 목표를 완수한다.' }],
+      status: 'ACTIVE',
+    })]);
     const item = history.messages[1]!.proposals[0]!;
     expect(item.effects[0]).toMatchObject({ label: expect.stringContaining(oldArc.title), before: { id: oldArc.id, status: 'ACTIVE' }, after: { status: 'ARCHIVED' } });
     await chat.apply(projectId, item.id);
@@ -647,6 +766,7 @@ describe('project chat', () => {
       title: '다음 아크',
       startEpisodeNumber: 9,
       endEpisodeNumber: 16,
+      milestones: [{ episode: 16, type: 'GOAL', description: '다음 아크의 목표를 완수한다.' }],
       status: 'ACTIVE',
     })]);
     const stamp = new Date().toISOString();
@@ -774,7 +894,7 @@ describe('project chat', () => {
     vi.stubEnv('AI_CHAT_MODEL', 'openai/gpt-5.6-luna');
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: { message: 'Provider rejected this request' } }, { status: 401 })));
     const runner = new AiRunnerService(database, new PromptRegistryService(), new OpenRouterGateway(), { isConfigured: () => false } as never);
-    const service = new ChatService(database, runner, projects, canon, arcs, improvements, memory, reads, episodeTools);
+    const service = new ChatService(database, runner, new ArcEpisodeDirectionsService(runner), projects, canon, arcs, improvements, memory, reads, episodeTools);
     await expect(service.send(projectId, { content: 'private request', clientMessageId: 'upstream-failure' }))
       .rejects.toThrow('AI 답변을 만들지 못했습니다. 같은 메시지를 다시 시도해 주세요.');
     const message = service.history(projectId).messages[1]!;
@@ -969,7 +1089,8 @@ describe('chat model runner', () => {
     const projects = new ProjectsService(database);
     const memory = new MemoryService(database, { embeddings: vi.fn(async (texts: string[]) => texts.map(() => [0, 1, 0, 1])) } as never);
     const canon = new CanonService(database, memory, runner);
-    const arcs = new ArcsService(database, memory, runner);
+    const arcDirections = new ArcEpisodeDirectionsService(runner);
+    const arcs = new ArcsService(database, memory, runner, arcDirections);
     const improvements = new ImprovementsService(database, runner, memory);
     const imageTags = new ImageTagToolService(projects, canon, runner);
     const imageTagCall = vi.spyOn(imageTags, 'call');
@@ -978,7 +1099,7 @@ describe('chat model runner', () => {
     const episodeService = new EpisodesService(database, projects, memory, runner);
     const editor = new EditorAiService(database, episodeService, memory, runner);
     const episodeTools = new ChatEpisodeToolsService(database, episodeService, editor);
-    const chat = new ChatService(database, runner, projects, canon, arcs, improvements, memory, reads, episodeTools);
+    const chat = new ChatService(database, runner, arcDirections, projects, canon, arcs, improvements, memory, reads, episodeTools);
     const projectId = projects.createInternal({ title: '달의 문', logline: '달빛 아래 기록관', genreTags: ['판타지'] }).id;
     const appearance = canon.persistCreate(projectId, {
       category: 'CHARACTER_APPEARANCE', name: '하린', content: '허리까지 오는 은발', status: 'ACTIVE',

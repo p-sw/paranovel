@@ -1,6 +1,7 @@
 import { BadGatewayException, BadRequestException, ConflictException } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
+import { ArcEpisodeDirectionsService } from '../src/ai/arc-episode-directions.service';
 import { DatabaseService } from '../src/database/database.service';
 import { arcs, projectCreationSessions } from '../src/database/schema';
 import { ProjectWizardService, type SetupQuestion } from '../src/projects/project-wizard.service';
@@ -37,11 +38,26 @@ function plannedArcs(targetEpisode: number) {
       endEpisode,
       goal: '달을 되찾는다.',
       conflict: '왕실이 방해한다.',
-      reversalPlan: [],
+      milestones: [{ episode: endEpisode, type: 'GOAL' as const, description: '달을 되찾는다.' }],
     });
     startEpisode = endEpisode + 1;
   }
   return result;
+}
+
+function episodeDirections(startEpisode: number, endEpisode: number) {
+  return Array.from({ length: endEpisode - startEpisode + 1 }, (_, index) => ({
+    episode: startEpisode + index,
+    title: `${startEpisode + index}화`,
+    direction: `${startEpisode + index}화의 사건이 다음 마일스톤으로 진전된다.`,
+  }));
+}
+
+function completedArcs(targetEpisode: number) {
+  return plannedArcs(targetEpisode).map((arc) => ({
+    ...arc,
+    episodeDirections: episodeDirections(arc.startEpisode, arc.endEpisode),
+  }));
 }
 
 describe('project interview history and custom answers', () => {
@@ -60,6 +76,11 @@ describe('project interview history and custom answers', () => {
       return toolResponse(count === 0 ? titleQuestion : count === 2 ? toneQuestion : count === 3 ? traitsQuestion : undefined);
     });
     completeJson.mockReset().mockImplementation(async (request) => {
+      if (request.task === 'arc_episode_directions') {
+        const arc = request.variables.arc_milestones;
+        const value = { episodeDirections: episodeDirections(arc.startEpisodeNumber, arc.endEpisodeNumber) };
+        return { value: request.validator.parse(value) };
+      }
       const targetEpisode = request.variables.target_episode_answer ? Number(request.variables.target_episode_answer) : 25;
       const value = {
         title: request.variables.project_title,
@@ -73,7 +94,8 @@ describe('project interview history and custom answers', () => {
       return { value: request.validator.parse(value) };
     });
     indexSource.mockReset().mockResolvedValue(undefined);
-    wizard = new ProjectWizardService(database, { completeText, completeJson } as never,
+    const ai = { completeText, completeJson } as never;
+    wizard = new ProjectWizardService(database, ai, new ArcEpisodeDirectionsService(ai),
       new ProjectsService(database), { indexSource } as never);
   });
 
@@ -152,6 +174,44 @@ describe('project interview history and custom answers', () => {
     if (ready.step.type === 'ready' && ready.step.blueprint) {
       expect(ready.step.blueprint.arcs.at(-1)?.endEpisode).toBe(40);
     }
+  });
+
+  it('finishes the full milestone blueprint before generating exact directions for every arc', async () => {
+    const ready = await finish();
+    expect(completeJson.mock.calls.map(([request]) => request.task)).toEqual([
+      'project_blueprint_milestones',
+      'arc_episode_directions',
+      'arc_episode_directions',
+    ]);
+    if (ready.step.type !== 'ready' || !ready.step.blueprint) throw new Error('Expected a blueprint');
+    expect(ready.step.blueprint.arcs.flatMap((arc) => (
+      arc.episodeDirections.map((direction) => direction.episode)
+    ))).toEqual(Array.from({ length: 25 }, (_, index) => index + 1));
+  });
+
+  it('keeps the interview active and unpublished when any direction stage fails', async () => {
+    const tone = await answerTarget();
+    const traits = await wizard.respond(tone.session.id, {
+      questionId: 'shared', answer: '밝음', position: 2, expectedState: tone.stateToken,
+    });
+    const successfulGeneration = completeJson.getMockImplementation()!;
+    completeJson.mockImplementation(async (request) => {
+      if (request.task === 'arc_episode_directions') throw new Error('direction stage unavailable');
+      return successfulGeneration(request);
+    });
+
+    await expect(wizard.respond(traits.session.id, {
+      questionId: 'shared', answer: ['용기'], position: 3, expectedState: traits.stateToken,
+    })).rejects.toThrow('direction stage unavailable');
+
+    const stored = database.orm.select().from(projectCreationSessions)
+      .where(eq(projectCreationSessions.id, traits.session.id)).get()!;
+    expect(stored).toMatchObject({ status: 'ACTIVE', pendingQuestionJson: null, blueprintJson: null });
+    expect(completeJson.mock.calls.map(([request]) => request.task)).toEqual([
+      'project_blueprint_milestones',
+      'arc_episode_directions',
+      'arc_episode_directions',
+    ]);
   });
 
   it('accepts explicit Other answers and stores the input mode for restoration', async () => {
@@ -303,6 +363,24 @@ describe('project interview history and custom answers', () => {
     })).rejects.toBeInstanceOf(ConflictException);
   });
 
+  it('rejects reviewed structural changes with missing or misaligned episode directions', async () => {
+    const ready = await finish();
+    if (ready.step.type !== 'ready' || !ready.step.blueprint) throw new Error('Expected a blueprint');
+    for (const change of [
+      (blueprint: typeof ready.step.blueprint) => { blueprint.arcs[0]!.episodeDirections.pop(); },
+      (blueprint: typeof ready.step.blueprint) => { blueprint.arcs[0]!.episodeDirections[1]!.episode = 1; },
+    ]) {
+      const blueprint = structuredClone(ready.step.blueprint);
+      change(blueprint);
+      await expect(wizard.commit(ready.session.id, {
+        expectedState: ready.stateToken,
+        blueprint,
+      })).rejects.toBeInstanceOf(BadRequestException);
+    }
+    expect(database.orm.select().from(projectCreationSessions)
+      .where(eq(projectCreationSessions.id, ready.session.id)).get()!.status).toBe('READY');
+  });
+
   it('retries initial canon and active-arc indexing after the project transaction committed', async () => {
     const ready = await finish();
     indexSource.mockRejectedValueOnce(new Error('index unavailable'));
@@ -327,7 +405,7 @@ describe('project interview history and custom answers', () => {
         ...ready.step.blueprint,
         targetEpisode: 15,
         targetEpisodeSource: 'AI',
-        arcs: plannedArcs(15),
+        arcs: completedArcs(15),
       },
     });
     expect(committed.project).toMatchObject({ targetEpisode: 15, targetEpisodeSource: 'USER' });
@@ -338,14 +416,28 @@ describe('project interview history and custom answers', () => {
     const legacy = {
       title: '달 없는 밤', logline: '잃어버린 달을 찾는다.', genreTags: ['판타지'],
       details: '주인공 1인칭 현재 시점과 서늘한 문체를 유지한다.', defaultTargetChars: 5000, canon: [],
-      arc: { title: '달의 흔적', startEpisode: 1, endEpisode: 5, goal: '달 찾기', conflict: '추격자', reversalPlan: [] },
+      arc: {
+        title: '달의 흔적', startEpisode: 1, endEpisode: 5, goal: '달 찾기', conflict: '추격자',
+        reversalPlan: [{ episode: 3, description: '원래 저장된 반전 문구' }],
+      },
     };
     database.orm.update(projectCreationSessions).set({
       status: 'READY', pendingQuestionJson: null, blueprintJson: JSON.stringify(legacy),
     }).where(eq(projectCreationSessions.id, target.session.id)).run();
     expect((await wizard.get(target.session.id)).step).toMatchObject({
       type: 'ready', blueprint: {
-        writingDirection: legacy.details, targetEpisode: 5, targetEpisodeSource: 'AI', arcs: [legacy.arc],
+        writingDirection: legacy.details,
+        targetEpisode: 5,
+        targetEpisodeSource: 'AI',
+        arcs: [{
+          title: legacy.arc.title,
+          startEpisode: legacy.arc.startEpisode,
+          endEpisode: legacy.arc.endEpisode,
+          goal: legacy.arc.goal,
+          conflict: legacy.arc.conflict,
+          milestones: [{ episode: 3, type: 'REVERSAL', description: legacy.arc.reversalPlan[0]!.description }],
+          episodeDirections: episodeDirections(1, 5),
+        }],
       },
     });
   });

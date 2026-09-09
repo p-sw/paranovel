@@ -3,19 +3,47 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, ArrowRight, Check, Feather, LoaderCircle, Plus, Sparkles, Trash2, X } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api, ApiError, isConflict, messageOf } from '../api/client';
+import {
+  episodeDirectionsForRange,
+  episodeDirectionsIssue,
+  legacyMilestones,
+  MILESTONE_TYPE_LABELS,
+  MILESTONE_TYPES,
+} from '../arcPlan';
 import { CANON_LABELS, GENRE_SUGGESTIONS, cx } from '../lib';
-import type { CanonCategory, ProjectBlueprint, ProjectSessionResult, SetupAnswerRecord, SetupQuestion } from '../types';
+import type { ArcMilestone, CanonCategory, ProjectBlueprint, ProjectSessionResult, SetupAnswerRecord, SetupQuestion } from '../types';
 import { Button, FieldError } from '../components/Ui';
 
 const SESSION_KEY = 'paranovel.project-session';
 type AnswerDraft = { answer: string | string[]; otherSelected: boolean; otherText: string };
+type BlueprintArc = ProjectBlueprint['arcs'][number];
+type LegacyBlueprintArc = Omit<BlueprintArc, 'milestones' | 'episodeDirections'> & {
+  reversalPlan?: Array<{ id?: string; episode: number; description: string }>;
+  milestones?: ArcMilestone[];
+  episodeDirections?: BlueprintArc['episodeDirections'];
+};
+type LegacyBlueprint = Omit<ProjectBlueprint, 'arcs'> & { details?: string; arcs?: LegacyBlueprintArc[] };
 const emptyDraft = (): AnswerDraft => ({ answer: '', otherSelected: false, otherText: '' });
 const isOtherOption = (value: string) => /^(기타(?:\s*\(직접\s*입력\))?|직접\s*입력|other)$/i.test(value.trim());
 
 function normalizeSessionResult(result: ProjectSessionResult): ProjectSessionResult {
   if (result.step.type !== 'ready') return result;
-  const legacyBlueprint = result.step.blueprint as ProjectBlueprint & { details?: string };
+  const legacyBlueprint = result.step.blueprint as unknown as LegacyBlueprint;
   const { details, ...blueprint } = legacyBlueprint;
+  const arcs = Array.isArray(legacyBlueprint.arcs)
+    ? legacyBlueprint.arcs.map((legacyArc) => {
+      const { reversalPlan: _reversalPlan, ...arc } = legacyArc;
+      return {
+        ...arc,
+        milestones: legacyMilestones(legacyArc),
+        episodeDirections: episodeDirectionsForRange(
+          legacyArc.startEpisode,
+          legacyArc.endEpisode,
+          legacyArc.episodeDirections ?? [],
+        ),
+      };
+    })
+    : undefined;
   return {
     ...result,
     step: {
@@ -23,9 +51,10 @@ function normalizeSessionResult(result: ProjectSessionResult): ProjectSessionRes
       blueprint: {
         ...blueprint,
         writingDirection: legacyBlueprint.writingDirection ?? details ?? '',
+        ...(arcs ? { arcs } : {}),
       },
     },
-  };
+  } as ProjectSessionResult;
 }
 
 function draftFromRecord(record?: SetupAnswerRecord): AnswerDraft {
@@ -54,7 +83,7 @@ function loadSession(): ProjectSessionResult | null {
     if (Array.isArray(stored?.arcs)) return result;
     if (!stored?.arc) return null;
     const { arc, ...rest } = stored;
-    return {
+    return normalizeSessionResult({
       ...result,
       step: {
         type: 'ready',
@@ -65,7 +94,7 @@ function loadSession(): ProjectSessionResult | null {
           arcs: [arc],
         },
       },
-    };
+    } as ProjectSessionResult);
   } catch {
     return null;
   }
@@ -540,13 +569,7 @@ export default function ProjectWizardPage() {
                     return (
                       <details className="rounded-2xl border border-line bg-paper p-4" open={arcIndex === 0 ? true : undefined} key={arcIndex}>
                         <summary className="cursor-pointer font-bold"><span className="mr-2 text-plum-700">{arcIndex === 0 ? '현재 아크' : `대기 아크 ${arcIndex}`}</span>{arc.startEpisode}–{arc.endEpisode}화 · {arc.title}</summary>
-                        <div className="mt-4 space-y-4">
-                          <div><label className="field-label" htmlFor={`review-arc-title-${arcIndex}`}>아크 제목</label><input id={`review-arc-title-${arcIndex}`} className="input" maxLength={200} value={arc.title} onChange={(event) => updateArc({ ...arc, title: event.target.value })} /></div>
-                          <div className="grid grid-cols-2 gap-3"><div><label className="field-label" htmlFor={`review-arc-start-${arcIndex}`}>시작 회차</label><input id={`review-arc-start-${arcIndex}`} type="number" min={1} className="input" value={arc.startEpisode} onChange={(event) => updateArc({ ...arc, startEpisode: Number(event.target.value) })} /></div><div><label className="field-label" htmlFor={`review-arc-end-${arcIndex}`}>끝 회차</label><input id={`review-arc-end-${arcIndex}`} type="number" min={1} className="input" value={arc.endEpisode} onChange={(event) => updateArc({ ...arc, endEpisode: Number(event.target.value) })} /></div></div>
-                          <div><label className="field-label" htmlFor={`review-arc-goal-${arcIndex}`}>목표</label><textarea id={`review-arc-goal-${arcIndex}`} className="input" maxLength={10_000} value={arc.goal} onChange={(event) => updateArc({ ...arc, goal: event.target.value })} /></div>
-                          <div><label className="field-label" htmlFor={`review-arc-conflict-${arcIndex}`}>갈등</label><textarea id={`review-arc-conflict-${arcIndex}`} className="input" maxLength={10_000} value={arc.conflict} onChange={(event) => updateArc({ ...arc, conflict: event.target.value })} /></div>
-                          <div><label className="field-label">회차별 반전</label><div className="mt-2 space-y-2">{arc.reversalPlan.map((beat, beatIndex) => <div className="grid grid-cols-[5rem_1fr_2.75rem] gap-2" key={beatIndex}><input className="input" type="number" min={arc.startEpisode} max={arc.endEpisode} aria-label={`${arcIndex + 1}번째 아크 ${beatIndex + 1}번째 반전 회차`} value={beat.episode} onChange={(event) => updateArc({ ...arc, reversalPlan: arc.reversalPlan.map((item, index) => index === beatIndex ? { ...item, episode: Number(event.target.value) } : item) })} /><input className="input" maxLength={10_000} aria-label={`${arcIndex + 1}번째 아크 ${beatIndex + 1}번째 반전 내용`} value={beat.description} onChange={(event) => updateArc({ ...arc, reversalPlan: arc.reversalPlan.map((item, index) => index === beatIndex ? { ...item, description: event.target.value } : item) })} /><IconDelete label={`${arcIndex + 1}번째 아크 ${beatIndex + 1}번째 반전 제거`} onClick={() => updateArc({ ...arc, reversalPlan: arc.reversalPlan.filter((_, index) => index !== beatIndex) })} /></div>)}</div><Button type="button" className="mt-2" variant="ghost" size="sm" onClick={() => updateArc({ ...arc, reversalPlan: [...arc.reversalPlan, { episode: arc.startEpisode, description: '' }] })}><Plus className="size-4" /> 반전 추가</Button></div>
-                        </div>
+                        <BlueprintArcEditor arc={arc} arcIndex={arcIndex} onChange={updateArc} />
                       </details>
                     );
                   })}
@@ -576,6 +599,83 @@ export default function ProjectWizardPage() {
   );
 }
 
+function BlueprintArcEditor({
+  arc,
+  arcIndex,
+  onChange,
+}: {
+  arc: ProjectBlueprint['arcs'][number];
+  arcIndex: number;
+  onChange: (arc: ProjectBlueprint['arcs'][number]) => void;
+}) {
+  const position = arcIndex + 1;
+  const updateRange = (field: 'startEpisode' | 'endEpisode', value: number) => {
+    const startEpisode = field === 'startEpisode' ? value : arc.startEpisode;
+    const endEpisode = field === 'endEpisode' ? value : arc.endEpisode;
+    onChange({
+      ...arc,
+      [field]: value,
+      episodeDirections: episodeDirectionsForRange(startEpisode, endEpisode, arc.episodeDirections),
+    });
+  };
+  const updateMilestone = (index: number, milestone: ArcMilestone) => onChange({
+    ...arc,
+    milestones: arc.milestones.map((item, itemIndex) => itemIndex === index ? milestone : item),
+  });
+  const updateDirection = (episode: number, changes: Partial<ProjectBlueprint['arcs'][number]['episodeDirections'][number]>) => onChange({
+    ...arc,
+    episodeDirections: arc.episodeDirections.map((item) => item.episode === episode ? { ...item, ...changes } : item),
+  });
+
+  return (
+    <div className="mt-4 space-y-5">
+      <div><label className="field-label" htmlFor={`review-arc-title-${arcIndex}`}>아크 제목</label><input id={`review-arc-title-${arcIndex}`} className="input" maxLength={200} value={arc.title} onChange={(event) => onChange({ ...arc, title: event.target.value })} /></div>
+      <div className="grid grid-cols-2 gap-3">
+        <div><label className="field-label" htmlFor={`review-arc-start-${arcIndex}`}>시작 회차</label><input id={`review-arc-start-${arcIndex}`} type="number" min={1} className="input" value={arc.startEpisode} onChange={(event) => updateRange('startEpisode', Number(event.target.value))} /></div>
+        <div><label className="field-label" htmlFor={`review-arc-end-${arcIndex}`}>끝 회차</label><input id={`review-arc-end-${arcIndex}`} type="number" min={1} className="input" value={arc.endEpisode} onChange={(event) => updateRange('endEpisode', Number(event.target.value))} /></div>
+      </div>
+      <div><label className="field-label" htmlFor={`review-arc-goal-${arcIndex}`}>목표</label><textarea id={`review-arc-goal-${arcIndex}`} className="input" maxLength={10_000} value={arc.goal} onChange={(event) => onChange({ ...arc, goal: event.target.value })} /></div>
+      <div><label className="field-label" htmlFor={`review-arc-conflict-${arcIndex}`}>갈등</label><textarea id={`review-arc-conflict-${arcIndex}`} className="input" maxLength={10_000} value={arc.conflict} onChange={(event) => onChange({ ...arc, conflict: event.target.value })} /></div>
+
+      <section>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div><h3 className="field-label">회차별 마일스톤</h3><p className="field-hint">전개의 목표와 반전, 고조, 클라이맥스, 해결 지점을 확인합니다.</p></div>
+          <Button type="button" variant="ghost" size="sm" onClick={() => onChange({
+            ...arc,
+            milestones: [...arc.milestones, { episode: arc.endEpisode, type: 'OTHER', description: '' }],
+          })}><Plus className="size-4" /> 마일스톤 추가</Button>
+        </div>
+        <div className="mt-3 space-y-2">
+          {arc.milestones.map((milestone, milestoneIndex) => (
+            <div className="grid gap-2 sm:grid-cols-[5rem_8rem_minmax(0,1fr)_2.75rem]" key={milestone.id ?? milestoneIndex}>
+              <input className="input" type="number" min={arc.startEpisode} max={arc.endEpisode} aria-label={`${position}번째 아크 ${milestoneIndex + 1}번째 마일스톤 회차`} value={milestone.episode} onChange={(event) => updateMilestone(milestoneIndex, { ...milestone, episode: Number(event.target.value) })} />
+              <select className="input" aria-label={`${position}번째 아크 ${milestoneIndex + 1}번째 마일스톤 종류`} value={milestone.type} onChange={(event) => updateMilestone(milestoneIndex, { ...milestone, type: event.target.value as ArcMilestone['type'] })}>{MILESTONE_TYPES.map((type) => <option key={type} value={type}>{MILESTONE_TYPE_LABELS[type]}</option>)}</select>
+              <textarea className="input" rows={2} maxLength={10_000} aria-label={`${position}번째 아크 ${milestoneIndex + 1}번째 마일스톤 내용`} value={milestone.description} onChange={(event) => updateMilestone(milestoneIndex, { ...milestone, description: event.target.value })} />
+              {arc.milestones.length > 1 ? <IconDelete label={`${position}번째 아크 ${milestoneIndex + 1}번째 마일스톤 제거`} onClick={() => onChange({ ...arc, milestones: arc.milestones.filter((_, index) => index !== milestoneIndex) })} /> : <span />}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section>
+        <h3 className="field-label">회차별 전개</h3>
+        <p className="field-hint">마일스톤을 잇는 제목과 전개 방향이 모든 회차에 하나씩 필요합니다.</p>
+        <div className="mt-3 space-y-3">
+          {arc.episodeDirections.map((item) => (
+            <article className="rounded-xl border border-line bg-surface p-3" key={item.episode}>
+              <h4 className="text-sm font-bold text-plum-700">{item.episode}화</h4>
+              <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(10rem,0.7fr)_minmax(0,1.3fr)]">
+                <input className="input" maxLength={200} aria-label={`${position}번째 아크 ${item.episode}화 제목`} placeholder="회차 제목" value={item.title} onChange={(event) => updateDirection(item.episode, { title: event.target.value })} />
+                <textarea className="input" rows={3} maxLength={20_000} aria-label={`${position}번째 아크 ${item.episode}화 전개 방향`} placeholder="주요 사건, 감정 변화, 정보 공개와 끝 훅" value={item.direction} onChange={(event) => updateDirection(item.episode, { direction: event.target.value })} />
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function validateBlueprintReview(blueprint: ProjectBlueprint, genres: string): string {
   const genreTags = genres.split(',').map((genre) => genre.trim()).filter(Boolean);
   if (!blueprint.title.trim() || !blueprint.logline.trim() || !genreTags.length) return '제목, 로그라인과 장르를 입력해 주세요.';
@@ -601,10 +701,14 @@ function validateBlueprintReview(blueprint: ProjectBlueprint, genres: string): s
     if (span < 5 || span > 20) return `${index + 1}번째 아크는 5화에서 20화 사이여야 합니다.`;
     const expectedStart = index === 0 ? 1 : blueprint.arcs[index - 1]!.endEpisode + 1;
     if (arc.startEpisode !== expectedStart) return `${index + 1}번째 아크가 ${expectedStart}화부터 이어지도록 범위를 맞춰 주세요.`;
-    if (arc.reversalPlan.some((beat) => !Number.isInteger(beat.episode) || !beat.description.trim() || beat.description.trim().length > 10_000
-      || beat.episode < arc.startEpisode || beat.episode > arc.endEpisode)) {
-      return `${index + 1}번째 아크의 반전 회차와 내용을 확인해 주세요.`;
+    if (!arc.milestones.length) return `${index + 1}번째 아크에는 하나 이상의 마일스톤이 필요합니다.`;
+    if (arc.milestones.some((milestone) => !MILESTONE_TYPES.includes(milestone.type)
+      || !Number.isInteger(milestone.episode) || !milestone.description.trim() || milestone.description.trim().length > 10_000
+      || milestone.episode < arc.startEpisode || milestone.episode > arc.endEpisode)) {
+      return `${index + 1}번째 아크의 마일스톤 회차, 종류와 내용을 확인해 주세요.`;
     }
+    const directionIssue = episodeDirectionsIssue(arc.startEpisode, arc.endEpisode, arc.episodeDirections);
+    if (directionIssue) return `${index + 1}번째 아크: ${directionIssue}`;
   }
   if (blueprint.arcs.at(-1)?.endEpisode !== blueprint.targetEpisode) return '마지막 아크의 끝 회차를 목표 완결 회차와 맞춰 주세요.';
   if (blueprint.canon.some((entry) => !entry.name.trim() || !entry.content.trim())) return '초기 정사의 이름과 내용을 모두 입력하거나 빈 항목을 삭제해 주세요.';

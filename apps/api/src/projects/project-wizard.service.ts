@@ -7,9 +7,14 @@ import {
 } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import { AiRunnerService } from '../ai/ai-runner.service';
+import { ArcEpisodeDirectionsService } from '../ai/arc-episode-directions.service';
 import {
-  projectBlueprintSchema,
+  type ArcMilestone,
+  type ProjectBlueprint as AiProjectBlueprint,
+  type ProjectBlueprintMilestones,
   projectBlueprintValidator,
+  projectBlueprintMilestonesSchema,
+  projectBlueprintMilestonesValidator,
   projectInterviewTools,
 } from '../ai/ai.schemas';
 import { DatabaseService } from '../database/database.service';
@@ -38,30 +43,7 @@ export interface SetupQuestion {
   suggestedAnswer?: string;
 }
 
-export interface Blueprint {
-  title: string;
-  logline: string;
-  genreTags: string[];
-  writingDirection: string;
-  defaultTargetChars: number;
-  targetEpisode: number;
-  targetEpisodeSource: 'USER' | 'AI';
-  canon: Array<{
-    category: string;
-    name: string;
-    aliases: string[];
-    content: string;
-    metadata: Record<string, unknown>;
-  }>;
-  arcs: Array<{
-    title: string;
-    startEpisode: number;
-    endEpisode: number;
-    goal: string;
-    conflict: string;
-    reversalPlan: Array<{ episode: number; description: string }>;
-  }>;
-}
+export type Blueprint = AiProjectBlueprint;
 
 type SessionRow = typeof projectCreationSessions.$inferSelect;
 type AnswerRecord = {
@@ -78,6 +60,7 @@ export class ProjectWizardService {
   constructor(
     private readonly database: DatabaseService,
     private readonly ai: AiRunnerService,
+    private readonly arcDirections: ArcEpisodeDirectionsService,
     private readonly projects: ProjectsService,
     private readonly memory: MemoryService,
   ) {}
@@ -112,16 +95,20 @@ export class ProjectWizardService {
   async get(sessionId: string) {
     let session = this.requireSession(sessionId);
     if (session.status === 'READY' && !this.parseStoredBlueprint(session.blueprintJson)) {
-      // Older READY sessions may be missing a blueprint, contain the former
-      // single-arc shape, or have a range that no longer satisfies the
-      // full-story contract. Reopen the interview so the target and complete
-      // arc sequence can be regenerated instead of returning an invalid wire
-      // response with a null blueprint.
-      this.updateSession(session, {
-        status: 'ACTIVE',
-        blueprintJson: null,
-        pendingQuestionJson: null,
-      });
+      const milestones = this.parseStoredMilestoneBlueprint(session.blueprintJson);
+      if (milestones) {
+        const blueprint = await this.completeBlueprintDirections(milestones);
+        this.updateSession(session, { blueprintJson: stringifyJson(blueprint) });
+      } else {
+        // Older READY sessions with an unusable shape are reopened rather than
+        // returning a null blueprint. Valid legacy reversal plans are upgraded
+        // above and keep their original descriptions as REVERSAL milestones.
+        this.updateSession(session, {
+          status: 'ACTIVE',
+          blueprintJson: null,
+          pendingQuestionJson: null,
+        });
+      }
       session = this.requireSession(sessionId);
     }
     if (session.status === 'ACTIVE' && !session.pendingQuestionJson) {
@@ -236,6 +223,10 @@ export class ProjectWizardService {
     }
     this.assertExpectedState(session, body && typeof body === 'object' ? (body as Record<string, unknown>).expectedState : undefined);
     let blueprint = this.parseStoredBlueprint(session.blueprintJson);
+    if (!blueprint) {
+      const milestones = this.parseStoredMilestoneBlueprint(session.blueprintJson);
+      if (milestones) blueprint = await this.completeBlueprintDirections(milestones);
+    }
     const submitted = body && typeof body === 'object'
       ? (body as Record<string, unknown>).blueprint
       : undefined;
@@ -298,7 +289,9 @@ export class ProjectWizardService {
           endEpisodeNumber: arc.endEpisode,
           goal: arc.goal,
           conflict: arc.conflict,
-          reversalPlanJson: stringifyJson(arc.reversalPlan),
+          reversalPlanJson: '[]',
+          milestonePlanJson: stringifyJson(arc.milestones),
+          episodeDirectionsJson: stringifyJson(arc.episodeDirections),
           status: index === 0 ? 'ACTIVE' : 'PLANNED',
           revision: 1,
           createdAt: stamp,
@@ -420,7 +413,7 @@ export class ProjectWizardService {
     }
     const targetSource = targetRecord.skipped ? 'AI' as const : 'USER' as const;
     const requestedTarget = targetRecord.skipped ? null : this.parseTargetEpisode(targetRecord.answer);
-    const blueprintValidator = projectBlueprintValidator.superRefine((value, context) => {
+    const blueprintValidator = projectBlueprintMilestonesValidator.superRefine((value, context) => {
       if (value.targetEpisodeSource !== targetSource) {
         context.addIssue({ code: 'custom', message: `targetEpisodeSource must be ${targetSource}`, path: ['targetEpisodeSource'] });
       }
@@ -429,8 +422,8 @@ export class ProjectWizardService {
       }
     });
 
-    const { value: blueprint } = await this.ai.completeJson<Blueprint>({
-      task: 'project_blueprint',
+    const { value: milestoneBlueprint } = await this.ai.completeJson<ProjectBlueprintMilestones>({
+      task: 'project_blueprint_milestones',
       promptId: 'project-blueprint',
       variables: {
         project_title: answers.title,
@@ -440,12 +433,13 @@ export class ProjectWizardService {
         target_episode_answer: targetRecord.answer,
         interview_completion: args,
       },
-      schema: { name: 'project_blueprint', value: projectBlueprintSchema },
+      schema: { name: 'project_blueprint_milestones', value: projectBlueprintMilestonesSchema },
       validator: blueprintValidator,
       includeCore: false,
       includeMemoryContract: false,
       maxTokens: 24_000,
     });
+    const blueprint = await this.completeBlueprintDirections(milestoneBlueprint);
     this.updateSession(session, {
       blueprintJson: stringifyJson(blueprint),
       pendingQuestionJson: null,
@@ -475,23 +469,8 @@ export class ProjectWizardService {
   }
 
   private validateBlueprint(blueprint: Blueprint): void {
-    if (!blueprint.title.trim()) throw new BadRequestException('Blueprint title is required');
-    for (const [index, arc] of blueprint.arcs.entries()) {
-      const span = arc.endEpisode - arc.startEpisode + 1;
-      if (span < 5 || span > 20) {
-        throw new BadRequestException('Blueprint arcs must span between 5 and 20 episodes');
-      }
-      const expectedStart = index === 0 ? 1 : blueprint.arcs[index - 1]!.endEpisode + 1;
-      if (arc.startEpisode !== expectedStart) {
-        throw new BadRequestException('Blueprint arcs must be contiguous from episode 1');
-      }
-      if (arc.reversalPlan.some((beat) => beat.episode < arc.startEpisode || beat.episode > arc.endEpisode)) {
-        throw new BadRequestException('Blueprint reversal episodes must be inside their arc');
-      }
-    }
-    if (blueprint.arcs.at(-1)?.endEpisode !== blueprint.targetEpisode) {
-      throw new BadRequestException('Blueprint must cover every episode through the target ending');
-    }
+    const parsed = projectBlueprintValidator.safeParse(blueprint);
+    if (!parsed.success) throw new BadRequestException(`Invalid blueprint: ${parsed.error.message}`);
   }
 
   private requireSession(sessionId: string): SessionRow {
@@ -537,21 +516,115 @@ export class ProjectWizardService {
       normalized.writingDirection = normalized.details;
     }
     delete normalized.details;
-    if (Array.isArray(normalized.arcs) || !normalized.arc || typeof normalized.arc !== 'object') return normalized;
-    const legacyArc = normalized.arc as Record<string, unknown>;
-    const { arc: _legacyArc, ...rest } = normalized;
-    return {
-      ...rest,
-      targetEpisode: legacyArc.endEpisode,
-      targetEpisodeSource: 'AI',
-      arcs: [legacyArc],
-    };
+    let result = normalized;
+    if (!Array.isArray(normalized.arcs) && normalized.arc && typeof normalized.arc === 'object') {
+      const legacyArc = normalized.arc as Record<string, unknown>;
+      const { arc: _legacyArc, ...rest } = normalized;
+      result = {
+        ...rest,
+        targetEpisode: legacyArc.endEpisode,
+        targetEpisodeSource: 'AI',
+        arcs: [legacyArc],
+      };
+    }
+    if (Array.isArray(result.arcs)) {
+      result.arcs = result.arcs.map((arc) => this.normalizeBlueprintArc(arc));
+    }
+    return result;
+  }
+
+  private normalizeBlueprintArc(value: unknown): unknown {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    const arc = { ...(value as Record<string, unknown>) };
+    if (!Array.isArray(arc.milestones)) {
+      const reversals = Array.isArray(arc.reversalPlan) ? arc.reversalPlan : [];
+      const milestones: ArcMilestone[] = reversals.flatMap((raw): ArcMilestone[] => {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+        const reversal = raw as Record<string, unknown>;
+        if (!Number.isInteger(reversal.episode) || typeof reversal.description !== 'string') return [];
+        return [{
+          ...(typeof reversal.id === 'string' && reversal.id ? { id: reversal.id } : {}),
+          episode: Number(reversal.episode),
+          type: 'REVERSAL' as const,
+          // Do not trim or rewrite legacy text during compatibility recovery.
+          description: reversal.description,
+        }];
+      });
+      if (
+        milestones.length === 0
+        && Number.isInteger(arc.endEpisode)
+        && typeof arc.goal === 'string'
+        && arc.goal.trim()
+      ) {
+        milestones.push({
+          episode: Number(arc.endEpisode),
+          type: 'GOAL',
+          description: arc.goal,
+        });
+      }
+      arc.milestones = milestones;
+    }
+    delete arc.reversalPlan;
+    return arc;
   }
 
   private parseStoredBlueprint(json: string | null): Blueprint | null {
     const raw = this.normalizeBlueprintInput(parseJson<unknown>(json, null));
     const parsed = projectBlueprintValidator.safeParse(raw);
     return parsed.success ? parsed.data : null;
+  }
+
+  private parseStoredMilestoneBlueprint(json: string | null): ProjectBlueprintMilestones | null {
+    const raw = this.normalizeBlueprintInput(parseJson<unknown>(json, null));
+    const parsed = projectBlueprintMilestonesValidator.safeParse(raw);
+    return parsed.success ? parsed.data : null;
+  }
+
+  private async completeBlueprintDirections(
+    milestoneBlueprint: ProjectBlueprintMilestones,
+  ): Promise<Blueprint> {
+    const surroundingArcs = milestoneBlueprint.arcs.map((arc) => ({
+      title: arc.title,
+      startEpisodeNumber: arc.startEpisode,
+      endEpisodeNumber: arc.endEpisode,
+      goal: arc.goal,
+      conflict: arc.conflict,
+      milestones: arc.milestones,
+    }));
+    const directions = await this.arcDirections.generateMany(
+      milestoneBlueprint.arcs.map((arc) => ({
+        projectContext: {
+          title: milestoneBlueprint.title,
+          logline: milestoneBlueprint.logline,
+          genreTags: milestoneBlueprint.genreTags,
+          targetEpisode: milestoneBlueprint.targetEpisode,
+        },
+        writingDirection: milestoneBlueprint.writingDirection,
+        canon: milestoneBlueprint.canon,
+        surroundingArcs,
+        arc: {
+          title: arc.title,
+          startEpisodeNumber: arc.startEpisode,
+          endEpisodeNumber: arc.endEpisode,
+          goal: arc.goal,
+          conflict: arc.conflict,
+          milestones: arc.milestones,
+        },
+        generationRequest: '프로젝트 초기 청사진의 마일스톤을 모든 회차의 전개 방향으로 연결한다.',
+      })),
+    );
+    const completed = {
+      ...milestoneBlueprint,
+      arcs: milestoneBlueprint.arcs.map((arc, index) => ({
+        ...arc,
+        episodeDirections: directions[index]!,
+      })),
+    };
+    const parsed = projectBlueprintValidator.safeParse(completed);
+    if (!parsed.success) {
+      throw new BadGatewayException(`AI generated an incomplete project blueprint: ${parsed.error.message}`);
+    }
+    return parsed.data;
   }
 
   private async indexCommittedProject(projectId: string): Promise<void> {

@@ -316,6 +316,41 @@ describe('project AI chat', () => {
     expect(card.getByText('주인공 1인칭 과거 시점')).toBeInTheDocument();
   });
 
+  it('formats arc milestones and complete episode directions while retaining legacy reversal proposals', async () => {
+    const arcProposal: ChatProposal = {
+      ...proposal,
+      kind: 'ARC',
+      operation: 'CREATE',
+      targetId: null,
+      title: '달의 귀환 아크',
+      before: null,
+      after: {
+        title: '달의 귀환',
+        milestones: [{ episode: 9, type: 'REVERSAL', description: '왕실이 달을 숨겼음이 드러난다.' }],
+        episodeDirections: [{ episode: 6, title: '지하의 빛', direction: '왕궁 지하에서 달빛의 흔적을 발견한다.' }],
+      },
+      effects: [{
+        label: '이전 형식 변경안',
+        before: null,
+        after: { reversalPlan: [{ episode: 9, description: '기존 반전 문장은 그대로 보인다.' }] },
+      }],
+    };
+    vi.mocked(api.chat.history).mockResolvedValue({
+      thread,
+      messages: [{ ...assistantMessage, proposals: [arcProposal] }],
+    });
+
+    renderPage();
+
+    const card = within(await screen.findByRole('region', { name: '달의 귀환 아크 변경안' }));
+    expect(card.getByText('회차별 마일스톤')).toBeInTheDocument();
+    expect(card.getByText('회차별 전개')).toBeInTheDocument();
+    expect(card.getByText(/9화 · 반전: 왕실이 달을 숨겼음이 드러난다/)).toBeInTheDocument();
+    expect(card.getByText(/6화 · 지하의 빛/)).toHaveTextContent('왕궁 지하에서 달빛의 흔적을 발견한다.');
+    expect(card.getByText('회차별 반전')).toBeInTheDocument();
+    expect(card.getByText('9화: 기존 반전 문장은 그대로 보인다.')).toBeInTheDocument();
+  });
+
   it.each([['CHARACTER', '인물'], ['CHARACTER_APPEARANCE', '인물 외형']])('shows the %s label and exact free-text metadata in the proposal review', async (category, label) => {
     vi.mocked(api.chat.history).mockResolvedValue({ thread, messages: [{ ...assistantMessage, proposals: [{
       ...proposal, before: null, operation: 'CREATE', after: {

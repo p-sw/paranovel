@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
@@ -8,6 +8,13 @@ import type { Arc, ArcPlanProposal } from '../types';
 import ArcPage from './ArcPage';
 
 const timestamp = '2026-09-01T00:00:00.000Z';
+
+function directions(startEpisode: number, endEpisode: number, prefix = '전개') {
+  return Array.from({ length: endEpisode - startEpisode + 1 }, (_, index) => {
+    const episode = startEpisode + index;
+    return { episode, title: `${episode}화 제목`, direction: `${prefix} ${episode}화 방향` };
+  });
+}
 
 const completedArc = arc({
   id: 'completed',
@@ -25,14 +32,17 @@ const archivedArc = arc({
   status: 'ARCHIVED',
   revision: 2,
 });
-const activeArc = arc({
-  id: 'active',
-  title: '현재의 관문',
-  startEpisode: 11,
-  endEpisode: 15,
-  status: 'ACTIVE',
-  revision: 3,
-});
+const activeArc: Arc = {
+  ...arc({
+    id: 'active',
+    title: '현재의 관문',
+    startEpisode: 11,
+    endEpisode: 15,
+    status: 'ACTIVE',
+    revision: 3,
+  }),
+  milestones: [{ id: 'legacy-reversal', episode: 14, type: 'REVERSAL', description: '기존 반전 문장을 그대로 유지한다.' }],
+};
 const plannedArc = arc({
   id: 'planned',
   title: '왕도의 그림자',
@@ -48,8 +58,8 @@ const aiProposal: ArcPlanProposal = {
   endEpisodeNumber: 25,
   goal: '사라진 달을 되찾는다.',
   conflict: '왕실이 귀환을 막는다.',
-  reversalPlan: [{ episode: 24, description: '왕이 달을 숨긴 이유가 드러난다.' }],
-  episodeDirections: [{ episode: 21, title: '달빛의 흔적', direction: '왕궁 아래에서 달빛을 발견한다.' }],
+  milestones: [{ episode: 24, type: 'REVERSAL', description: '왕이 달을 숨긴 이유가 드러난다.' }],
+  episodeDirections: directions(21, 25, '달의 귀환'),
   conflicts: [],
 };
 
@@ -61,7 +71,8 @@ function arc(input: Pick<Arc, 'id' | 'title' | 'startEpisode' | 'endEpisode' | '
     projectId: 'story',
     goal: `${input.title}의 목표`,
     conflict: `${input.title}의 갈등`,
-    reversalPlan: [],
+    milestones: [{ episode: input.endEpisode, type: 'GOAL', description: `${input.title}의 목표를 달성한다.` }],
+    episodeDirections: directions(input.startEpisode, input.endEpisode, input.title),
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -77,7 +88,7 @@ function renderPage() {
         <Routes>
           <Route
             path="/projects/:projectId"
-            element={<Outlet context={{ project: { lastEpisodeNumber: 12, nextEpisodeNumber: 13 } }} />}
+            element={<Outlet context={{ project: { lastEpisodeNumber: 12, nextEpisodeNumber: 13, targetEpisode: 25 } }} />}
           >
             <Route path="arc" element={<ArcPage />} />
           </Route>
@@ -140,6 +151,9 @@ describe('arc lifecycle UI', () => {
     expect(within(planned).getByRole('heading', { name: plannedArc.title })).toBeVisible();
     expect(within(completed).getByRole('heading', { name: completedArc.title })).toBeVisible();
     expect(within(archived).getByRole('heading', { name: archivedArc.title })).toBeVisible();
+    expect(within(current).getByText(/기존 반전 문장을 그대로 유지한다/)).toBeVisible();
+    expect(within(current).getByText('현재의 관문 11화 방향')).toBeVisible();
+    expect(within(current).queryByText('회차별 반전')).not.toBeInTheDocument();
     expect(within(planned).getByRole('button', { name: '편집' })).toBeVisible();
     expect(within(planned).getByRole('button', { name: '현재 아크로 전환' })).toBeVisible();
     expect(within(planned).getByRole('button', { name: '삭제' })).toBeVisible();
@@ -170,7 +184,8 @@ describe('arc lifecycle UI', () => {
       endEpisode: activeArc.endEpisode,
       goal: '확인하고 현재 계획을 바꾼다.',
       conflict: activeArc.conflict,
-      reversalPlan: [],
+      milestones: activeArc.milestones,
+      episodeDirections: activeArc.episodeDirections,
       expectedRevision: activeArc.revision,
       confirmProtected: true,
     });
@@ -194,6 +209,38 @@ describe('arc lifecycle UI', () => {
     });
     expect(input).not.toHaveProperty('confirmProtected');
     expect(input).not.toHaveProperty('status');
+  });
+
+  it('keeps matching episode directions when the arc range changes', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: '대기 아크 추가' }));
+    fireEvent.change(screen.getByLabelText('22화 제목'), { target: { value: '보존할 제목' } });
+    fireEvent.change(screen.getByLabelText('22화 전개 방향'), { target: { value: '보존할 전개 방향' } });
+
+    await user.clear(screen.getByLabelText('시작 회차'));
+    await user.type(screen.getByLabelText('시작 회차'), '22');
+    await user.clear(screen.getByLabelText('끝 회차'));
+    await user.type(screen.getByLabelText('끝 회차'), '26');
+
+    expect(screen.getByLabelText('22화 제목')).toHaveValue('보존할 제목');
+    expect(screen.getByLabelText('22화 전개 방향')).toHaveValue('보존할 전개 방향');
+    expect(screen.getByLabelText('26화 제목')).toHaveValue('');
+  });
+
+  it('does not save a manual arc while any episode direction is empty', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: '대기 아크 추가' }));
+    await user.type(screen.getByLabelText('아크 제목'), '비어 있는 전개');
+    await user.type(screen.getByLabelText('목표'), '끝에 도달한다.');
+    await user.type(screen.getByLabelText('핵심 갈등'), '길이 막혀 있다.');
+    await user.type(screen.getByLabelText('1번째 마일스톤 내용'), '관문을 연다.');
+
+    await user.click(screen.getByRole('button', { name: '대기 아크 저장' }));
+
+    expect(await screen.findByText('21화의 제목과 전개 방향을 모두 입력해 주세요.')).toBeVisible();
+    expect(api.arcs.create).not.toHaveBeenCalled();
   });
 
   it('locks the arc editor controls while a save request is pending', async () => {
@@ -245,19 +292,29 @@ describe('arc lifecycle UI', () => {
     renderPage();
     await user.click(await screen.findByRole('button', { name: '대기 아크 추가' }));
     expect(screen.getByLabelText('시작 회차')).toHaveValue(21);
-    expect(screen.getByLabelText('끝 회차')).toHaveValue(30);
+    expect(screen.getByLabelText('끝 회차')).toHaveValue(25);
     await user.type(screen.getByLabelText('아크 제목'), '왕도 이후');
     await user.type(screen.getByLabelText('목표'), '새로운 도시로 떠난다.');
     await user.type(screen.getByLabelText('핵심 갈등'), '국경이 봉쇄된다.');
+    fireEvent.change(screen.getByLabelText('1번째 마일스톤 내용'), { target: { value: '새로운 도시로 출발한다.' } });
+    for (let episode = 21; episode <= 25; episode += 1) {
+      fireEvent.change(screen.getByLabelText(`${episode}화 제목`), { target: { value: `${episode}화의 문` } });
+      fireEvent.change(screen.getByLabelText(`${episode}화 전개 방향`), { target: { value: `${episode}화 사건을 전개한다.` } });
+    }
     await user.click(screen.getByRole('button', { name: '대기 아크 저장' }));
 
     await waitFor(() => expect(api.arcs.create).toHaveBeenCalledWith('story', {
       title: '왕도 이후',
       startEpisode: 21,
-      endEpisode: 30,
+      endEpisode: 25,
       goal: '새로운 도시로 떠난다.',
       conflict: '국경이 봉쇄된다.',
-      reversalPlan: [],
+      milestones: [{ episode: 25, type: 'GOAL', description: '새로운 도시로 출발한다.' }],
+      episodeDirections: Array.from({ length: 5 }, (_, index) => ({
+        episode: 21 + index,
+        title: `${21 + index}화의 문`,
+        direction: `${21 + index}화 사건을 전개한다.`,
+      })),
       status: 'PLANNED',
     }));
   });
@@ -268,6 +325,8 @@ describe('arc lifecycle UI', () => {
     await user.click(await screen.findByRole('button', { name: 'AI로 미래 아크 제안' }));
     await user.click(screen.getByRole('button', { name: '제안 만들기' }));
     expect(await screen.findByRole('heading', { name: aiProposal.title })).toBeVisible();
+    expect(screen.getByText(/왕이 달을 숨긴 이유가 드러난다/)).toBeVisible();
+    expect(screen.getByText('달의 귀환 25화 방향')).toBeVisible();
     await user.click(screen.getByRole('button', { name: '대기 아크 편집 폼에 불러오기' }));
     expect(screen.getByLabelText('아크 제목')).toHaveValue(aiProposal.title);
     await user.click(screen.getByRole('button', { name: '대기 아크 저장' }));
@@ -278,7 +337,8 @@ describe('arc lifecycle UI', () => {
       endEpisode: aiProposal.endEpisodeNumber,
       goal: aiProposal.goal,
       conflict: aiProposal.conflict,
-      reversalPlan: aiProposal.reversalPlan,
+      milestones: aiProposal.milestones,
+      episodeDirections: aiProposal.episodeDirections,
       status: 'PLANNED',
     }));
   });
@@ -306,7 +366,8 @@ describe('arc lifecycle UI', () => {
       ...aiProposal,
       startEpisodeNumber: plannedArc.startEpisode,
       endEpisodeNumber: plannedArc.endEpisode,
-      reversalPlan: [{ episode: 19, description: '왕이 달을 숨긴 이유가 드러난다.' }],
+      milestones: [{ episode: 19, type: 'REVERSAL' as const, description: '왕이 달을 숨긴 이유가 드러난다.' }],
+      episodeDirections: directions(16, 20, '수정된 왕도'),
       replaceArcId: plannedArc.id,
       replaceArcRevision: plannedArc.revision,
     };
@@ -324,7 +385,8 @@ describe('arc lifecycle UI', () => {
       endEpisode: revision.endEpisodeNumber,
       goal: revision.goal,
       conflict: revision.conflict,
-      reversalPlan: revision.reversalPlan,
+      milestones: revision.milestones,
+      episodeDirections: revision.episodeDirections,
       expectedRevision: plannedArc.revision,
     }));
     expect(api.arcs.create).not.toHaveBeenCalled();

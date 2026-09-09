@@ -23,7 +23,7 @@ describe('arc lifecycle memory', () => {
     memory = new MemoryService(database, {
       embeddings: vi.fn(async () => []),
     } as never);
-    arcs = new ArcsService(database, memory, {} as never);
+    arcs = new ArcsService(database, memory, {} as never, {} as never);
     projectId = new ProjectsService(database).createInternal({
       title: '달의 기록',
       logline: '기록관이 사라진 달을 추적한다.',

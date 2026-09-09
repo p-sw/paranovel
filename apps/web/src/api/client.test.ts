@@ -92,6 +92,8 @@ describe('write contracts', () => {
       expectedRevision: 4,
       startEpisode: 8,
       endEpisode: 17,
+      milestones: [{ episode: 12, type: 'CLIMAX', description: '추적자가 정체를 드러낸다.' }],
+      episodeDirections: [{ episode: 8, title: '성문', direction: '성문 안으로 잠입한다.' }],
     });
 
     const [, options] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -100,6 +102,8 @@ describe('write contracts', () => {
       expectedRevision: 4,
       startEpisodeNumber: 8,
       endEpisodeNumber: 17,
+      milestones: [{ episode: 12, type: 'CLIMAX', description: '추적자가 정체를 드러낸다.' }],
+      episodeDirections: [{ episode: 8, title: '성문', direction: '성문 안으로 잠입한다.' }],
     });
     expect(body).not.toHaveProperty('startEpisode');
     expect(body).not.toHaveProperty('endEpisode');

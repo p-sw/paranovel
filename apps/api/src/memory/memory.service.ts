@@ -516,7 +516,8 @@ export class MemoryService {
               range: [currentArc.startEpisodeNumber, currentArc.endEpisodeNumber],
               goal: currentArc.goal,
               conflict: currentArc.conflict,
-              reversalPlan: parseJson(currentArc.reversalPlanJson, []),
+              milestones: parseJson(currentArc.milestonePlanJson, []),
+              episodeDirections: parseJson(currentArc.episodeDirectionsJson, []),
             }
           : null,
       ),

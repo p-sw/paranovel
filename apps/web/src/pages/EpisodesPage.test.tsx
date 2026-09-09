@@ -508,7 +508,14 @@ describe('side stories', () => {
     branchFromEpisodeId: 'episode-1', nextEpisodeNumber: 3, revision: 1, canon: [],
     arc: {
       id: 'side-arc', projectId: 'story', title: '사라진 등불', startEpisode: 1, endEpisode: 4,
-      goal: '등불의 주인을 찾는다.', conflict: '수도 경비대가 추적한다.', reversalPlan: [], status: 'ACTIVE', revision: 1,
+      goal: '등불의 주인을 찾는다.', conflict: '수도 경비대가 추적한다.',
+      milestones: [{ episode: 4, type: 'GOAL', description: '등불의 주인을 찾는다.' }],
+      episodeDirections: Array.from({ length: 4 }, (_, index) => ({
+        episode: index + 1,
+        title: `외전 ${index + 1}화`,
+        direction: `등불의 행방을 좇는 ${index + 1}화 전개`,
+      })),
+      status: 'ACTIVE', revision: 1,
       createdAt: incompleteEpisode.createdAt, updatedAt: incompleteEpisode.updatedAt,
     },
     episodes: [groupedOne, groupedTwo], createdAt: incompleteEpisode.createdAt, updatedAt: incompleteEpisode.updatedAt,
@@ -517,6 +524,7 @@ describe('side stories', () => {
   it('keeps standalone and group numbering separate from the main episode order', async () => {
     persistedEpisodes = [{ ...incompleteEpisode, status: 'DRAFT' }];
     vi.mocked(api.sideStories.list).mockResolvedValue({ standalone: [standalone], groups: [group] });
+    const user = userEvent.setup();
     renderPage();
 
     expect(await screen.findByRole('link', { name: /닫힌 문 너머/ })).toBeVisible();
@@ -530,6 +538,15 @@ describe('side stories', () => {
     expect(within(groupedList).getByRole('button', { name: '외전 2화 메뉴' })).toBeVisible();
     expect(screen.getByText('그룹 정사')).toBeVisible();
     expect(screen.getByText('사라진 등불')).toBeVisible();
+    const arcSummary = within(groupedList).getByText('회차별 아크 계획').closest('summary');
+    expect(arcSummary).toHaveAccessibleName('수도 야화 회차별 아크 계획');
+    await user.click(arcSummary!);
+    const milestones = within(groupedList).getByRole('region', { name: '수도 야화 마일스톤' });
+    const directions = within(groupedList).getByRole('region', { name: '수도 야화 회차별 전개' });
+    expect(within(milestones).getByText('4화 · 목표')).toBeVisible();
+    expect(within(milestones).getByText('등불의 주인을 찾는다.')).toBeVisible();
+    expect(within(directions).getByText('1화 · 외전 1화')).toBeVisible();
+    expect(within(directions).getByText('등불의 행방을 좇는 4화 전개')).toBeVisible();
   });
 
   it.each([
@@ -655,6 +672,16 @@ describe('side stories', () => {
     expect(dialog.queryByRole('button', { name: '이전' })).not.toBeInTheDocument();
     expect(dialog.queryByRole('radio', { name: /단편 외전/ })).not.toBeInTheDocument();
     expect(dialog.getByLabelText(/외전에 원하는 것/)).toBeVisible();
+    const groupInput = createGroup.mock.calls[0]![1];
+    expect(groupInput.arc).toEqual({
+      title: '얼어붙은 봉인',
+      goal: '궁전의 봉인을 푼다.',
+      conflict: '시간을 지키는 파수꾼이 막아선다.',
+      endEpisodeNumber: 5,
+      milestones: [{ episode: 5, type: 'GOAL', description: '궁전의 봉인을 푼다.' }],
+    });
+    expect(groupInput.arc).not.toHaveProperty('reversalPlan');
+    expect(groupInput.arc).not.toHaveProperty('episodeDirections');
 
     await user.click(dialog.getByRole('button', { name: '나중에 계속하기' }));
 
@@ -734,7 +761,7 @@ describe('side stories', () => {
         goal: createdGroup.arc.goal,
         conflict: createdGroup.arc.conflict,
         endEpisodeNumber: 6,
-        reversalPlan: [],
+        milestones: [{ episode: 6, type: 'GOAL', description: createdGroup.arc.goal }],
       },
     };
     expect(createGroup).toHaveBeenNthCalledWith(1, 'story', expectedGroupInput, expect.any(String));

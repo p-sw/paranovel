@@ -38,6 +38,25 @@ export interface ReversalBeat {
   description: string;
 }
 
+const MILESTONE_TYPES = [
+  'GOAL',
+  'REVERSAL',
+  'ESCALATION',
+  'CLIMAX',
+  'RESOLUTION',
+  'OTHER',
+] as const;
+
+export interface ArcMilestone extends ReversalBeat {
+  type: (typeof MILESTONE_TYPES)[number];
+}
+
+export interface ArcEpisodeDirection {
+  episode: number;
+  title: string;
+  direction: string;
+}
+
 @Injectable()
 export class SideStoriesService {
   constructor(
@@ -270,6 +289,8 @@ export class SideStoriesService {
         conflict: arc.conflict,
         twistPlan: '',
         reversalPlanJson: stringifyJson(arc.reversalPlan),
+        milestonePlanJson: stringifyJson(arc.milestones),
+        episodeDirectionsJson: stringifyJson(arc.episodeDirections),
         status: 'ACTIVE',
         revision: 1,
         createdAt: stamp,
@@ -463,6 +484,8 @@ export class SideStoriesService {
       .all();
     const selectedArc = arcRows.find((arc) => arc.status === 'ACTIVE') ?? arcRows[0];
     if (!selectedArc) throw new NotFoundException('Side story group arc not found');
+    const milestones = this.storedMilestones(selectedArc);
+    const episodeDirections = this.storedEpisodeDirections(selectedArc, milestones);
     const arc = {
       id: selectedArc.id,
       projectId: selectedArc.projectId,
@@ -474,7 +497,8 @@ export class SideStoriesService {
       endEpisode: selectedArc.endEpisodeNumber,
       goal: selectedArc.goal,
       conflict: selectedArc.conflict,
-      reversalPlan: parseJson<ReversalBeat[]>(selectedArc.reversalPlanJson, []),
+      milestones,
+      episodeDirections,
       status: selectedArc.status,
       revision: selectedArc.revision,
       createdAt: selectedArc.createdAt,
@@ -586,6 +610,8 @@ export class SideStoriesService {
     conflict: string;
     endEpisodeNumber: number;
     reversalPlan: ReversalBeat[];
+    milestones: ArcMilestone[];
+    episodeDirections: ArcEpisodeDirection[];
   } {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       throw new BadRequestException('arc must be an object');
@@ -593,7 +619,15 @@ export class SideStoriesService {
     const input = value as Record<string, unknown>;
     this.assertOnlyKeys(
       input,
-      ['title', 'goal', 'conflict', 'endEpisodeNumber', 'reversalPlan'],
+      [
+        'title',
+        'goal',
+        'conflict',
+        'endEpisodeNumber',
+        'reversalPlan',
+        'milestones',
+        'episodeDirections',
+      ],
       'arc',
     );
     const endEpisodeNumber = input.endEpisodeNumber === undefined
@@ -602,6 +636,9 @@ export class SideStoriesService {
     if (endEpisodeNumber < 1 || endEpisodeNumber > 20) {
       throw new BadRequestException('arc.endEpisodeNumber must be between 1 and 20');
     }
+    const title = requireString(input.title, 'arc.title', { max: 200 });
+    const goal = requireString(input.goal, 'arc.goal', { max: 10_000 });
+    const conflict = requireString(input.conflict, 'arc.conflict', { max: 10_000 });
     if (input.reversalPlan !== undefined && !Array.isArray(input.reversalPlan)) {
       throw new BadRequestException('arc.reversalPlan must be an array');
     }
@@ -634,12 +671,200 @@ export class SideStoriesService {
       }
       return normalized;
     });
+    if (input.milestones !== undefined && !Array.isArray(input.milestones)) {
+      throw new BadRequestException('arc.milestones must be an array');
+    }
+    const milestones = input.milestones === undefined
+      ? reversalPlan.length > 0
+        ? reversalPlan.map((beat) => ({ ...beat, type: 'REVERSAL' as const }))
+        : [{ episode: endEpisodeNumber, type: 'GOAL' as const, description: goal }]
+      : input.milestones.map((candidate, index) => {
+          if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+            throw new BadRequestException(`arc.milestones[${index}] must be an object`);
+          }
+          const milestone = candidate as Record<string, unknown>;
+          this.assertOnlyKeys(
+            milestone,
+            ['id', 'episode', 'type', 'description'],
+            `arc.milestones[${index}]`,
+          );
+          const episode = positiveInteger(milestone.episode, `arc.milestones[${index}].episode`);
+          if (episode < 1 || episode > endEpisodeNumber) {
+            throw new BadRequestException(
+              `arc.milestones[${index}].episode must be within the group arc`,
+            );
+          }
+          if (typeof milestone.type !== 'string'
+            || !MILESTONE_TYPES.includes(milestone.type as ArcMilestone['type'])) {
+            throw new BadRequestException(
+              `arc.milestones[${index}].type must be a supported milestone type`,
+            );
+          }
+          const normalized: ArcMilestone = {
+            episode,
+            type: milestone.type as ArcMilestone['type'],
+            description: requireString(
+              milestone.description,
+              `arc.milestones[${index}].description`,
+              { max: 10_000 },
+            ),
+          };
+          if (milestone.id !== undefined) {
+            normalized.id = requireString(
+              milestone.id,
+              `arc.milestones[${index}].id`,
+              { max: 200 },
+            );
+          }
+          return normalized;
+        });
+    if (milestones.length === 0) {
+      throw new BadRequestException('arc.milestones must contain at least one item');
+    }
+    milestones.sort((left, right) => left.episode - right.episode);
+    const episodeDirections = input.episodeDirections === undefined
+      ? this.synthesizedEpisodeDirections(1, endEpisodeNumber, title, goal, milestones)
+      : this.parseEpisodeDirections(input.episodeDirections, 1, endEpisodeNumber);
     return {
-      title: requireString(input.title, 'arc.title', { max: 200 }),
-      goal: requireString(input.goal, 'arc.goal', { max: 10_000 }),
-      conflict: requireString(input.conflict, 'arc.conflict', { max: 10_000 }),
+      title,
+      goal,
+      conflict,
       endEpisodeNumber,
       reversalPlan,
+      milestones,
+      episodeDirections,
     };
+  }
+
+  private parseEpisodeDirections(
+    value: unknown,
+    start: number,
+    end: number,
+  ): ArcEpisodeDirection[] {
+    if (!Array.isArray(value) || value.length !== end - start + 1) {
+      throw new BadRequestException(
+        'arc.episodeDirections must cover every episode in the group arc exactly once',
+      );
+    }
+    return value.map((candidate, index) => {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+        throw new BadRequestException(`arc.episodeDirections[${index}] must be an object`);
+      }
+      const direction = candidate as Record<string, unknown>;
+      this.assertOnlyKeys(
+        direction,
+        ['episode', 'title', 'direction'],
+        `arc.episodeDirections[${index}]`,
+      );
+      const episode = positiveInteger(
+        direction.episode,
+        `arc.episodeDirections[${index}].episode`,
+      );
+      if (episode !== start + index) {
+        throw new BadRequestException(
+          `arc.episodeDirections[${index}].episode must be ${start + index}`,
+        );
+      }
+      return {
+        episode,
+        title: requireString(
+          direction.title,
+          `arc.episodeDirections[${index}].title`,
+          { max: 200 },
+        ),
+        direction: requireString(
+          direction.direction,
+          `arc.episodeDirections[${index}].direction`,
+          { max: 20_000 },
+        ),
+      };
+    });
+  }
+
+  private storedMilestones(row: typeof arcs.$inferSelect): ArcMilestone[] {
+    const values = parseJson<unknown>(row.milestonePlanJson, []);
+    const milestones = Array.isArray(values) ? values.flatMap((candidate): ArcMilestone[] => {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return [];
+      const value = candidate as Record<string, unknown>;
+      if (!Number.isInteger(value.episode)
+        || Number(value.episode) < row.startEpisodeNumber
+        || Number(value.episode) > row.endEpisodeNumber
+        || typeof value.type !== 'string'
+        || !MILESTONE_TYPES.includes(value.type as ArcMilestone['type'])
+        || typeof value.description !== 'string'
+        || !value.description.trim()) return [];
+      return [{
+        ...(typeof value.id === 'string' && value.id.trim() ? { id: value.id } : {}),
+        episode: Number(value.episode),
+        type: value.type as ArcMilestone['type'],
+        description: value.description,
+      }];
+    }) : [];
+    if (milestones.length > 0) return milestones.sort((left, right) => left.episode - right.episode);
+    const reversals = parseJson<unknown>(row.reversalPlanJson, []);
+    const legacy = Array.isArray(reversals) ? reversals.flatMap((candidate): ArcMilestone[] => {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return [];
+      const value = candidate as Record<string, unknown>;
+      if (!Number.isInteger(value.episode)
+        || Number(value.episode) < row.startEpisodeNumber
+        || Number(value.episode) > row.endEpisodeNumber
+        || typeof value.description !== 'string'
+        || !value.description.trim()) return [];
+      return [{
+        ...(typeof value.id === 'string' && value.id.trim() ? { id: value.id } : {}),
+        episode: Number(value.episode),
+        type: 'REVERSAL',
+        description: value.description,
+      }];
+    }) : [];
+    return legacy.length > 0
+      ? legacy.sort((left, right) => left.episode - right.episode)
+      : [{ episode: row.endEpisodeNumber, type: 'GOAL', description: row.goal }];
+  }
+
+  private storedEpisodeDirections(
+    row: typeof arcs.$inferSelect,
+    milestones: ArcMilestone[],
+  ): ArcEpisodeDirection[] {
+    const values = parseJson<unknown>(row.episodeDirectionsJson, []);
+    if (Array.isArray(values) && values.length === row.endEpisodeNumber - row.startEpisodeNumber + 1) {
+      const parsed = values.flatMap((candidate, index): ArcEpisodeDirection[] => {
+        if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return [];
+        const value = candidate as Record<string, unknown>;
+        if (value.episode !== row.startEpisodeNumber + index
+          || typeof value.title !== 'string' || !value.title.trim()
+          || typeof value.direction !== 'string' || !value.direction.trim()) return [];
+        return [{
+          episode: row.startEpisodeNumber + index,
+          title: value.title,
+          direction: value.direction,
+        }];
+      });
+      if (parsed.length === values.length) return parsed;
+    }
+    return this.synthesizedEpisodeDirections(
+      row.startEpisodeNumber,
+      row.endEpisodeNumber,
+      row.title,
+      row.goal,
+      milestones,
+    );
+  }
+
+  private synthesizedEpisodeDirections(
+    start: number,
+    end: number,
+    title: string,
+    goal: string,
+    milestones: ArcMilestone[],
+  ): ArcEpisodeDirection[] {
+    return Array.from({ length: end - start + 1 }, (_, index) => {
+      const episode = start + index;
+      return {
+        episode,
+        title: `${title} ${episode}화`,
+        direction: milestones.find((milestone) => milestone.episode === episode)?.description ?? goal,
+      };
+    });
   }
 }

@@ -17,6 +17,7 @@ export const REQUIRED_PROMPT_IDS = [
   'project-blueprint',
   'worldbuilding-generate',
   'arc-plan',
+  'arc-episode-directions',
   'episode-direction',
   'episode-direction-refine',
   'episode-draft',

@@ -5,8 +5,13 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { and, asc, eq, isNull, max, sql } from 'drizzle-orm';
+import { ArcEpisodeDirectionsService } from '../ai/arc-episode-directions.service';
 import { AiRunnerService } from '../ai/ai-runner.service';
-import { arcPlanSchema, arcPlanValidator } from '../ai/ai.schemas';
+import {
+  arcMilestonePlanSchema,
+  arcMilestonePlanValidator,
+  arcPlanValidator,
+} from '../ai/ai.schemas';
 import { DatabaseService } from '../database/database.service';
 import { arcs, episodes, projects } from '../database/schema';
 import { formatArcMemory } from '../memory/arc-memory';
@@ -23,6 +28,27 @@ import {
 
 const STATUSES = ['PLANNED', 'ACTIVE', 'COMPLETE', 'ARCHIVED'] as const;
 const CREATABLE_STATUSES = ['PLANNED', 'ACTIVE'] as const;
+const MILESTONE_TYPES = [
+  'GOAL',
+  'REVERSAL',
+  'ESCALATION',
+  'CLIMAX',
+  'RESOLUTION',
+  'OTHER',
+] as const;
+
+type ArcMilestone = {
+  id?: string;
+  episode: number;
+  type: (typeof MILESTONE_TYPES)[number];
+  description: string;
+};
+
+type ArcEpisodeDirection = {
+  episode: number;
+  title: string;
+  direction: string;
+};
 
 @Injectable()
 export class ArcsService {
@@ -30,6 +56,7 @@ export class ArcsService {
     private readonly database: DatabaseService,
     private readonly memory: MemoryService,
     private readonly ai: AiRunnerService,
+    private readonly arcDirections: ArcEpisodeDirectionsService,
   ) {}
 
   list(projectId: string) {
@@ -85,7 +112,7 @@ export class ArcsService {
     if (!replacement && endEpisode !== null && endEpisode - startEpisode + 1 < 5) {
       throw new BadRequestException('There is no room for another 5-episode arc before the target ending');
     }
-    const planValidator = arcPlanValidator.superRefine((value, context) => {
+    const planValidator = arcMilestonePlanValidator.superRefine((value, context) => {
       if (value.startEpisodeNumber !== startEpisode) {
         context.addIssue({
           code: 'custom', message: `Arc plan must start at episode ${startEpisode}`, path: ['startEpisodeNumber'],
@@ -112,7 +139,7 @@ export class ArcsService {
         }
       }
     });
-    const { value } = await this.ai.completeJson({
+    const { value: milestonePlan } = await this.ai.completeJson({
       task: 'arc_plan',
       promptId: 'arc-plan',
       projectId,
@@ -133,10 +160,24 @@ export class ArcsService {
         arc_to_revise: stringifyJson(replacement),
         arc_request: request,
       },
-      schema: { name: 'arc_plan', value: arcPlanSchema },
+      schema: { name: 'arc_milestone_plan', value: arcMilestonePlanSchema },
       validator: planValidator,
       maxTokens: 8_000,
     });
+    const episodeDirections = await this.arcDirections.generate({
+      projectId,
+      projectContext: memory.projectContext,
+      writingDirection: memory.writingDirection,
+      canon: memory.canon,
+      surroundingArcs: {
+        previous: allArcs.filter((arc) => arc.status === 'COMPLETE'),
+        current: currentArc,
+        future: futureArcs,
+      },
+      arc: milestonePlan,
+      generationRequest: request,
+    });
+    const value = arcPlanValidator.parse({ ...milestonePlan, episodeDirections });
     return {
       ...value,
       ...(replacement ? { replaceArcId: replacement.id, replaceArcRevision: replacement.revision } : {}),
@@ -155,22 +196,30 @@ export class ArcsService {
     const start = this.integer(input.startEpisodeNumber ?? input.startEpisode, 'startEpisodeNumber');
     const end = this.integer(input.endEpisodeNumber ?? input.endEpisode, 'endEpisodeNumber');
     this.validateSpan(start, end);
+    const title = requireString(input.title, 'title', { max: 200 });
+    const goal = requireString(input.goal, 'goal', { max: 10_000 });
+    const conflict = requireString(input.conflict, 'conflict', { max: 10_000 });
     const status = input.status === undefined
       ? 'PLANNED'
       : assertEnum(input.status, 'status', CREATABLE_STATUSES);
-    const reversalPlan = this.reversalPlan(input.reversalPlan ?? [], start, end);
+    const milestones = this.inputMilestones(input, start, end, goal);
+    const episodeDirections = 'episodeDirections' in input
+      ? this.episodeDirections(input.episodeDirections, start, end)
+      : this.synthesizedEpisodeDirections(start, end, title, goal, milestones);
     const stamp = now();
     const arcId = id();
     const row: typeof arcs.$inferInsert = {
       id: arcId,
       projectId,
       sideStoryGroupId: null,
-      title: requireString(input.title, 'title', { max: 200 }),
+      title,
       startEpisodeNumber: start,
       endEpisodeNumber: end,
-      goal: requireString(input.goal, 'goal', { max: 10_000 }),
-      conflict: requireString(input.conflict, 'conflict', { max: 10_000 }),
-      reversalPlanJson: stringifyJson(reversalPlan),
+      goal,
+      conflict,
+      reversalPlanJson: stringifyJson(input.reversalPlan ?? []),
+      milestonePlanJson: stringifyJson(milestones),
+      episodeDirectionsJson: stringifyJson(episodeDirections),
       status,
       revision: 1,
       createdAt: stamp,
@@ -245,7 +294,7 @@ export class ArcsService {
     }
     const protectedFields = [
       'title', 'startEpisodeNumber', 'startEpisode', 'endEpisodeNumber', 'endEpisode',
-      'goal', 'conflict', 'reversalPlan',
+      'goal', 'conflict', 'milestones', 'episodeDirections', 'reversalPlan',
     ];
     const editsProtectedPlan = currentStatus !== 'PLANNED'
       && protectedFields.some((field) => field in input);
@@ -261,22 +310,45 @@ export class ArcsService {
       ? this.integer(input.endEpisodeNumber ?? input.endEpisode, 'endEpisodeNumber')
       : current.endEpisodeNumber;
     this.validateSpan(start, end);
-    const reversalPlan = 'reversalPlan' in input
-      ? this.reversalPlan(input.reversalPlan, start, end)
-      : parseJson<unknown>(current.reversalPlanJson, []);
-    if (changesStart || changesEnd) {
-      this.reversalPlan(reversalPlan, start, end);
-    }
+    const title = 'title' in input
+      ? requireString(input.title, 'title', { max: 200 })
+      : current.title;
+    const goal = 'goal' in input
+      ? requireString(input.goal, 'goal', { max: 10_000 })
+      : current.goal;
+    const conflict = 'conflict' in input
+      ? requireString(input.conflict, 'conflict', { max: 10_000 })
+      : current.conflict;
+    const explicitlyChangesMilestones = 'milestones' in input || 'reversalPlan' in input;
+    const storedMilestones = this.storedMilestones(
+      current,
+      current.startEpisodeNumber,
+      current.endEpisodeNumber,
+      goal,
+    );
+    const milestones = explicitlyChangesMilestones
+      ? this.inputMilestones(input, start, end, goal)
+      : changesStart || changesEnd
+        ? this.milestones(storedMilestones, start, end)
+        : storedMilestones;
+    const regeneratesDirections = changesStart || changesEnd
+      || explicitlyChangesMilestones;
+    const episodeDirections = 'episodeDirections' in input
+      ? this.episodeDirections(input.episodeDirections, start, end)
+      : regeneratesDirections
+        ? this.synthesizedEpisodeDirections(start, end, title, goal, milestones)
+        : this.storedEpisodeDirections(current, start, end, title, goal, milestones);
     const changes: Partial<typeof arcs.$inferInsert> = {
       startEpisodeNumber: start,
       endEpisodeNumber: end,
+      milestonePlanJson: stringifyJson(milestones),
+      episodeDirectionsJson: stringifyJson(episodeDirections),
       updatedAt: now(),
       revision: current.revision + 1,
     };
-    if ('title' in input) changes.title = requireString(input.title, 'title', { max: 200 });
-    if ('goal' in input) changes.goal = requireString(input.goal, 'goal', { max: 10_000 });
-    if ('conflict' in input) changes.conflict = requireString(input.conflict, 'conflict', { max: 10_000 });
-    if ('reversalPlan' in input) changes.reversalPlanJson = stringifyJson(reversalPlan);
+    if ('title' in input) changes.title = title;
+    if ('goal' in input) changes.goal = goal;
+    if ('conflict' in input) changes.conflict = conflict;
     if ('status' in input) changes.status = requestedStatus;
     this.database.connection.transaction(() => {
       if (changesStatusToActive(input, currentStatus)) {
@@ -525,20 +597,152 @@ export class ArcsService {
     return number;
   }
 
-  private reversalPlan(value: unknown, start: number, end: number): Array<{ id?: string; episode: number; description: string }> {
-    if (!Array.isArray(value)) throw new BadRequestException('reversalPlan must be an array');
+  private inputMilestones(
+    input: Record<string, unknown>,
+    start: number,
+    end: number,
+    goal: string,
+  ): ArcMilestone[] {
+    if ('milestones' in input) return this.milestones(input.milestones, start, end);
+    if ('reversalPlan' in input) {
+      if (!Array.isArray(input.reversalPlan)) {
+        throw new BadRequestException('reversalPlan must be an array');
+      }
+      if (input.reversalPlan.length > 0) {
+        return this.milestones(input.reversalPlan.map((value) => (
+          value && typeof value === 'object' && !Array.isArray(value)
+            ? { ...(value as Record<string, unknown>), type: 'REVERSAL' }
+            : value
+        )), start, end);
+      }
+    }
+    return [{ episode: end, type: 'GOAL', description: goal }];
+  }
+
+  private milestones(value: unknown, start: number, end: number): ArcMilestone[] {
+    if (!Array.isArray(value)) throw new BadRequestException('milestones must be an array');
+    if (value.length === 0) throw new BadRequestException('milestones must contain at least one item');
     return value.map((raw, index) => {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-        throw new BadRequestException(`reversalPlan[${index}] must be an object`);
+        throw new BadRequestException(`milestones[${index}] must be an object`);
       }
       const item = raw as Record<string, unknown>;
-      const episode = this.integer(item.episode, `reversalPlan[${index}].episode`);
+      const episode = this.integer(item.episode, `milestones[${index}].episode`);
       if (episode < start || episode > end) {
-        throw new BadRequestException('Reversal episodes must be inside their arc');
+        throw new BadRequestException('Milestone episodes must be inside their arc');
       }
-      const description = requireString(item.description, `reversalPlan[${index}].description`, { max: 10_000 });
+      const type = assertEnum(item.type, `milestones[${index}].type`, MILESTONE_TYPES);
+      const description = requireString(item.description, `milestones[${index}].description`, { max: 10_000 });
       const beatId = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : undefined;
-      return { ...(beatId ? { id: beatId } : {}), episode, description };
+      return { ...(beatId ? { id: beatId } : {}), episode, type, description };
+    }).sort((left, right) => left.episode - right.episode);
+  }
+
+  private episodeDirections(value: unknown, start: number, end: number): ArcEpisodeDirection[] {
+    if (!Array.isArray(value)) throw new BadRequestException('episodeDirections must be an array');
+    const span = end - start + 1;
+    if (value.length !== span) {
+      throw new BadRequestException('episodeDirections must cover every episode in the arc exactly once');
+    }
+    return value.map((raw, index) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new BadRequestException(`episodeDirections[${index}] must be an object`);
+      }
+      const item = raw as Record<string, unknown>;
+      const episode = this.integer(item.episode, `episodeDirections[${index}].episode`);
+      const expectedEpisode = start + index;
+      if (episode !== expectedEpisode) {
+        throw new BadRequestException(
+          `episodeDirections[${index}].episode must be ${expectedEpisode}`,
+        );
+      }
+      return {
+        episode,
+        title: requireString(item.title, `episodeDirections[${index}].title`, { max: 200 }),
+        direction: requireString(item.direction, `episodeDirections[${index}].direction`, { max: 20_000 }),
+      };
+    });
+  }
+
+  private storedMilestones(
+    row: Pick<typeof arcs.$inferSelect, 'milestonePlanJson' | 'reversalPlanJson'>,
+    start: number,
+    end: number,
+    goal: string,
+  ): ArcMilestone[] {
+    const normalize = (value: unknown, legacyReversal: boolean): ArcMilestone[] => (
+      Array.isArray(value) ? value.flatMap((raw) => {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+        const item = raw as Record<string, unknown>;
+        if (!Number.isInteger(item.episode) || Number(item.episode) < start || Number(item.episode) > end) return [];
+        if (typeof item.description !== 'string' || !item.description.trim()) return [];
+        const type = legacyReversal
+          ? 'REVERSAL'
+          : MILESTONE_TYPES.includes(item.type as (typeof MILESTONE_TYPES)[number])
+            ? item.type as ArcMilestone['type']
+            : null;
+        if (!type) return [];
+        const milestoneId = typeof item.id === 'string' && item.id.trim() ? item.id : undefined;
+        return [{
+          ...(milestoneId ? { id: milestoneId } : {}),
+          episode: Number(item.episode),
+          type,
+          // Do not trim migrated descriptions: legacy reversal text is preserved verbatim.
+          description: item.description,
+        }];
+      }) : []
+    );
+    const stored = normalize(parseJson<unknown>(row.milestonePlanJson, []), false);
+    const milestones = stored.length > 0
+      ? stored
+      : normalize(parseJson<unknown>(row.reversalPlanJson, []), true);
+    return (milestones.length > 0
+      ? milestones
+      : [{ episode: end, type: 'GOAL' as const, description: goal }]
+    ).sort((left, right) => left.episode - right.episode);
+  }
+
+  private storedEpisodeDirections(
+    row: Pick<typeof arcs.$inferSelect, 'episodeDirectionsJson'>,
+    start: number,
+    end: number,
+    title: string,
+    goal: string,
+    milestones: ArcMilestone[],
+  ): ArcEpisodeDirection[] {
+    const value = parseJson<unknown>(row.episodeDirectionsJson, []);
+    if (Array.isArray(value) && value.length === end - start + 1) {
+      const directions = value.flatMap((raw, index): ArcEpisodeDirection[] => {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+        const item = raw as Record<string, unknown>;
+        if (item.episode !== start + index || typeof item.title !== 'string' || !item.title.trim()
+          || typeof item.direction !== 'string' || !item.direction.trim()) return [];
+        return [{
+          episode: start + index,
+          title: item.title,
+          direction: item.direction,
+        }];
+      });
+      if (directions.length === value.length) return directions;
+    }
+    return this.synthesizedEpisodeDirections(start, end, title, goal, milestones);
+  }
+
+  private synthesizedEpisodeDirections(
+    start: number,
+    end: number,
+    title: string,
+    goal: string,
+    milestones: ArcMilestone[],
+  ): ArcEpisodeDirection[] {
+    return Array.from({ length: end - start + 1 }, (_, index) => {
+      const episode = start + index;
+      const milestone = milestones.find((item) => item.episode === episode);
+      return {
+        episode,
+        title: `${title} ${episode}화`,
+        direction: milestone?.description ?? goal,
+      };
     });
   }
 
@@ -577,6 +781,20 @@ export class ArcsService {
   }
 
   private toView(row: typeof arcs.$inferSelect) {
+    const milestones = this.storedMilestones(
+      row,
+      row.startEpisodeNumber,
+      row.endEpisodeNumber,
+      row.goal,
+    );
+    const episodeDirections = this.storedEpisodeDirections(
+      row,
+      row.startEpisodeNumber,
+      row.endEpisodeNumber,
+      row.title,
+      row.goal,
+      milestones,
+    );
     return {
       id: row.id,
       projectId: row.projectId,
@@ -587,7 +805,8 @@ export class ArcsService {
       endEpisode: row.endEpisodeNumber,
       goal: row.goal,
       conflict: row.conflict,
-      reversalPlan: parseJson(row.reversalPlanJson, []),
+      milestones,
+      episodeDirections,
       status: row.status,
       revision: row.revision,
       createdAt: row.createdAt,

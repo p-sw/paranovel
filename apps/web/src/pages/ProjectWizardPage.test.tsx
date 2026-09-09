@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -15,6 +15,13 @@ const titleRecord: SetupAnswerRecord = { question: title, answer: '달 없는 �
 const targetRecord: SetupAnswerRecord = { question: target, answer: '10', skipped: false };
 const toneRecord: SetupAnswerRecord = { question: tone, answer: '밝음', skipped: false };
 
+function directions(startEpisode: number, endEpisode: number, prefix: string) {
+  return Array.from({ length: endEpisode - startEpisode + 1 }, (_, index) => {
+    const episode = startEpisode + index;
+    return { episode, title: `${prefix} ${episode}화`, direction: `${prefix} ${episode}화 전개 방향` };
+  });
+}
+
 function session(question: SetupQuestion, history: SetupAnswerRecord[] = []): ProjectSessionResult {
   return { session: { id: 'session-1' }, step: { type: 'question', question }, history, stateToken: `state-${history.length}` };
 }
@@ -26,8 +33,16 @@ function readySession(history: SetupAnswerRecord[] = [titleRecord, toneRecord]):
       title: '달 없는 밤', logline: '잃어버린 달을 찾는다.', genreTags: ['판타지'], writingDirection: '', defaultTargetChars: 5000, canon: [],
       targetEpisode: 10, targetEpisodeSource: 'AI',
       arcs: [
-        { title: '달의 흔적', startEpisode: 1, endEpisode: 5, goal: '달 찾기', conflict: '추격자', reversalPlan: [] },
-        { title: '달의 귀환', startEpisode: 6, endEpisode: 10, goal: '달 되찾기', conflict: '왕실', reversalPlan: [] },
+        {
+          title: '달의 흔적', startEpisode: 1, endEpisode: 5, goal: '달 찾기', conflict: '추격자',
+          milestones: [{ episode: 5, type: 'GOAL', description: '달의 흔적을 찾는다.' }],
+          episodeDirections: directions(1, 5, '흔적'),
+        },
+        {
+          title: '달의 귀환', startEpisode: 6, endEpisode: 10, goal: '달 되찾기', conflict: '왕실',
+          milestones: [{ episode: 9, type: 'REVERSAL', description: '왕실의 비밀이 드러난다.' }],
+          episodeDirections: directions(6, 10, '귀환'),
+        },
       ],
     } },
   };
@@ -77,6 +92,9 @@ describe('project interview input and navigation', () => {
     expect(screen.getByText(/AI가 작품 규모에 맞춰 제안한 회차/)).toBeVisible();
     expect(screen.getByText('현재 아크').closest('summary')).toHaveTextContent('1–5화 · 달의 흔적');
     expect(screen.getByText('대기 아크 1').closest('summary')).toHaveTextContent('6–10화 · 달의 귀환');
+    expect(screen.getByLabelText('1번째 아크 1번째 마일스톤 종류')).toHaveValue('GOAL');
+    expect(screen.getByLabelText('1번째 아크 1화 제목')).toHaveValue('흔적 1화');
+    expect(screen.getByLabelText('1번째 아크 5화 전개 방향')).toHaveValue('흔적 5화 전개 방향');
   });
 
   it('keeps the reviewed target read-only and returns to its interview question for changes', async () => {
@@ -107,6 +125,10 @@ describe('project interview input and navigation', () => {
     const futureTitle = screen.getAllByLabelText('아크 제목')[1]!;
     await user.clear(futureTitle);
     await user.type(futureTitle, '변경된 달의 귀환');
+    await user.clear(screen.getByLabelText('2번째 아크 1번째 마일스톤 내용'));
+    await user.type(screen.getByLabelText('2번째 아크 1번째 마일스톤 내용'), '달을 감춘 자가 밝혀진다.');
+    await user.clear(screen.getByLabelText('2번째 아크 6화 전개 방향'));
+    await user.type(screen.getByLabelText('2번째 아크 6화 전개 방향'), '왕궁의 지하 문으로 들어간다.');
     await user.click(screen.getByRole('button', { name: '프로젝트 만들기' }));
 
     await waitFor(() => expect(commit).toHaveBeenCalledWith(
@@ -114,11 +136,45 @@ describe('project interview input and navigation', () => {
       expect.objectContaining({
         arcs: [
           expect.objectContaining({ title: '달의 흔적' }),
-          expect.objectContaining({ title: '변경된 달의 귀환' }),
+          expect.objectContaining({
+            title: '변경된 달의 귀환',
+            milestones: [expect.objectContaining({ type: 'REVERSAL', description: '달을 감춘 자가 밝혀진다.' })],
+            episodeDirections: expect.arrayContaining([
+              expect.objectContaining({ episode: 6, direction: '왕궁의 지하 문으로 들어간다.' }),
+            ]),
+          }),
         ],
       }),
       'ready-state',
     ));
+  });
+
+  it('requires one complete direction for every episode before project creation', async () => {
+    const current = readySession();
+    if (current.step.type !== 'ready') throw new Error('ready session expected');
+    current.step.blueprint.arcs[0]!.episodeDirections[2]!.direction = '';
+
+    await renderSession(current);
+
+    expect(screen.getByText(/1번째 아크: 3화의 제목과 전개 방향을 모두 입력해 주세요/)).toBeVisible();
+    expect(screen.getByRole('button', { name: '프로젝트 만들기' })).toBeDisabled();
+  });
+
+  it('preserves matching episode plans when a reviewed arc range changes', async () => {
+    const { user } = await renderSession(readySession());
+    const start = screen.getAllByLabelText('시작 회차')[0]!;
+    const end = screen.getAllByLabelText('끝 회차')[0]!;
+    fireEvent.change(screen.getByLabelText('1번째 아크 3화 제목'), { target: { value: '보존할 3화' } });
+    fireEvent.change(screen.getByLabelText('1번째 아크 3화 전개 방향'), { target: { value: '보존할 3화 방향' } });
+
+    await user.clear(start);
+    await user.type(start, '2');
+    await user.clear(end);
+    await user.type(end, '6');
+
+    expect(screen.getByLabelText('1번째 아크 3화 제목')).toHaveValue('보존할 3화');
+    expect(screen.getByLabelText('1번째 아크 3화 전개 방향')).toHaveValue('보존할 3화 방향');
+    expect(screen.getByLabelText('1번째 아크 6화 제목')).toHaveValue('');
   });
 
   it('keeps a future arc panel open while its reviewed fields are edited', async () => {
@@ -301,7 +357,10 @@ describe('project interview input and navigation', () => {
         blueprint: {
           title: '달 없는 밤', logline: '잃어버린 달을 찾는다.', genreTags: ['판타지'],
           details: '3인칭 과거 시제를 유지한다.', defaultTargetChars: 5000, canon: [],
-          arc: { title: '달의 흔적', startEpisode: 1, endEpisode: 5, goal: '달 찾기', conflict: '추격자', reversalPlan: [] },
+          arc: {
+            title: '달의 흔적', startEpisode: 1, endEpisode: 5, goal: '달 찾기', conflict: '추격자',
+            reversalPlan: [{ episode: 4, description: '기존 반전 문장을 보존한다.' }],
+          },
         },
       },
     };
@@ -314,6 +373,9 @@ describe('project interview input and navigation', () => {
     expect(await screen.findByRole('heading', { name: '이 세계로 시작할까요?' })).toBeVisible();
     expect(screen.getByText('현재 아크').closest('summary')).toHaveTextContent('1–5화 · 달의 흔적');
     expect(screen.getByRole('textbox', { name: '작문 디렉션' })).toHaveValue('3인칭 과거 시제를 유지한다.');
+    expect(screen.getByLabelText('1번째 아크 1번째 마일스톤 종류')).toHaveValue('REVERSAL');
+    expect(screen.getByLabelText('1번째 아크 1번째 마일스톤 내용')).toHaveValue('기존 반전 문장을 보존한다.');
+    expect(screen.getByLabelText('1번째 아크 1화 제목')).toHaveValue('');
     expect(screen.getByText(/저장된 인터뷰를 복구하지 못했습니다/)).toBeVisible();
   });
 });

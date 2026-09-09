@@ -24,6 +24,8 @@ const variables: Record<string, unknown> = {
   end_episode_number: 10,
   arc_to_revise: 'null',
   arc_request: '',
+  surrounding_arcs: '[]',
+  arc_milestones: '{"title":"문","startEpisodeNumber":1,"endEpisodeNumber":5,"goal":"문을 연다","conflict":"수문장이 막는다","milestones":[{"episode":5,"type":"GOAL","description":"문을 연다"}]}',
   generation_request: '',
   user_request: '',
   project_title: '기억의 문',
@@ -65,6 +67,7 @@ describe('expanded prompt contracts', () => {
     'episode-direction',
     'episode-direction-refine',
     'arc-plan',
+    'arc-episode-directions',
     'worldbuilding-generate',
   ];
 
@@ -109,6 +112,7 @@ describe('expanded prompt contracts', () => {
   it.each([
     'worldbuilding-generate',
     'arc-plan',
+    'arc-episode-directions',
     'project-chat',
     'episode-direction',
     'episode-direction-refine',
@@ -123,6 +127,18 @@ describe('expanded prompt contracts', () => {
       `<writing_direction>\n${variables.writing_direction}\n</writing_direction>`,
     );
     expect(rendered.system).toContain('작문 디렉션');
+  });
+
+  it('keeps milestone selection separate from exact episode-direction expansion', () => {
+    const registry = new PromptRegistryService();
+    const milestonePrompt = registry.render('arc-plan', variables);
+    const directionPrompt = registry.render('arc-episode-directions', variables);
+
+    expect(milestonePrompt.system).toContain('첫 번째 단계');
+    expect(milestonePrompt.system).toContain('episodeDirections를 작성하지 않는다');
+    expect(directionPrompt.system).toContain('두 번째 단계');
+    expect(directionPrompt.system).toContain('각 정수 회차를 오름차순으로 정확히 한 번씩');
+    expect(directionPrompt.system).toContain('마일스톤을 수정하거나 대체하지 말고');
   });
 
   it('reviews only factual contradictions without importing general writing guidance', () => {

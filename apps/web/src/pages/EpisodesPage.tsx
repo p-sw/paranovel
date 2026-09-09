@@ -10,6 +10,7 @@ import {
   ArrowRight,
   BookOpenText,
   CheckCircle2,
+  ChevronDown,
   Ellipsis,
   FilePlus2,
   GitBranch,
@@ -22,8 +23,9 @@ import {
 } from 'lucide-react';
 import { Link, useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router-dom';
 import { api, isConflict, messageOf } from '../api/client';
+import { MILESTONE_TYPE_LABELS } from '../arcPlan';
 import { characterCount, createIdempotencyKey, formatRelativeDate } from '../lib';
-import type { CreateSideStoryGroupInput, Episode, SideStoryCollection, SideStoryGroup } from '../types';
+import type { Arc, CreateSideStoryGroupInput, Episode, SideStoryCollection, SideStoryGroup } from '../types';
 import type { ProjectOutletContext } from '../components/AppShell';
 import {
   Badge,
@@ -542,7 +544,12 @@ function SideStoryGroupBlock({
         <div><Library className="size-4" /><span><strong>그룹 정사</strong>{group.canon.length ? `${group.canon.length}개` : '등록된 정사 없음'}</span></div>
         <div><BookOpenText className="size-4" /><span><strong>그룹 아크</strong>{group.arc?.title ?? '아크 없음'}</span></div>
       </div>
-      {group.arc ? <p className="side-story-arc-summary">{group.arc.goal} · {group.arc.conflict}</p> : null}
+      {group.arc ? (
+        <>
+          <p className="side-story-arc-summary">{group.arc.goal} · {group.arc.conflict}</p>
+          <SideStoryArcDetails arc={group.arc} groupTitle={group.title} />
+        </>
+      ) : null}
       {episodes.length ? (
         <div className="episode-list" aria-label={`${group.title} 외전 목록`}>
           {episodes.map((episode) => (
@@ -551,6 +558,51 @@ function SideStoryGroupBlock({
         </div>
       ) : <p className="side-story-empty compact">이 그룹의 첫 외전을 만들어 흐름을 시작하세요.</p>}
     </section>
+  );
+}
+
+function SideStoryArcDetails({ arc, groupTitle }: { arc: Arc; groupTitle: string }) {
+  const milestones = [...(arc.milestones ?? [])].sort((left, right) => left.episode - right.episode);
+  const episodeDirections = [...(arc.episodeDirections ?? [])].sort((left, right) => left.episode - right.episode);
+  return (
+    <details className="group mt-3 rounded-xl border border-line bg-paper">
+      <summary
+        aria-label={`${groupTitle} 회차별 아크 계획`}
+        className="flex min-h-11 cursor-pointer list-none items-center gap-2 px-3 py-2 text-sm font-bold text-plum-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-plum-500 [&::-webkit-details-marker]:hidden"
+      >
+        <ChevronDown aria-hidden="true" className="size-4 shrink-0 transition-transform group-open:rotate-180" />
+        <span>회차별 아크 계획</span>
+        <span className="ml-auto text-xs font-medium text-muted">{arc.startEpisode}–{arc.endEpisode}화</span>
+      </summary>
+      <div className="grid gap-4 border-t border-line px-3 py-3 text-sm lg:grid-cols-2">
+        <section aria-label={`${groupTitle} 마일스톤`}>
+          <h4 className="font-bold">마일스톤</h4>
+          {milestones.length ? (
+            <ul className="mt-2 space-y-2">
+              {milestones.map((milestone, index) => (
+                <li className="leading-6" key={milestone.id ?? `${milestone.episode}-${milestone.type}-${index}`}>
+                  <strong>{milestone.episode}화 · {MILESTONE_TYPE_LABELS[milestone.type]}</strong>
+                  <span className="block whitespace-pre-wrap text-muted">{milestone.description}</span>
+                </li>
+              ))}
+            </ul>
+          ) : <p className="mt-2 text-muted">등록된 마일스톤이 없습니다.</p>}
+        </section>
+        <section aria-label={`${groupTitle} 회차별 전개`}>
+          <h4 className="font-bold">회차별 전개</h4>
+          {episodeDirections.length ? (
+            <ol className="mt-2 space-y-2">
+              {episodeDirections.map((item) => (
+                <li className="leading-6" key={item.episode}>
+                  <strong>{item.episode}화 · {item.title}</strong>
+                  <span className="block whitespace-pre-wrap text-muted">{item.direction}</span>
+                </li>
+              ))}
+            </ol>
+          ) : <p className="mt-2 text-muted">등록된 회차별 전개가 없습니다.</p>}
+        </section>
+      </div>
+    </details>
   );
 }
 
@@ -772,7 +824,8 @@ function CreateSideStorySheet({
     if (busy || !setupValid) return;
     setError('');
     if (target === 'NEW_GROUP' && !createdGroup) {
-      const endEpisodeNumber = Number.parseInt(arcEndEpisode, 10);
+      const parsedEndEpisode = Number.parseInt(arcEndEpisode, 10);
+      const endEpisodeNumber = Number.isFinite(parsedEndEpisode) && parsedEndEpisode > 0 ? parsedEndEpisode : 5;
       groupCreateInputRef.current ??= {
         title: groupTitle.trim(),
         description: groupDescription.trim() || undefined,
@@ -782,8 +835,8 @@ function CreateSideStorySheet({
           title: arcTitle.trim(),
           goal: arcGoal.trim(),
           conflict: arcConflict.trim(),
-          ...(Number.isFinite(endEpisodeNumber) && endEpisodeNumber > 0 ? { endEpisodeNumber } : {}),
-          reversalPlan: [],
+          endEpisodeNumber,
+          milestones: [{ episode: endEpisodeNumber, type: 'GOAL', description: arcGoal.trim() }],
         },
       };
       try {

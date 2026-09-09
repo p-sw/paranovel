@@ -4,7 +4,22 @@ import {
   projectSchema as sharedProjectSchema,
 } from '@paranovel/contracts';
 import { describe, expect, it } from 'vitest';
-import { arcPlanValidator, projectBlueprintValidator } from '../src/ai/ai.schemas';
+import {
+  arcEpisodeDirectionsValidatorForRange,
+  arcMilestonePlanValidator,
+  arcPlanValidator,
+  projectBlueprintMilestonesValidator,
+  projectBlueprintValidator,
+} from '../src/ai/ai.schemas';
+
+const directions = (start: number, end: number) => Array.from(
+  { length: end - start + 1 },
+  (_, index) => ({
+    episode: start + index,
+    title: `${start + index}화`,
+    direction: '앞선 결과를 받아 다음 마일스톤으로 나아간다.',
+  }),
+);
 
 const validBlueprint = {
   title: '달 없는 밤',
@@ -16,8 +31,8 @@ const validBlueprint = {
   targetEpisodeSource: 'USER' as const,
   canon: [],
   arcs: [
-    { title: '도난', startEpisode: 1, endEpisode: 5, goal: '흔적을 찾는다.', conflict: '왕실의 추격', reversalPlan: [{ episode: 4, description: '달이 스스로 사라졌음이 드러난다.' }] },
-    { title: '귀환', startEpisode: 6, endEpisode: 10, goal: '달을 되돌린다.', conflict: '기억의 대가', reversalPlan: [] },
+    { title: '도난', startEpisode: 1, endEpisode: 5, goal: '흔적을 찾는다.', conflict: '왕실의 추격', milestones: [{ episode: 4, type: 'REVERSAL' as const, description: '달이 스스로 사라졌음이 드러난다.' }], episodeDirections: directions(1, 5) },
+    { title: '귀환', startEpisode: 6, endEpisode: 10, goal: '달을 되돌린다.', conflict: '기억의 대가', milestones: [{ episode: 10, type: 'RESOLUTION' as const, description: '달을 되돌린다.' }], episodeDirections: directions(6, 10) },
   ],
 };
 
@@ -35,7 +50,9 @@ describe('full project arc blueprint contract', () => {
     ['gap', (value: typeof validBlueprint) => { value.arcs[1]!.startEpisode = 7; }],
     ['short arc', (value: typeof validBlueprint) => { value.arcs[0]!.endEpisode = 4; value.arcs[1]!.startEpisode = 5; }],
     ['wrong ending', (value: typeof validBlueprint) => { value.targetEpisode = 11; }],
-    ['out-of-range reversal', (value: typeof validBlueprint) => { value.arcs[0]!.reversalPlan[0]!.episode = 8; }],
+    ['out-of-range milestone', (value: typeof validBlueprint) => { value.arcs[0]!.milestones[0]!.episode = 8; }],
+    ['missing direction', (value: typeof validBlueprint) => { value.arcs[0]!.episodeDirections.pop(); }],
+    ['duplicate direction', (value: typeof validBlueprint) => { value.arcs[0]!.episodeDirections[1]!.episode = 1; }],
   ])('rejects %s in both runtime and shared schemas', (_name, change) => {
     const input = structuredClone(validBlueprint);
     change(input);
@@ -43,21 +60,30 @@ describe('full project arc blueprint contract', () => {
     expect(sharedProjectBlueprintSchema.safeParse(input).success).toBe(false);
   });
 
-  it('rejects arc-planner reversals and directions outside the proposed range', () => {
+  it('separates milestone generation from exact per-episode direction coverage', () => {
     const proposal = {
       title: '다음 문', startEpisodeNumber: 6, endEpisodeNumber: 10,
       goal: '문을 연다.', conflict: '수문장이 막는다.',
-      reversalPlan: [{ episode: 99, description: '조력자의 정체가 드러난다.' }],
-      episodeDirections: [{ episode: 5, title: '잘못된 회차', direction: '범위 밖의 일이다.' }],
+      milestones: [{ episode: 9, type: 'REVERSAL' as const, description: '조력자의 정체가 드러난다.' }],
       conflicts: [],
     };
-    const parsed = arcPlanValidator.safeParse(proposal);
-    expect(parsed.success).toBe(false);
-    if (!parsed.success) {
-      expect(parsed.error.issues.map((issue) => issue.path.join('.'))).toEqual(
-        expect.arrayContaining(['reversalPlan.0.episode', 'episodeDirections.0.episode']),
-      );
-    }
+    expect(arcMilestonePlanValidator.safeParse(proposal).success).toBe(true);
+    expect(arcPlanValidator.safeParse(proposal).success).toBe(false);
+    expect(arcEpisodeDirectionsValidatorForRange(6, 10).safeParse({
+      episodeDirections: directions(6, 10),
+    }).success).toBe(true);
+    expect(arcEpisodeDirectionsValidatorForRange(6, 10).safeParse({
+      episodeDirections: [{ episode: 5, title: '잘못된 회차', direction: '범위 밖의 일이다.' }],
+    }).success).toBe(false);
+  });
+
+  it('accepts milestone-only blueprints only in stage one', () => {
+    const milestoneBlueprint = {
+      ...validBlueprint,
+      arcs: validBlueprint.arcs.map(({ episodeDirections: _directions, ...arc }) => arc),
+    };
+    expect(projectBlueprintMilestonesValidator.safeParse(milestoneBlueprint).success).toBe(true);
+    expect(projectBlueprintValidator.safeParse(milestoneBlueprint).success).toBe(false);
   });
 
   it('keeps standalone project and arc response contracts aligned with persistence rules', () => {
@@ -73,7 +99,7 @@ describe('full project arc blueprint contract', () => {
     expect(sharedArcSchema.safeParse({ ...storedArc, endEpisode: 4 }).success).toBe(false);
     expect(sharedArcSchema.safeParse({
       ...storedArc,
-      reversalPlan: [{ episode: 9, description: '범위 밖 반전' }],
+      milestones: [{ episode: 9, type: 'REVERSAL', description: '범위 밖 반전' }],
     }).success).toBe(false);
 
     const storedProject = {

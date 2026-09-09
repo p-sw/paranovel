@@ -2,6 +2,7 @@ import { BadGatewayException, BadRequestException, ConflictException, Injectable
 import { and, desc, eq, getTableColumns, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { ChatHistory, ConversationStreamEvent } from '@paranovel/contracts';
+import { ArcEpisodeDirectionsService, type ArcDirectionPlanInput } from '../ai/arc-episode-directions.service';
 import { AiRunnerService } from '../ai/ai-runner.service';
 import type { ChatMessage as ModelMessage } from '../ai/ai.types';
 import { ArcsService } from '../arcs/arcs.service';
@@ -22,7 +23,7 @@ type ProposalRow = typeof chatProposals.$inferSelect;
 type IndexTarget = { kind: Exclude<ChatKind, 'PROJECT'>; id: string };
 type Effect = { label: string; before: RecordSnapshot; after: Record<string, unknown> };
 type ChatLogStage = 'turn_persist' | 'memory' | 'snapshot' | 'history' | 'ai' | 'run_link_persist'
-  | 'abort_check' | 'proposal_transaction' | 'proposal_validate' | 'proposal_persist' | 'message_persist' | 'complete';
+  | 'arc_directions' | 'abort_check' | 'proposal_transaction' | 'proposal_validate' | 'proposal_persist' | 'message_persist' | 'complete';
 type ChatLogContext = {
   stage: ChatLogStage;
   projectId: string;
@@ -37,6 +38,15 @@ const messageInput = z.strictObject({ content: z.string().trim().min(1).max(20_0
 const threadInput = z.strictObject({ clientThreadId: z.string().trim().min(1).max(200).optional() });
 const GENERATION_ERROR = 'AI 답변을 만들지 못했습니다. 같은 메시지를 다시 시도해 주세요.';
 const MAX_IMAGE_TAG_TOOL_ATTEMPTS = 2;
+const ARC_PLAN_FIELDS = new Set([
+  'title',
+  'startEpisodeNumber',
+  'endEpisodeNumber',
+  'goal',
+  'conflict',
+  'milestones',
+  'episodeDirections',
+]);
 
 @Injectable()
 export class ChatService implements OnModuleInit {
@@ -46,6 +56,7 @@ export class ChatService implements OnModuleInit {
   constructor(
     private readonly database: DatabaseService,
     private readonly ai: AiRunnerService,
+    private readonly arcDirections: ArcEpisodeDirectionsService,
     private readonly projects: ProjectsService,
     private readonly canon: CanonService,
     private readonly arcs: ArcsService,
@@ -240,9 +251,20 @@ export class ChatService implements OnModuleInit {
       context.runId = sanitizeLogText(result.runId);
       context.stage = 'abort_check';
       signal?.throwIfAborted();
-      const output: ChatOutput = imageTagResult
+      const baseOutput: ChatOutput = imageTagResult
         ? { reply: imageTagResult.tagString, proposals: [] }
         : result.value;
+      context.stage = 'arc_directions';
+      const output = await this.completeArcProposalDirections(
+        projectId,
+        baseOutput,
+        snapshots,
+        memory,
+        input.content,
+        signal,
+      );
+      context.stage = 'abort_check';
+      signal?.throwIfAborted();
       // Episode subagents persist their own results. Commit configuration proposals and the parent reply together.
       context.stage = 'proposal_transaction';
       this.database.connection.transaction(() => {
@@ -351,6 +373,114 @@ export class ChatService implements OnModuleInit {
     return { proposal: this.proposalView(this.requireProposal(projectId, proposalId)) };
   }
 
+  private async completeArcProposalDirections(
+    projectId: string,
+    output: ChatOutput,
+    snapshots: SnapshotMap,
+    memory: Awaited<ReturnType<MemoryService['assemble']>>,
+    request: string,
+    signal?: AbortSignal,
+  ): Promise<ChatOutput> {
+    const withoutDirections = editableValidators.ARC.omit({ episodeDirections: true });
+    const planFields = (value: Record<string, unknown>) => {
+      const { episodeDirections: _directions, ...fields } = editableFields('ARC', value);
+      return fields;
+    };
+    const staged: Array<{
+      proposalIndex: number;
+      targetId: string | null;
+      rawChanges: Record<string, unknown>;
+      arc: ArcDirectionPlanInput;
+    }> = [];
+    for (const [proposalIndex, proposal] of output.proposals.entries()) {
+      if (proposal.kind !== 'ARC' || proposal.operation === 'DELETE') continue;
+      let raw: unknown;
+      try {
+        raw = JSON.parse(proposal.changesJson);
+      } catch (error) {
+        throw new BadGatewayException('AI 변경 필드가 올바르지 않습니다.', { cause: error });
+      }
+      const rawChanges = z.record(z.string(), z.unknown()).parse(raw);
+      const { episodeDirections: _modelDirections, ...milestoneChanges } = rawChanges;
+      const changes = withoutDirections.partial().parse(milestoneChanges) as Record<string, unknown>;
+      const changesPlan = proposal.operation === 'CREATE'
+        || Object.keys(changes).some((field) => ARC_PLAN_FIELDS.has(field));
+      if (!changesPlan) continue;
+      const before = proposal.targetId ? snapshots.get(`ARC:${proposal.targetId}`) ?? null : null;
+      if (proposal.operation === 'UPDATE' && !before) {
+        throw new BadGatewayException('AI가 조회하지 않은 아크의 변경을 제안했습니다.');
+      }
+      const candidate = withoutDirections.parse({
+        ...creationDefaults.ARC,
+        ...(before ? planFields(before) : {}),
+        ...milestoneChanges,
+      });
+      staged.push({
+        proposalIndex,
+        targetId: proposal.targetId,
+        rawChanges: milestoneChanges,
+        arc: {
+          title: candidate.title,
+          startEpisodeNumber: candidate.startEpisodeNumber,
+          endEpisodeNumber: candidate.endEpisodeNumber,
+          goal: candidate.goal,
+          conflict: candidate.conflict,
+          milestones: candidate.milestones,
+        },
+      });
+    }
+    if (staged.length === 0) return output;
+
+    const replacedIds = new Set(staged.flatMap((item) => item.targetId ? [item.targetId] : []));
+    const surroundingArcs: ArcDirectionPlanInput[] = [];
+    for (const [key, snapshot] of snapshots) {
+      if (!key.startsWith('ARC:') || replacedIds.has(snapshot.id) || snapshot.status === 'ARCHIVED') continue;
+      const candidate = withoutDirections.safeParse({
+        ...creationDefaults.ARC,
+        ...planFields(snapshot),
+      });
+      if (!candidate.success) continue;
+      surroundingArcs.push({
+        title: candidate.data.title,
+        startEpisodeNumber: candidate.data.startEpisodeNumber,
+        endEpisodeNumber: candidate.data.endEpisodeNumber,
+        goal: candidate.data.goal,
+        conflict: candidate.data.conflict,
+        milestones: candidate.data.milestones,
+      });
+    }
+    surroundingArcs.push(...staged.map((item) => item.arc));
+    surroundingArcs.sort((left, right) =>
+      left.startEpisodeNumber - right.startEpisodeNumber
+      || left.endEpisodeNumber - right.endEpisodeNumber,
+    );
+
+    const generated = await this.arcDirections.generateMany(staged.map((item) => ({
+      projectId,
+      projectContext: memory.projectContext,
+      writingDirection: memory.writingDirection,
+      canon: memory.canon,
+      surroundingArcs,
+      arc: item.arc,
+      generationRequest: request,
+      signal,
+    })));
+    const proposals = [...output.proposals];
+    staged.forEach((item, index) => {
+      const proposal = proposals[item.proposalIndex]!;
+      proposals[item.proposalIndex] = {
+        ...proposal,
+        changesJson: stringifyJson({
+          ...item.rawChanges,
+          // The chat model only owns the milestone stage. Always replace a
+          // model-supplied direction array with the dedicated second stage.
+          episodeDirections: generated[index]!,
+        }),
+      };
+    });
+    return { ...output, proposals };
+  }
+
   private prepareProposal(projectId: string, messageId: string, input: ChatOutput['proposals'][number], snapshots: SnapshotMap): typeof chatProposals.$inferInsert {
     const { kind, operation } = input;
     if (kind === 'PROJECT' && operation !== 'UPDATE') throw new BadGatewayException('프로젝트는 수정만 제안할 수 있습니다.');
@@ -427,8 +557,18 @@ export class ChatService implements OnModuleInit {
 
   private validateArc(kind: ChatKind, fields: Record<string, unknown>): void {
     if (kind !== 'ARC') return;
-    const span = Number(fields.endEpisodeNumber) - Number(fields.startEpisodeNumber) + 1;
+    const start = Number(fields.startEpisodeNumber);
+    const end = Number(fields.endEpisodeNumber);
+    const span = end - start + 1;
     if (span < 5 || span > 20) throw new BadRequestException('아크는 5~20화 범위여야 합니다.');
+    const milestones = fields.milestones as Array<{ episode: number }>;
+    if (!milestones.length || milestones.some((item) => item.episode < start || item.episode > end)) {
+      throw new BadRequestException('아크 마일스톤은 하나 이상이며 모두 아크 범위 안이어야 합니다.');
+    }
+    const directions = fields.episodeDirections as Array<{ episode: number }>;
+    if (directions.length !== span || directions.some((item, index) => item.episode !== start + index)) {
+      throw new BadRequestException('아크 범위의 모든 회차에 전개 방향이 정확히 하나씩 필요합니다.');
+    }
   }
 
   private assertArcStatusTransition(
@@ -509,12 +649,23 @@ export class ChatService implements OnModuleInit {
   }
 
   private proposalView(row: ProposalRow) {
+    const kind = row.kind as ChatKind;
+    const normalize = (value: Record<string, unknown> | null) => {
+      if (!value || kind !== 'ARC') return value;
+      const { reversalPlan: _legacyReversalPlan, ...rest } = value;
+      return { ...rest, ...editableFields('ARC', value) };
+    };
     return { id: row.id, projectId: row.projectId, messageId: row.messageId,
-      kind: row.kind as ChatKind, operation: row.operation as ChatOperation, title: row.title, targetId: row.targetId,
-      before: parseJson<Record<string, unknown> | null>(row.beforeJson, null),
-      after: parseJson<Record<string, unknown> | null>(row.afterJson, null),
-      effects: parseJson<Effect[]>(row.effectsJson, []), status: row.status as 'PENDING' | 'APPLIED',
-      createdAt: row.createdAt, appliedAt: row.appliedAt, result: parseJson<Record<string, unknown> | null>(row.resultJson, null) };
+      kind, operation: row.operation as ChatOperation, title: row.title, targetId: row.targetId,
+      before: normalize(parseJson<Record<string, unknown> | null>(row.beforeJson, null)),
+      after: normalize(parseJson<Record<string, unknown> | null>(row.afterJson, null)),
+      effects: parseJson<Effect[]>(row.effectsJson, []).map((effect) => ({
+        ...effect,
+        before: normalize(effect.before),
+        after: normalize(effect.after),
+      })),
+      status: row.status as 'PENDING' | 'APPLIED', createdAt: row.createdAt, appliedAt: row.appliedAt,
+      result: normalize(parseJson<Record<string, unknown> | null>(row.resultJson, null)) };
   }
 
   private recoverIndex(proposalId: string): Promise<void> {

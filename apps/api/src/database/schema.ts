@@ -142,9 +142,12 @@ export const arcs = sqliteTable('arcs', {
   endEpisodeNumber: integer('end_episode_number').notNull(),
   goal: text('goal').notNull(),
   conflict: text('conflict').notNull(),
-  // Retained for existing databases; arc planning uses reversalPlanJson only.
+  // Retained for existing databases; new arc planning does not expose it.
   twistPlan: text('twist_plan').notNull().default(''),
+  // Retained byte-for-byte as the source for the milestone migration.
   reversalPlanJson: text('reversal_plan_json').notNull(),
+  milestonePlanJson: text('milestone_plan_json').notNull().default('[]'),
+  episodeDirectionsJson: text('episode_directions_json').notNull().default('[]'),
   status: text('status').notNull(),
   revision: integer('revision').notNull(),
   createdAt: text('created_at').notNull(),

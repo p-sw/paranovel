@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createSideStoryGroupSchema, sideStoryGroupSchema } from '@paranovel/contracts';
 import { DatabaseService } from '../src/database/database.service';
 import { EpisodesService } from '../src/episodes/episodes.service';
 import { MemoryService } from '../src/memory/memory.service';
@@ -106,7 +107,20 @@ describe('side-story API', () => {
         startEpisodeNumber: 1,
         endEpisodeNumber: 3,
         status: 'ACTIVE',
-        reversalPlan: [{ episode: 2, description: '파수꾼이 과거의 동료였음이 드러난다.' }],
+        milestones: [{
+          episode: 2,
+          type: 'REVERSAL',
+          description: '파수꾼이 과거의 동료였음이 드러난다.',
+        }],
+        episodeDirections: [
+          { episode: 1, title: '겨울 궁전의 봉인 1화', direction: '궁전의 봉인을 푼다.' },
+          {
+            episode: 2,
+            title: '겨울 궁전의 봉인 2화',
+            direction: '파수꾼이 과거의 동료였음이 드러난다.',
+          },
+          { episode: 3, title: '겨울 궁전의 봉인 3화', direction: '궁전의 봉인을 푼다.' },
+        ],
       },
     });
     expect(groupAReplay.id).toBe(groupA.id);
@@ -168,6 +182,54 @@ describe('side-story API', () => {
       .episodes.map((episode: { number: number }) => episode.number)).toEqual([1, 2]);
     expect(collection.groups.find((group: { id: string }) => group.id === groupB.id)
       .episodes.map((episode: { number: number }) => episode.number)).toEqual([1]);
+  });
+
+  it('prefers explicit milestones and validates exact directions while retaining legacy input', async () => {
+    const legacyReversal = {
+      episode: 2,
+      description: '호환용 반전 문장',
+    };
+    const body = {
+      title: '두 계획의 정원',
+      description: '새 계획과 레거시 입력이 함께 온다.',
+      branchFromEpisodeId: null,
+      canon: '정원에서는 거짓말을 할 수 없다.',
+      arc: {
+        title: '진실의 정원',
+        goal: '정원의 문을 연다.',
+        conflict: '수호자가 문을 봉인한다.',
+        endEpisodeNumber: 3,
+        reversalPlan: [legacyReversal],
+        milestones: [{
+          episode: 3,
+          type: 'CLIMAX' as const,
+          description: '수호자의 봉인을 깨뜨린다.',
+        }],
+        episodeDirections: [
+          { episode: 1, title: '정원 입구', direction: '봉인의 흔적을 찾는다.' },
+          { episode: 2, title: '수호자', direction: '수호자와 협상한다.' },
+          { episode: 3, title: '열린 문', direction: '수호자의 봉인을 깨뜨린다.' },
+        ],
+      },
+    };
+    expect(createSideStoryGroupSchema.safeParse(body).success).toBe(true);
+    expect(createSideStoryGroupSchema.safeParse({
+      ...body,
+      arc: { ...body.arc, episodeDirections: body.arc.episodeDirections.slice(0, -1) },
+    }).success).toBe(false);
+
+    const created = (await request(app.getHttpServer())
+      .post(`/projects/${projectId}/side-story-groups`)
+      .send(body)
+      .expect(201)).body;
+
+    expect(created.arc.milestones).toEqual(body.arc.milestones);
+    expect(created.arc.episodeDirections).toEqual(body.arc.episodeDirections);
+    expect(created.arc).not.toHaveProperty('reversalPlan');
+    expect(sideStoryGroupSchema.safeParse(created).success).toBe(true);
+    expect(database.connection.prepare(
+      'SELECT reversal_plan_json FROM arcs WHERE id = ?',
+    ).get(created.arc.id)).toEqual({ reversal_plan_json: JSON.stringify([legacyReversal]) });
   });
 
   it('accepts only a live main episode in the same project as a branch', async () => {

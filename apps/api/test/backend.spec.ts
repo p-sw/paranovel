@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, UnprocessableEntityException } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ArcEpisodeDirectionsService } from '../src/ai/arc-episode-directions.service';
 import type { AiRunnerService } from '../src/ai/ai-runner.service';
 import { AiRunnerService as ConcreteAiRunnerService } from '../src/ai/ai-runner.service';
 import { episodeDirectionSchema, episodeDirectionValidator } from '../src/ai/ai.schemas';
@@ -538,7 +539,16 @@ describe('backend core', () => {
           },
         };
       }),
-      completeJson: vi.fn(async () => ({
+      completeJson: vi.fn(async (input) => input.task === 'arc_episode_directions' ? ({
+        runId: 'directions',
+        value: {
+          episodeDirections: Array.from({ length: 5 }, (_, index) => ({
+            episode: index + 1,
+            title: `${index + 1}화`,
+            direction: '달의 흔적을 향해 나아간다.',
+          })),
+        },
+      }) : ({
         runId: 'blueprint',
         value: {
           title: '달 없는 밤',
@@ -555,12 +565,18 @@ describe('backend core', () => {
             endEpisode: 5,
             goal: '첫 흔적을 찾는다.',
             conflict: '추격자가 방해한다.',
-            reversalPlan: [],
+            milestones: [{ episode: 5, type: 'GOAL', description: '첫 흔적을 찾는다.' }],
           }],
         },
       })),
     };
-    const wizard = new ProjectWizardService(database, fakeAi as never, projects, memory);
+    const wizard = new ProjectWizardService(
+      database,
+      fakeAi as never,
+      new ArcEpisodeDirectionsService(fakeAi as never),
+      projects,
+      memory,
+    );
     const started = await wizard.start({
       logline: '잃어버린 달을 찾는다.',
       genreTags: ['판타지'],

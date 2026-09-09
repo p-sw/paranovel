@@ -17,7 +17,13 @@ import {
 } from 'lucide-react';
 import { useOutletContext, useParams } from 'react-router-dom';
 import { api, messageOf } from '../api/client';
-import type { Arc, ArcPlanProposal } from '../types';
+import {
+  episodeDirectionsForRange,
+  episodeDirectionsIssue,
+  MILESTONE_TYPE_LABELS,
+  MILESTONE_TYPES,
+} from '../arcPlan';
+import type { Arc, ArcMilestone, ArcPlanProposal } from '../types';
 import type { ProjectOutletContext } from '../components/AppShell';
 import { Badge, Button, EmptyState, ErrorState, FieldError, Sheet, SkeletonCards } from '../components/Ui';
 
@@ -27,7 +33,8 @@ interface ArcDraft {
   endEpisode: number;
   goal: string;
   conflict: string;
-  reversalPlan: Arc['reversalPlan'];
+  milestones: Arc['milestones'];
+  episodeDirections: Arc['episodeDirections'];
   status: Arc['status'];
 }
 
@@ -36,15 +43,16 @@ type EditorTarget =
   | { mode: 'edit'; arc: Arc }
   | null;
 
-const blankArc: ArcDraft = {
+const blankArc = (startEpisode = 1, endEpisode = 10): ArcDraft => ({
   title: '',
-  startEpisode: 1,
-  endEpisode: 10,
+  startEpisode,
+  endEpisode,
   goal: '',
   conflict: '',
-  reversalPlan: [],
+  milestones: [{ episode: endEpisode, type: 'GOAL', description: '' }],
+  episodeDirections: episodeDirectionsForRange(startEpisode, endEpisode),
   status: 'PLANNED',
-};
+});
 
 const byStartEpisode = (left: Arc, right: Arc) =>
   left.startEpisode - right.startEpisode || left.endEpisode - right.endEpisode;
@@ -53,9 +61,8 @@ export default function ArcPage() {
   const { projectId = '' } = useParams();
   const { project } = useOutletContext<ProjectOutletContext>();
   const queryClient = useQueryClient();
-  const [form, setForm] = useState<ArcDraft>(blankArc);
+  const [form, setForm] = useState<ArcDraft>(() => blankArc());
   const [editorTarget, setEditorTarget] = useState<EditorTarget>(null);
-  const [reversalText, setReversalText] = useState('');
   const [plannerOpen, setPlannerOpen] = useState(false);
   const [plannerRequest, setPlannerRequest] = useState('');
   const [proposal, setProposal] = useState<ArcPlanProposal | null>(null);
@@ -87,16 +94,15 @@ export default function ArcPage() {
       endEpisode: arc.endEpisode,
       goal: arc.goal,
       conflict: arc.conflict,
-      reversalPlan: arc.reversalPlan,
+      milestones: arc.milestones,
+      episodeDirections: episodeDirectionsForRange(arc.startEpisode, arc.endEpisode, arc.episodeDirections),
       status: arc.status,
     });
-    setReversalText(arc.reversalPlan.map((beat) => `${beat.episode}화 — ${beat.description}`).join('\n'));
   };
 
   const closeEditor = () => {
     setEditorTarget(null);
-    setForm(blankArc);
-    setReversalText('');
+    setForm(blankArc());
     setError('');
   };
 
@@ -115,12 +121,7 @@ export default function ArcPage() {
       setError('목표 완결 회차까지 이미 아크가 계획되어 있습니다. 기존 대기 아크를 편집해 주세요.');
       return;
     }
-    setForm({
-      ...blankArc,
-      startEpisode: nextArcRange.startEpisode,
-      endEpisode: nextArcRange.endEpisode,
-    });
-    setReversalText('');
+    setForm(blankArc(nextArcRange.startEpisode, nextArcRange.endEpisode));
     setEditorTarget({ mode: 'new' });
     setError('');
   };
@@ -180,10 +181,14 @@ export default function ArcPage() {
       endEpisode: proposal.endEpisodeNumber,
       goal: proposal.goal,
       conflict: proposal.conflict,
-      reversalPlan: proposal.reversalPlan,
+      milestones: proposal.milestones,
+      episodeDirections: episodeDirectionsForRange(
+        proposal.startEpisodeNumber,
+        proposal.endEpisodeNumber,
+        proposal.episodeDirections,
+      ),
       status: 'PLANNED',
     });
-    setReversalText(proposal.reversalPlan.map((beat) => `${beat.episode}화 — ${beat.description}`).join('\n'));
     setEditorTarget(replacement ? { mode: 'edit', arc: replacement } : { mode: 'new' });
     setPlannerOpen(false);
     setProposal(null);
@@ -200,7 +205,8 @@ export default function ArcPage() {
         endEpisode: form.endEpisode,
         goal: form.goal,
         conflict: form.conflict,
-        reversalPlan: parseReversalPlan(reversalText, form.startEpisode),
+        milestones: form.milestones,
+        episodeDirections: form.episodeDirections,
       };
       if (editorTarget.mode === 'new') {
         return api.arcs.create(projectId, { ...payload, status: 'PLANNED' });
@@ -262,6 +268,32 @@ export default function ArcPage() {
     }
   };
 
+  const updateRange = (field: 'startEpisode' | 'endEpisode', value: number) => {
+    setForm((current) => {
+      const startEpisode = field === 'startEpisode' ? value : current.startEpisode;
+      const endEpisode = field === 'endEpisode' ? value : current.endEpisode;
+      return {
+        ...current,
+        [field]: value,
+        episodeDirections: episodeDirectionsForRange(startEpisode, endEpisode, current.episodeDirections),
+      };
+    });
+  };
+
+  const updateMilestone = (index: number, milestone: ArcMilestone) => {
+    setForm((current) => ({
+      ...current,
+      milestones: current.milestones.map((item, itemIndex) => itemIndex === index ? milestone : item),
+    }));
+  };
+
+  const updateEpisodeDirection = (episode: number, changes: Partial<Arc['episodeDirections'][number]>) => {
+    setForm((current) => ({
+      ...current,
+      episodeDirections: current.episodeDirections.map((item) => item.episode === episode ? { ...item, ...changes } : item),
+    }));
+  };
+
   const validate = () => {
     if (!Number.isInteger(form.startEpisode) || !Number.isInteger(form.endEpisode) || form.startEpisode < 1) {
       return '시작과 끝 회차는 양의 정수로 입력해 주세요.';
@@ -294,12 +326,15 @@ export default function ArcPage() {
       const tail = project.targetEpisode - nextEpisode + 1;
       if (tail > 0 && tail < 5) return '목표 회차에 끝내거나 다음 아크를 위해 최소 5화를 남겨 주세요.';
     }
-    const reversalPlan = parseReversalPlan(reversalText, form.startEpisode);
-    if (reversalPlan.some((beat) => beat.description.length > 10_000)) return '각 반전 내용은 10,000자 이하여야 합니다.';
-    if (reversalPlan.some((beat) => !Number.isInteger(beat.episode)
-      || beat.episode < form.startEpisode || beat.episode > form.endEpisode)) {
-      return '반전 회차는 아크 범위 안에 지정해 주세요.';
+    if (!form.milestones.length) return '아크에는 하나 이상의 마일스톤이 필요합니다.';
+    if (form.milestones.some((milestone) => !MILESTONE_TYPES.includes(milestone.type)
+      || !Number.isInteger(milestone.episode)
+      || milestone.episode < form.startEpisode || milestone.episode > form.endEpisode
+      || !milestone.description.trim() || milestone.description.trim().length > 10_000)) {
+      return '마일스톤의 회차, 종류와 내용을 확인해 주세요.';
     }
+    const directionIssue = episodeDirectionsIssue(form.startEpisode, form.endEpisode, form.episodeDirections);
+    if (directionIssue) return directionIssue;
     return '';
   };
 
@@ -382,7 +417,8 @@ export default function ArcPage() {
             <div className="arc-sections">
               <section><div className="arc-section-icon"><Target className="size-5" /></div><div><span>아크 목표</span><p>{currentArc.goal}</p></div></section>
               <section><div className="arc-section-icon conflict"><GitBranch className="size-5" /></div><div><span>핵심 갈등</span><p>{currentArc.conflict}</p></div></section>
-              <section><div className="arc-section-icon twist"><Sparkles className="size-5" /></div><div><span>회차별 반전</span><p className="whitespace-pre-wrap">{formatReversalPlan(currentArc)}</p></div></section>
+              <section><div className="arc-section-icon twist"><Sparkles className="size-5" /></div><div><span>회차별 마일스톤</span><MilestoneList milestones={currentArc.milestones} /></div></section>
+              <section><div className="arc-section-icon"><Flag className="size-5" /></div><div><span>회차별 전개</span><EpisodeDirectionList arc={currentArc} /></div></section>
             </div>
           </article>
         </section>
@@ -407,12 +443,45 @@ export default function ArcPage() {
           <div className="mt-6 space-y-5">
             <div><label className="field-label" htmlFor="arc-title">아크 제목</label><input id="arc-title" className="input" maxLength={200} value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="예: 왕도의 그림자" /></div>
             <div className="grid grid-cols-2 gap-3">
-              <div><label className="field-label" htmlFor="arc-start">시작 회차</label><input id="arc-start" type="number" min={1} className="input" value={form.startEpisode} onChange={(event) => setForm({ ...form, startEpisode: Number(event.target.value) })} /></div>
-              <div><label className="field-label" htmlFor="arc-end">끝 회차</label><input id="arc-end" type="number" min={1} className="input" value={form.endEpisode} onChange={(event) => setForm({ ...form, endEpisode: Number(event.target.value) })} /></div>
+              <div><label className="field-label" htmlFor="arc-start">시작 회차</label><input id="arc-start" type="number" min={1} className="input" value={form.startEpisode} onChange={(event) => updateRange('startEpisode', Number(event.target.value))} /></div>
+              <div><label className="field-label" htmlFor="arc-end">끝 회차</label><input id="arc-end" type="number" min={1} className="input" value={form.endEpisode} onChange={(event) => updateRange('endEpisode', Number(event.target.value))} /></div>
             </div>
             <div><label className="field-label" htmlFor="arc-goal">목표</label><textarea id="arc-goal" className="input" maxLength={10_000} value={form.goal} onChange={(event) => setForm({ ...form, goal: event.target.value })} placeholder="아크가 끝날 때 주인공과 세계가 어떻게 달라져야 하나요?" /></div>
             <div><label className="field-label" htmlFor="arc-conflict">핵심 갈등</label><textarea id="arc-conflict" className="input" maxLength={10_000} value={form.conflict} onChange={(event) => setForm({ ...form, conflict: event.target.value })} placeholder="무엇이 목표 달성을 가로막나요?" /></div>
-            <div><label className="field-label" htmlFor="arc-twist">회차별 반전</label><textarea id="arc-twist" className="input" value={reversalText} onChange={(event) => setReversalText(event.target.value)} placeholder={'예: 8화 — 조력자의 정체가 드러난다\n10화 — 적의 목적이 복수였음이 밝혀진다'} /><p className="field-hint">각 줄을 ‘8화 — 반전 내용’ 형식으로 적어 주세요.</p></div>
+            <section>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div><h3 className="field-label">회차별 마일스톤</h3><p className="field-hint">목표, 반전, 고조, 클라이맥스처럼 전개를 잇는 기준점을 정합니다.</p></div>
+                <Button type="button" variant="ghost" size="sm" onClick={() => setForm((current) => ({
+                  ...current,
+                  milestones: [...current.milestones, { episode: current.endEpisode, type: 'OTHER', description: '' }],
+                }))}><Plus className="size-4" /> 마일스톤 추가</Button>
+              </div>
+              <div className="mt-3 space-y-3">
+                {form.milestones.map((milestone, index) => (
+                  <div className="grid gap-2 rounded-xl border border-line bg-paper p-3 sm:grid-cols-[5rem_8rem_minmax(0,1fr)_auto]" key={milestone.id ?? index}>
+                    <label><span className="sr-only">{index + 1}번째 마일스톤 회차</span><input aria-label={`${index + 1}번째 마일스톤 회차`} className="input" type="number" min={form.startEpisode} max={form.endEpisode} value={milestone.episode} onChange={(event) => updateMilestone(index, { ...milestone, episode: Number(event.target.value) })} /></label>
+                    <label><span className="sr-only">{index + 1}번째 마일스톤 종류</span><select aria-label={`${index + 1}번째 마일스톤 종류`} className="input" value={milestone.type} onChange={(event) => updateMilestone(index, { ...milestone, type: event.target.value as ArcMilestone['type'] })}>{MILESTONE_TYPES.map((type) => <option key={type} value={type}>{MILESTONE_TYPE_LABELS[type]}</option>)}</select></label>
+                    <label><span className="sr-only">{index + 1}번째 마일스톤 내용</span><textarea aria-label={`${index + 1}번째 마일스톤 내용`} className="input" rows={2} maxLength={10_000} value={milestone.description} onChange={(event) => updateMilestone(index, { ...milestone, description: event.target.value })} /></label>
+                    <Button type="button" variant="ghost" size="sm" disabled={form.milestones.length === 1} onClick={() => setForm((current) => ({ ...current, milestones: current.milestones.filter((_, itemIndex) => itemIndex !== index) }))}><Trash2 className="size-4" /><span className="sr-only">{index + 1}번째 마일스톤 제거</span></Button>
+                  </div>
+                ))}
+              </div>
+            </section>
+            <section>
+              <h3 className="field-label">회차별 전개</h3>
+              <p className="field-hint">마일스톤을 자연스럽게 잇도록 아크의 모든 회차에 제목과 전개 방향을 정합니다.</p>
+              <div className="mt-3 space-y-3">
+                {form.episodeDirections.map((item) => (
+                  <article className="rounded-xl border border-line bg-paper p-3" key={item.episode}>
+                    <h4 className="text-sm font-bold text-plum-700">{item.episode}화</h4>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(10rem,0.7fr)_minmax(0,1.3fr)]">
+                      <label><span className="sr-only">{item.episode}화 제목</span><input aria-label={`${item.episode}화 제목`} className="input" maxLength={200} placeholder="회차 제목" value={item.title} onChange={(event) => updateEpisodeDirection(item.episode, { title: event.target.value })} /></label>
+                      <label><span className="sr-only">{item.episode}화 전개 방향</span><textarea aria-label={`${item.episode}화 전개 방향`} className="input" rows={3} maxLength={20_000} placeholder="주요 사건, 감정 변화, 정보 공개와 끝 훅" value={item.direction} onChange={(event) => updateEpisodeDirection(item.episode, { direction: event.target.value })} /></label>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
           </div>
           <FieldError>{error}</FieldError>
           <div className="action-row mt-6"><Button type="button" variant="ghost" onClick={closeEditor}>취소</Button><Button type="submit" busy={saveMutation.isPending}>{editorTarget?.mode === 'new' ? '대기 아크 저장' : '변경 저장'}</Button></div>
@@ -463,7 +532,7 @@ export default function ArcPage() {
           else closePlanner();
         }}
         title="AI로 미래 아크 제안"
-        description="정사, 현재·이전 아크, 최근 회차 기억과 미회수 떡밥을 바탕으로 다음 5–20화 계획을 만듭니다. 검토하기 전에는 저장되지 않아요."
+        description="먼저 회차별 마일스톤을 정하고, 이를 잇는 모든 회차의 전개 방향을 만듭니다. 검토하기 전에는 저장되지 않아요."
         wide
         footer={proposal ? (
           <div className="action-row">
@@ -481,10 +550,10 @@ export default function ArcPage() {
           <div className="space-y-5">
             <section className="proposal-box">
               <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-story text-xl font-bold">{proposal.title}</h3><Badge tone="plum">{proposal.startEpisodeNumber}–{proposal.endEpisodeNumber}화</Badge></div>
-              <dl className="mt-4 space-y-3 text-sm"><div><dt className="font-bold">목표</dt><dd className="mt-1 leading-6 text-muted">{proposal.goal}</dd></div><div><dt className="font-bold">갈등</dt><dd className="mt-1 leading-6 text-muted">{proposal.conflict}</dd></div><div><dt className="font-bold">회차별 반전</dt><dd className="mt-1 whitespace-pre-wrap leading-6 text-muted">{proposal.reversalPlan.map((beat) => `${beat.episode}화 — ${beat.description}`).join('\n') || '아직 정한 반전이 없습니다.'}</dd></div></dl>
+              <dl className="mt-4 space-y-3 text-sm"><div><dt className="font-bold">목표</dt><dd className="mt-1 leading-6 text-muted">{proposal.goal}</dd></div><div><dt className="font-bold">갈등</dt><dd className="mt-1 leading-6 text-muted">{proposal.conflict}</dd></div><div><dt className="font-bold">회차별 마일스톤</dt><dd className="mt-1 leading-6 text-muted"><MilestoneList milestones={proposal.milestones} /></dd></div></dl>
             </section>
             {proposal.conflicts.length ? <div className="warning-box" role="alert"><strong className="flex items-center gap-2"><AlertTriangle className="size-4" /> 기존 설정과 확인할 충돌</strong><ul>{proposal.conflicts.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul></div> : null}
-            <section><h3 className="field-label">회차별 방향 제안</h3><div className="mt-2 space-y-2">{proposal.episodeDirections.map((item) => <article className="rounded-xl border border-line bg-paper p-3" key={item.episode}><div className="flex gap-2 text-sm font-bold"><span className="text-plum-600">{item.episode}화</span><span>{item.title}</span></div><p className="mt-1 text-sm leading-6 text-muted">{item.direction}</p></article>)}</div></section>
+            <section><h3 className="field-label">회차별 전개</h3><div className="mt-2 space-y-2">{proposal.episodeDirections.map((item) => <article className="rounded-xl border border-line bg-paper p-3" key={item.episode}><div className="flex gap-2 text-sm font-bold"><span className="text-plum-600">{item.episode}화</span><span>{item.title}</span></div><p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-muted">{item.direction}</p></article>)}</div></section>
           </div>
         ) : (
           <div>
@@ -544,7 +613,8 @@ function ArcListSection({
               <dl className="mt-3 space-y-4 border-t border-line pt-4 text-sm">
                 <div><dt className="font-bold">아크 목표</dt><dd className="mt-1 whitespace-pre-wrap break-words leading-7">{arc.goal}</dd></div>
                 <div><dt className="font-bold">핵심 갈등</dt><dd className="mt-1 whitespace-pre-wrap break-words leading-7">{arc.conflict}</dd></div>
-                <div><dt className="font-bold">회차별 반전</dt><dd className="mt-1 whitespace-pre-wrap break-words leading-7">{formatReversalPlan(arc)}</dd></div>
+                <div><dt className="font-bold">회차별 마일스톤</dt><dd className="mt-1 break-words leading-7"><MilestoneList milestones={arc.milestones} /></dd></div>
+                <div><dt className="font-bold">회차별 전개</dt><dd className="mt-2"><EpisodeDirectionList arc={arc} /></dd></div>
               </dl>
             </details>
           </article>
@@ -565,17 +635,36 @@ function ArcStatusBadge({ status }: { status: Arc['status'] }) {
   return <Badge tone={tone}>{labels[status]}</Badge>;
 }
 
-function formatReversalPlan(arc: Pick<Arc, 'reversalPlan'>): string {
-  return arc.reversalPlan.map((beat) => `${beat.episode}화 — ${beat.description}`).join('\n') || '아직 정한 반전이 없습니다.';
+function MilestoneList({ milestones }: { milestones: ArcMilestone[] }) {
+  if (!milestones.length) return <p className="text-sm text-muted">아직 정한 마일스톤이 없습니다.</p>;
+  return (
+    <ul className="mt-1 space-y-1 text-sm leading-6 text-muted">
+      {[...milestones]
+        .sort((left, right) => left.episode - right.episode)
+        .map((milestone, index) => (
+          <li key={milestone.id ?? `${milestone.episode}-${milestone.type}-${index}`}>
+            <strong className="text-ink">{milestone.episode}화 · {MILESTONE_TYPE_LABELS[milestone.type]}</strong>
+            {' — '}{milestone.description}
+          </li>
+        ))}
+    </ul>
+  );
 }
 
-function parseReversalPlan(value: string, startEpisode: number): Arc['reversalPlan'] {
-  return value.split('\n').map((line) => line.trim()).filter(Boolean).map((line, index) => {
-    const match = line.match(/^(\d+)\s*화?\s*[—–:\-]?\s*(.+)$/);
-    return match
-      ? { episode: Number(match[1]), description: match[2].trim() }
-      : { episode: startEpisode + index, description: line };
-  });
+function EpisodeDirectionList({ arc }: { arc: Pick<Arc, 'episodeDirections'> }) {
+  if (!arc.episodeDirections.length) return <p className="text-sm text-muted">아직 정한 회차별 전개가 없습니다.</p>;
+  return (
+    <div className="mt-2 space-y-2">
+      {[...arc.episodeDirections]
+        .sort((left, right) => left.episode - right.episode)
+        .map((item) => (
+          <article className="rounded-xl border border-line bg-paper p-3" key={item.episode}>
+            <div className="flex flex-wrap gap-x-2 text-sm font-bold"><span className="text-plum-600">{item.episode}화</span><span>{item.title}</span></div>
+            <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-muted">{item.direction}</p>
+          </article>
+        ))}
+    </div>
+  );
 }
 
 function findNextArcRange(
