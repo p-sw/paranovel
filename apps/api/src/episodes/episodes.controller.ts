@@ -116,6 +116,19 @@ export class EpisodesController {
     );
   }
 
+  @Post(':episodeId/continuity-review')
+  reviewContinuity(
+    @Param('projectId') projectId: string,
+    @Param('episodeId') episodeId: string,
+    @Body() body: unknown,
+    @Req() request: Request,
+    @Res() response: Response,
+  ) {
+    return sendNdjson<StreamEvent>(request, response, (emit, signal) =>
+      this.episodes.reviewContinuity(projectId, episodeId, body, emit, signal),
+    );
+  }
+
   @Post(':episodeId/finalize')
   finalize(
     @Param('projectId') projectId: string,

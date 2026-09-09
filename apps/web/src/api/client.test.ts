@@ -47,6 +47,37 @@ describe('NDJSON client', () => {
       body: JSON.stringify({ title: '성벽', direction: '비 오는 성벽' }),
     }));
   });
+
+  it('reviews the saved episode without sending or replacing its manuscript', async () => {
+    const content = '\n  저장된 원고.  \n';
+    const payload = [
+      { type: 'stage', stage: 'MEMORY' },
+      { type: 'stage', stage: 'CHECKING' },
+      { type: 'done', content, blocked: false, issues: [], baseRevision: 7 },
+    ].map((event) => JSON.stringify(event)).join('\n');
+    const fetchMock = vi.fn().mockResolvedValue(new Response(payload, {
+      status: 200,
+      headers: { 'content-type': 'application/x-ndjson' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const snapshots: string[] = [];
+
+    const result = await api.episodes.reviewContinuity(
+      'story', 'episode', { expectedRevision: 7, content },
+      (_event, accumulated) => snapshots.push(accumulated),
+    );
+
+    expect(result.content).toBe(content);
+    expect(result.baseRevision).toBe(7);
+    expect(snapshots).toEqual([content, content, content]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/projects/story/episodes/episode/continuity-review',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ expectedRevision: 7 }),
+      }),
+    );
+  });
 });
 
 describe('write contracts', () => {

@@ -88,6 +88,23 @@ function pendingGeneration() {
   };
 }
 
+function pendingContinuityReview() {
+  let event!: (event: StreamEvent, accumulated: string) => void;
+  let complete!: (result: StreamResult) => void;
+  let signal!: AbortSignal;
+  const review = vi.spyOn(api.episodes, 'reviewContinuity').mockImplementation((_project, _episode, _input, onEvent, requestSignal) => {
+    event = onEvent;
+    signal = requestSignal!;
+    return new Promise((resolve) => { complete = resolve; });
+  });
+  return {
+    review,
+    event: (value: StreamEvent, content = '') => act(async () => event(value, content)),
+    complete: (result: StreamResult) => act(async () => complete(result)),
+    signal: () => signal,
+  };
+}
+
 describe('new episode generation in the editor', () => {
   it('uses only the current side-story group for labels and previous/next navigation', async () => {
     const first = { ...emptyEpisode, kind: 'SIDE_STORY' as const, sideStoryGroupId: 'group-1', number: 1, status: 'DRAFT' as const };
@@ -267,5 +284,140 @@ describe('new episode generation in the editor', () => {
     expect(savedEpisodes.episode.status).toBe('DRAFT');
     expect(savedEpisodes.episode.content).toBe('재시도한 원고.');
     expect(api.episodes.update).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('manual continuity review in the editor', () => {
+  it('saves dirty writing, reviews the current manuscript, persists blocking status, and reuses full-draft repair', async () => {
+    savedEpisodes.episode = { ...emptyEpisode, content: '기존 원고.', status: 'DRAFT' };
+    const review = pendingContinuityReview();
+    const repair = vi.spyOn(api.episodes, 'repair').mockResolvedValue({
+      content: '오른손의 흉터.', issues: [], blocked: false, baseRevision: 4,
+    });
+    const { user } = renderEditor({ request: false });
+    const textarea = await screen.findByRole('textbox', { name: '회차 본문' }) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: '왼손의 흉터.' } });
+
+    await user.click(screen.getByRole('button', { name: '일관성 검사' }));
+    await waitFor(() => expect(review.review).toHaveBeenCalledTimes(1));
+    expect(api.episodes.update).toHaveBeenCalledWith('story', 'episode', expect.objectContaining({
+      expectedRevision: 2,
+      content: '왼손의 흉터.',
+    }));
+    expect(review.review).toHaveBeenCalledWith(
+      'story',
+      'episode',
+      { expectedRevision: 3, content: '왼손의 흉터.' },
+      expect.any(Function),
+      expect.any(AbortSignal),
+    );
+    expect(textarea.readOnly).toBe(true);
+    expect(screen.getByRole('textbox', { name: '회차 제목' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '편집 AI' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '커서에서 이어쓰기' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '일관성 검사' })).toHaveAttribute('aria-busy', 'true');
+
+    await review.event({ type: 'stage', stage: 'MEMORY' }, '왼손의 흉터.');
+    expect(screen.getByText('기억을 불러오는 중')).toBeVisible();
+    await review.event({ type: 'stage', stage: 'CHECKING' }, '왼손의 흉터.');
+    expect(screen.getByText('일관성을 확인하는 중')).toBeVisible();
+    await review.complete({ content: '왼손의 흉터.', issues: [issue], blocked: true, baseRevision: 3 });
+
+    await waitFor(() => expect(savedEpisodes.episode.status).toBe('NEEDS_REVIEW'));
+    expect(api.episodes.update).toHaveBeenLastCalledWith('story', 'episode', expect.objectContaining({
+      expectedRevision: 3,
+      content: '왼손의 흉터.',
+      forceNeedsReview: true,
+    }));
+    expect(screen.getByText('일관성 검사 완료')).toBeVisible();
+    expect(screen.getByText(issue.explanation)).toBeVisible();
+    expect(textarea).toHaveValue('왼손의 흉터.');
+    expect(textarea.readOnly).toBe(false);
+
+    await user.click(screen.getByRole('button', { name: `자동 수정: ${issue.explanation}` }));
+    await waitFor(() => expect(repair).toHaveBeenCalledWith('story', expect.objectContaining({
+      episodeId: 'episode', expectedRevision: 4, content: '왼손의 흉터.', issue,
+    }), expect.any(Function), expect.any(AbortSignal)));
+    await waitFor(() => expect(textarea).toHaveValue('오른손의 흉터.'));
+  });
+
+  it('shows an explicit success result when the current manuscript has no continuity issues', async () => {
+    savedEpisodes.episode = { ...emptyEpisode, content: '문제가 없는 원고.', status: 'DRAFT' };
+    vi.spyOn(api.episodes, 'reviewContinuity').mockResolvedValue({
+      content: '문제가 없는 원고.', issues: [], blocked: false, baseRevision: 2,
+    });
+    const { user } = renderEditor({ request: false });
+
+    await user.click(await screen.findByRole('button', { name: '일관성 검사' }));
+
+    expect(await screen.findByText('현재 원고에서 일관성 문제를 찾지 못했어요.')).toBeVisible();
+    expect(screen.getByText('일관성 검사 완료')).toBeVisible();
+    expect(api.episodes.update).not.toHaveBeenCalled();
+    expect(screen.getByRole('textbox', { name: '회차 본문' })).toHaveValue('문제가 없는 원고.');
+  });
+
+  it('rejects a review result that does not identify the saved manuscript revision', async () => {
+    savedEpisodes.episode = { ...emptyEpisode, content: '검사할 원고.', status: 'DRAFT' };
+    vi.spyOn(api.episodes, 'reviewContinuity').mockResolvedValue({
+      content: '검사할 원고.', issues: [], blocked: false,
+    });
+    const { user } = renderEditor({ request: false });
+
+    await user.click(await screen.findByRole('button', { name: '일관성 검사' }));
+
+    expect(await screen.findByText('원고가 변경되었습니다. 최신 원고를 확인해 주세요.')).toBeVisible();
+    expect(screen.getByText('일관성 검사 실패')).toBeVisible();
+    expect(screen.queryByText('현재 원고에서 일관성 문제를 찾지 못했어요.')).not.toBeInTheDocument();
+    expect(api.episodes.update).not.toHaveBeenCalled();
+  });
+
+  it('removes a completed review once the reviewed manuscript changes', async () => {
+    savedEpisodes.episode = { ...emptyEpisode, content: '왼손의 흉터.', status: 'DRAFT' };
+    vi.spyOn(api.episodes, 'reviewContinuity').mockResolvedValue({
+      content: '왼손의 흉터.', issues: [{ ...issue, severity: 'WARNING' }], blocked: false, baseRevision: 2,
+    });
+    const { user } = renderEditor({ request: false });
+    const textarea = await screen.findByRole('textbox', { name: '회차 본문' });
+    await user.click(screen.getByRole('button', { name: '일관성 검사' }));
+    expect(await screen.findByText(issue.explanation)).toBeVisible();
+
+    fireEvent.change(textarea, { target: { value: '오른손의 흉터.' } });
+
+    await waitFor(() => expect(screen.queryByText(issue.explanation)).not.toBeInTheDocument());
+    expect(screen.queryByText('일관성 검사 완료')).not.toBeInTheDocument();
+  });
+
+  it('cancels a continuity review, unlocks the editor, and ignores its late result', async () => {
+    savedEpisodes.episode = { ...emptyEpisode, content: '검사할 원고.', status: 'DRAFT' };
+    const review = pendingContinuityReview();
+    const { user } = renderEditor({ request: false });
+    const textarea = await screen.findByRole('textbox', { name: '회차 본문' }) as HTMLTextAreaElement;
+    await user.click(screen.getByRole('button', { name: '일관성 검사' }));
+    await waitFor(() => expect(review.review).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole('button', { name: '검사 중단' }));
+    expect(review.signal().aborted).toBe(true);
+    expect(screen.getByText('일관성 검사 중단됨')).toBeVisible();
+    expect(textarea.readOnly).toBe(false);
+    await review.complete({ content: '검사할 원고.', issues: [issue], blocked: true, baseRevision: 2 });
+
+    expect(screen.queryByText(issue.explanation)).not.toBeInTheDocument();
+    expect(screen.queryByText('현재 원고에서 일관성 문제를 찾지 못했어요.')).not.toBeInTheDocument();
+    expect(savedEpisodes.episode.status).toBe('DRAFT');
+  });
+
+  it('keeps the manuscript editable and exposes a retry after continuity review failure', async () => {
+    savedEpisodes.episode = { ...emptyEpisode, content: '보존할 원고.', status: 'DRAFT' };
+    vi.spyOn(api.episodes, 'reviewContinuity').mockRejectedValue(new Error('일관성 검사 연결 실패'));
+    const { user } = renderEditor({ request: false });
+    const textarea = await screen.findByRole('textbox', { name: '회차 본문' }) as HTMLTextAreaElement;
+
+    await user.click(screen.getByRole('button', { name: '일관성 검사' }));
+
+    expect(await screen.findByText('일관성 검사 연결 실패')).toBeVisible();
+    expect(screen.getByText('일관성 검사 실패')).toBeVisible();
+    expect(textarea).toHaveValue('보존할 원고.');
+    expect(textarea.readOnly).toBe(false);
+    expect(screen.getByRole('button', { name: '일관성 검사' })).toBeEnabled();
   });
 });

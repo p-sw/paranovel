@@ -645,6 +645,61 @@ export class EpisodesService {
     );
   }
 
+  async reviewContinuity(
+    projectId: string,
+    episodeId: string,
+    body: unknown,
+    emit: (event: StreamEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const episode = this.requireEpisode(projectId, episodeId);
+    const input = (body ?? {}) as Record<string, unknown>;
+    const expectedRevision = positiveInteger(input.expectedRevision, 'expectedRevision');
+    if (expectedRevision !== episode.revision) throw new ConflictException('Episode revision is stale');
+    if (!episode.content.trim()) throw new BadRequestException('Cannot review an empty episode');
+
+    const orderRevision = this.mainOrderRevision(projectId, episode);
+    signal?.throwIfAborted();
+    emit({ type: 'stage', stage: 'MEMORY' });
+    await this.refreshStalePredecessors(projectId, episode);
+    signal?.throwIfAborted();
+    const flowRevision = this.sideFlowRevision(projectId, episode);
+    const concurrency = {
+      projectId,
+      episodeId,
+      baseRevision: expectedRevision,
+      ...(orderRevision ? { baseOrderRevision: orderRevision } : {}),
+      ...(flowRevision ? { baseFlowRevision: flowRevision, flowEpisode: episode } : {}),
+    };
+    this.assertGenerationCurrent(concurrency, 'continuity review');
+
+    const memory = await this.assembleDraftMemory(
+      projectId,
+      `${episode.title}\n${episode.direction}`,
+      episodeId,
+    );
+    signal?.throwIfAborted();
+    this.assertGenerationCurrent(concurrency, 'continuity review');
+    emit({ type: 'stage', stage: 'CHECKING' });
+    const issues = await this.reviewContinuityCandidate({
+      ...concurrency,
+      reviewVariables: this.promptMemory(memory, {
+        episode_title: episode.title,
+        episode_direction: episode.direction,
+        boundary_context: '저장된 회차 전체 원고',
+      }),
+    }, episode.content, signal);
+    signal?.throwIfAborted();
+    this.assertGenerationCurrent(concurrency, 'continuity review');
+    emit({
+      type: 'done',
+      content: episode.content,
+      issues,
+      blocked: issues.some((issue) => issue.severity === 'BLOCKING'),
+      baseRevision: expectedRevision,
+    });
+  }
+
   async repairDraft(
     projectId: string,
     body: unknown,
@@ -820,7 +875,7 @@ export class EpisodesService {
         episode_direction: episode.direction,
         boundary_context: '확정 대상 전체 원고',
       });
-      const initialIssues = await this.reviewContinuity(
+      const initialIssues = await this.reviewContinuityCandidate(
         { projectId, episodeId, reviewVariables },
         episode.content,
       );
@@ -1085,7 +1140,7 @@ export class EpisodesService {
     this.assertGenerationCurrent(input, 'repair');
     emit({ type: 'stage', stage: 'CHECKING' });
     // Recheck the whole candidate without automatically repairing other issues.
-    const issues = await this.reviewContinuity(input, repaired.result.content, signal);
+    const issues = await this.reviewContinuityCandidate(input, repaired.result.content, signal);
     signal?.throwIfAborted();
     this.assertGenerationCurrent(input, 'repair');
     emit({
@@ -1129,7 +1184,7 @@ export class EpisodesService {
     emit({ type: 'stage', stage: 'CHECKING' });
     // Review only reports issues. Every change requires a separate user-selected
     // repair request, including when a blocking contradiction is found.
-    const review = await this.reviewContinuity(input, draft.result.content, signal);
+    const review = await this.reviewContinuityCandidate(input, draft.result.content, signal);
     signal?.throwIfAborted();
     this.assertGenerationCurrent(input);
     emit({
@@ -1141,7 +1196,7 @@ export class EpisodesService {
     });
   }
 
-  private async reviewContinuity(
+  private async reviewContinuityCandidate(
     input: { projectId?: string; episodeId?: string; reviewVariables: Record<string, unknown> },
     candidate: string,
     signal?: AbortSignal,

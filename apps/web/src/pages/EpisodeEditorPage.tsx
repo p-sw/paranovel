@@ -47,6 +47,7 @@ import type {
   ImprovementCandidate,
   SaveState,
   SelectionSnapshot,
+  StreamEvent,
 } from '../types';
 import { Badge, Button, ErrorState, FieldError, IconButton, Sheet, Spinner } from '../components/Ui';
 import CandidateEditor from '../components/CandidateEditor';
@@ -62,6 +63,10 @@ import {
 type Draft = Pick<Episode, 'title' | 'direction' | 'content'>;
 
 const emptyDraft: Draft = { title: '', direction: '', content: '' };
+
+function sameDraft(left: Draft, right: Draft) {
+  return left.title === right.title && left.direction === right.direction && left.content === right.content;
+}
 
 function invalidateEpisodeMutationCaches(
   queryClient: QueryClient,
@@ -111,7 +116,8 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
   const generationRequestedRef = useRef(Boolean(location.state?.generateEpisode));
   const generationControllerRef = useRef<AbortController | null>(null);
   const generationBusyRef = useRef(false);
-  const generationModeRef = useRef<'generate' | 'repair'>('generate');
+  const generationModeRef = useRef<'generate' | 'repair' | 'review'>('generate');
+  const continuityResultDraftRef = useRef<Draft | null>(null);
   const forceNeedsReviewRef = useRef(false);
   const incompleteOnSaveRef = useRef(false);
   const [generationPhase, setGenerationPhase] = useState<AiPhase>('idle');
@@ -172,8 +178,25 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
     initializedRef.current = true;
   }, [episodeId, episodeQuery.data, episodeQuery.isFetching]);
 
+  useEffect(() => {
+    const reviewedDraft = continuityResultDraftRef.current;
+    if (!reviewedDraft || sameDraft(reviewedDraft, draft)) return;
+    continuityResultDraftRef.current = null;
+    setGenerationPhase('idle');
+    setGenerationIssues([]);
+    setGenerationBlocked(false);
+    setGenerationError('');
+  }, [draft]);
+
   const updateDraft = (patch: Partial<Draft>) => {
     const next = { ...draftRef.current, ...patch };
+    if (!sameDraft(next, draftRef.current) && !generationBusyRef.current && generationPhase !== 'idle') {
+      continuityResultDraftRef.current = null;
+      setGenerationPhase('idle');
+      setGenerationIssues([]);
+      setGenerationBlocked(false);
+      setGenerationError('');
+    }
     draftRef.current = next;
     if (saveInFlightRef.current) dirtyWhileSavingRef.current = true;
     setDraft(next);
@@ -340,6 +363,7 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
     generationBusyRef.current = true;
     setGenerationBusy(true);
     generationModeRef.current = issue ? 'repair' : 'generate';
+    continuityResultDraftRef.current = null;
     setGenerationError('');
     setGenerationRepairIndex(issueIndex ?? null);
     setGenerationPhase(issue ? 'repairing' : 'retrieving');
@@ -383,6 +407,11 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
       if (result.baseRevision !== undefined && result.baseRevision !== saved.revision) throw new Error('원고가 변경되었습니다. 최신 원고를 확인해 주세요.');
       if (!result.content.trim()) throw new Error('AI가 빈 원고를 반환했습니다. 다시 시도해 주세요.');
       showContent(result.content);
+      continuityResultDraftRef.current = {
+        title: saved.title,
+        direction: saved.direction,
+        content: result.content,
+      };
       setGenerationIssues(result.issues);
       setGenerationBlocked(result.blocked);
       forceNeedsReviewRef.current = result.blocked;
@@ -414,6 +443,67 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
     }
   }, [episodeId, projectId]);
 
+  const runContinuityReview = useCallback(async () => {
+    if (!initializedRef.current || recoveryPendingRef.current || generationBusyRef.current || !draftRef.current.content.trim()) return;
+    const controller = new AbortController();
+    generationControllerRef.current = controller;
+    generationBusyRef.current = true;
+    generationModeRef.current = 'review';
+    continuityResultDraftRef.current = null;
+    setGenerationBusy(true);
+    setGenerationPhase('retrieving');
+    setGenerationIssues([]);
+    setGenerationBlocked(false);
+    setGenerationError('');
+    setGenerationRepairIndex(null);
+    const isCurrent = () => generationControllerRef.current === controller && !controller.signal.aborted;
+    try {
+      const saved = await latestSaveNowRef.current(true);
+      if (!isCurrent()) return;
+      if (!saved) throw new Error('원고 저장이 끝난 뒤 다시 시도해 주세요.');
+      const reviewedDraft = { title: saved.title, direction: saved.direction, content: saved.content };
+      const result = await api.episodes.reviewContinuity(
+        projectId,
+        episodeId,
+        { expectedRevision: saved.revision, content: saved.content },
+        (event: StreamEvent) => {
+          if (!isCurrent() || event.type !== 'stage') return;
+          setGenerationPhase(event.stage === 'MEMORY' ? 'retrieving' : 'checking');
+        },
+        controller.signal,
+      );
+      if (!isCurrent()) return;
+      if (result.baseRevision !== saved.revision) {
+        throw new Error('원고가 변경되었습니다. 최신 원고를 확인해 주세요.');
+      }
+      if (!sameDraft(draftRef.current, reviewedDraft) || result.content !== reviewedDraft.content) {
+        setGenerationPhase('idle');
+        setGenerationIssues([]);
+        setGenerationBlocked(false);
+        return;
+      }
+      continuityResultDraftRef.current = reviewedDraft;
+      setGenerationIssues(result.issues);
+      setGenerationBlocked(result.blocked);
+      if (result.blocked) {
+        forceNeedsReviewRef.current = true;
+        await latestSaveNowRef.current(true);
+        if (!isCurrent()) return;
+      }
+      setGenerationPhase('done');
+    } catch (reason) {
+      if (!isCurrent()) return;
+      setGenerationError(messageOf(reason));
+      setGenerationPhase('error');
+    } finally {
+      if (generationControllerRef.current === controller) {
+        generationControllerRef.current = null;
+        generationBusyRef.current = false;
+        setGenerationBusy(false);
+      }
+    }
+  }, [episodeId, projectId]);
+
   useEffect(() => {
     if (!generationRequestedRef.current || !initializedRef.current || recoveryPendingRef.current) return;
     // Deferring one tick lets StrictMode clean up its first effect pass before
@@ -438,6 +528,12 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
     if (generationModeRef.current === 'repair') {
       setGenerationPhase('done');
       setGenerationError('수정을 중단했습니다.');
+    } else if (generationModeRef.current === 'review') {
+      continuityResultDraftRef.current = null;
+      setGenerationIssues([]);
+      setGenerationBlocked(false);
+      setGenerationError('');
+      setGenerationPhase('cancelled');
     } else {
       forceNeedsReviewRef.current = true;
       if (!draftRef.current.content.trim()) {
@@ -500,6 +596,17 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
   const selected = Boolean(selection && selection.end > selection.start && selection.text);
   const isBusy = continuationOpen || generationBusy;
   const editorLocked = isBusy || editorApplying || Boolean(recoveryBackup);
+  const reviewingContinuity = generationBusy && generationModeRef.current === 'review';
+  const continuityReviewMode = generationModeRef.current === 'review';
+  const generationStatusLabel = continuityReviewMode
+    ? generationPhase === 'done'
+      ? '일관성 검사 완료'
+      : generationPhase === 'error'
+        ? '일관성 검사 실패'
+        : generationPhase === 'cancelled'
+          ? '일관성 검사 중단됨'
+          : undefined
+    : undefined;
   const episodeDestination = (item: Episode) => item.status === 'INCOMPLETE'
     ? item.kind === 'SIDE_STORY'
       ? `/projects/${projectId}/episodes?resumeSideStory=${encodeURIComponent(item.id)}`
@@ -628,6 +735,12 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
             {copyState === 'copied' ? <Check className="size-4" aria-hidden="true" /> : <Copy className="size-4" aria-hidden="true" />}
             {copyState === 'copying' ? '복사 중' : copyState === 'copied' ? '복사됨' : '본문 복사'}
           </Button>
+          <Button size="sm" variant="secondary" busy={reviewingContinuity}
+            disabled={editorLocked || replacementOpen || !draft.content.trim()}
+            aria-label="일관성 검사" onClick={() => void runContinuityReview()}>
+            {reviewingContinuity ? null : <FileCheck2 className="size-4" aria-hidden="true" />}
+            {reviewingContinuity ? '검사 중' : '일관성 검사'}
+          </Button>
           <Button size="sm" disabled={generationBusy} variant={editorAiOpen ? 'primary' : 'secondary'} aria-expanded={editorAiOpen}
             onClick={() => setEditorAiOpen((open) => !open)}><PencilLine className="size-4" />편집 AI</Button>
           <IconButton label="장면과 기억 보기" className="editor-context-toggle" onClick={() => setContextOpen(true)}>
@@ -653,14 +766,22 @@ function EpisodeEditorWorkspace({ projectId, episodeId }: { projectId: string; e
 
         <div className="editor-paper">
           {generationPhase !== 'idle' ? (
-            <section className="mb-5 max-h-[35vh] shrink-0 space-y-3 overflow-y-auto px-4 py-3" aria-label="AI 회차 작성">
+            <section className="mb-5 max-h-[35vh] shrink-0 space-y-3 overflow-y-auto px-4 py-3" aria-label="AI 원고 작성 및 일관성 검사">
               <div className="flex items-center justify-between gap-3">
-                <DraftGenerationStatus phase={generationPhase} />
-                {generationBusy ? <Button size="sm" variant="secondary" onClick={cancelGeneration}><Square className="size-3.5" />{generationRepairIndex !== null ? '수정 중단' : '생성 중단'}</Button>
+                <DraftGenerationStatus phase={generationPhase} label={generationStatusLabel} />
+                {generationBusy ? <Button size="sm" variant="secondary" onClick={cancelGeneration}><Square className="size-3.5" />{continuityReviewMode ? '검사 중단' : generationRepairIndex !== null ? '수정 중단' : '생성 중단'}</Button>
                   : !draft.content.trim() ? <Button size="sm" variant="secondary" onClick={() => void runGeneration()}><Sparkles className="size-4" />다시 생성</Button> : null}
               </div>
+              {continuityReviewMode && generationPhase === 'done' && !generationIssues.length ? (
+                <div className="checking-note" role="status">
+                  <CheckCircle2 className="size-4 shrink-0" aria-hidden="true" />
+                  <span>현재 원고에서 일관성 문제를 찾지 못했어요.</span>
+                </div>
+              ) : null}
               <ContinuityIssues issues={generationIssues} blocked={generationBlocked}
-                heading={generationBlocked ? '정합성 차단 이슈가 있어요' : '집필 중 확인할 점'}
+                heading={continuityReviewMode
+                  ? generationBlocked ? '차단되는 일관성 문제가 있어요' : '일관성 검사에서 확인할 점'
+                  : generationBlocked ? '정합성 차단 이슈가 있어요' : '집필 중 확인할 점'}
                 onRepair={(issue, index) => void runGeneration(issue, index)}
                 repairingIndex={generationRepairIndex} disabled={editorLocked || replacementOpen} />
               <FieldError>{generationError}</FieldError>

@@ -90,7 +90,7 @@ async function ndjson(
   body: unknown,
   onEvent: (event: StreamEvent, accumulated: string) => void,
   signal?: AbortSignal,
-  options: { allowReplacement?: boolean } = {},
+  options: { allowReplacement?: boolean; initialContent?: string } = {},
 ): Promise<StreamResult> {
   const response = await fetch(`/api${path}`, {
     method: 'POST',
@@ -113,13 +113,13 @@ async function ndjson(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  let content = '';
+  let content = options.initialContent ?? '';
   let runId: string | undefined;
   let issues: StreamResult['issues'] = [];
   let blocked = false;
   let baseRevision: number | undefined;
   let completed = false;
-  let preservingDraft = false;
+  let preservingDraft = options.initialContent !== undefined;
 
   const consume = (line: string) => {
     if (!line.trim() || completed) return;
@@ -144,7 +144,7 @@ async function ndjson(
         throw new ApiError('AI가 빈 원고를 반환했습니다. 생성된 원고를 확인하고 다시 시도해 주세요.', 502);
       }
       if (!options.allowReplacement && event.content !== content) {
-        throw new ApiError('완료 응답의 본문이 생성된 초안과 달라 반영하지 않았습니다. 원래 초안을 확인해 주세요.', 502);
+        throw new ApiError('완료 응답의 본문이 기준 원고와 달라 반영하지 않았습니다. 원고를 확인해 주세요.', 502);
       }
       content = event.content;
       issues = event.issues;
@@ -361,6 +361,19 @@ export const api = {
       onEvent: (event: StreamEvent, content: string) => void,
       signal?: AbortSignal,
     ) => ndjson(`/projects/${projectId}/episodes/generate`, input, onEvent, signal),
+    reviewContinuity: (
+      projectId: string,
+      episodeId: string,
+      input: { expectedRevision: number; content: string },
+      onEvent: (event: StreamEvent, content: string) => void,
+      signal?: AbortSignal,
+    ) => ndjson(
+      `/projects/${projectId}/episodes/${episodeId}/continuity-review`,
+      { expectedRevision: input.expectedRevision },
+      onEvent,
+      signal,
+      { initialContent: input.content },
+    ),
     repair: (
       projectId: string,
       input: { title: string; direction: string; content: string; issue: ContinuityIssue; episodeId?: string; expectedRevision?: number },

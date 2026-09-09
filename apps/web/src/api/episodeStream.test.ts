@@ -35,7 +35,7 @@ describe('episode stream terminal validation', () => {
       : operation === 'continuation'
         ? api.episodes.continue('story', 'episode', { expectedRevision: 1, cursorOffset: 0 }, onEvent)
         : api.comparisons.generate({ brief: '브리프' }, onEvent);
-    await expect(pending).rejects.toThrow('완료 응답의 본문이 생성된 초안과 달라');
+    await expect(pending).rejects.toThrow('완료 응답의 본문이 기준 원고와 달라');
     expect(snapshots).toEqual(['원래 초안', '원래 초안', '원래 초안', '원래 초안']);
   });
 
@@ -69,6 +69,24 @@ describe('episode stream terminal validation', () => {
       : api.episodes.repairContinuation('story', 'episode', { expectedRevision: 1, cursorOffset: 0, content: '원래 초안', issue }, onEvent));
     expect(result.content).toBe('\n  수정 완료  \n');
     expect(snapshots).toEqual(['', '', '', '\n  수정 완료  \n']);
+  });
+
+  it('rejects a continuity review whose terminal manuscript differs from the saved revision', async () => {
+    const content = '\n  저장된 원고.  \n';
+    streamResponse([
+      { type: 'stage', stage: 'MEMORY' },
+      { type: 'delta', text: '검사 중 끼어든 원고.' },
+      { type: 'stage', stage: 'CHECKING' },
+      { type: 'done', content: '서버가 바꾼 원고.', issues: [], blocked: false, baseRevision: 4 },
+    ]);
+    const snapshots: string[] = [];
+
+    await expect(api.episodes.reviewContinuity(
+      'story', 'episode', { expectedRevision: 4, content },
+      (_event, accumulated) => snapshots.push(accumulated),
+    )).rejects.toThrow('완료 응답의 본문이 기준 원고와 달라');
+
+    expect(snapshots).toEqual([content, content, content]);
   });
 
   it.each(['STYLE', 'ARC', 'CHARACTER', 'FORESHADOWING'])('rejects an out-of-scope %s issue without changing the readable draft', async (category) => {

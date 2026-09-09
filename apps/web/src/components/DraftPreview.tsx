@@ -3,12 +3,12 @@ import { AlertTriangle, CheckCircle2, LoaderCircle } from 'lucide-react';
 import { AI_PHASE_LABELS } from '../lib';
 import type { AiPhase } from '../types';
 
-export function DraftGenerationStatus({ phase }: { phase: AiPhase }) {
+export function DraftGenerationStatus({ phase, label }: { phase: AiPhase; label?: string }) {
   const active = ['retrieving', 'writing', 'checking', 'repairing'].includes(phase);
   return (
     <div className="generation-status" role="status" aria-live="polite">
       {active ? <LoaderCircle className="size-4 animate-spin" /> : phase === 'done' ? <CheckCircle2 className="size-4" /> : <AlertTriangle className="size-4" />}
-      <span>{AI_PHASE_LABELS[phase]}</span>
+      <span>{label ?? AI_PHASE_LABELS[phase]}</span>
     </div>
   );
 }
